@@ -12,7 +12,8 @@ import (
 )
 
 type LeaseReader interface{Leases(context.Context)([]routeros.Lease,error)}
-type BindingExecutor interface{Execute(context.Context,routeros.Plan,string)error}\ntype AuditStore interface{SaveAudit(context.Context,domain.AuditEvent)error}
+type BindingExecutor interface{Execute(context.Context,routeros.Plan,string)error}
+type AuditStore interface{SaveAudit(context.Context,domain.AuditEvent)error}
 
 type bindingInput struct{
 	ID string `json:"id"`
