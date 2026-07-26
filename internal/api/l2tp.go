@@ -2,7 +2,8 @@ package api
 
 import (
 	"context"
-	"net/http"\n\t"strings"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/foxc888/foxos/internal/routeros"
