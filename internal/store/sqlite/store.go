@@ -8,7 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"\n\t"strings"
+	"time"
+	"strings"
 
 	"github.com/foxc888/foxos/internal/domain"
 	_ "modernc.org/sqlite"
@@ -27,7 +28,8 @@ func Open(path string) (*Store, error) {
 	if err != nil { return nil, err }
 	db.SetMaxOpenConns(1)
 	store := &Store{db: db}
-	if err := store.migrate(context.Background()); err != nil { _ = db.Close(); return nil, err }\n\tif path != \":memory:\" { _ = os.Chmod(path, 0o600) }
+	if err := store.migrate(context.Background()); err != nil { _ = db.Close(); return nil, err }
+	if path != ":memory:" { _ = os.Chmod(path, 0o600) }
 	return store, nil
 }
 
