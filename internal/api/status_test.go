@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"testing"\n\n\t"github.com/foxc888/foxos/internal/domain"
+	"testing"
+
+	"github.com/foxc888/foxos/internal/domain"
 
 	"github.com/foxc888/foxos/internal/routeros"
 )
