@@ -12,12 +12,12 @@ import (
 
 var ErrUnsafeOperation=errors.New("unsafe RouterOS operation")
 
-type OperationWriter interface{Apply(context.Context,Operation)error}
+type OperationWriter interface{Apply(context.Context,Operation)error}\ntype PlanVerifier interface{Verify(context.Context,Plan)error}
 
-type BindingExecutor struct{writer OperationWriter;signer *confirmation.Signer}
+type BindingExecutor struct{writer OperationWriter;signer *confirmation.Signer;verifier PlanVerifier}
 func NewBindingExecutor(writer OperationWriter,signer *confirmation.Signer)(*BindingExecutor,error){
 	if writer==nil||signer==nil{return nil,errors.New("writer and signer are required")}
-	return &BindingExecutor{writer:writer,signer:signer},nil
+	return &BindingExecutor{writer:writer,signer:signer},nil\n}\nfunc(e *BindingExecutor)WithVerifier(verifier PlanVerifier)*BindingExecutor{e.verifier=verifier;return e
 }
 func(e *BindingExecutor)Execute(ctx context.Context,plan Plan,token string)error{
 	if err:=e.signer.Verify(token,plan);err!=nil{return err}
