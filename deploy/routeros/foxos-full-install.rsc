@@ -1,7 +1,12 @@
 # FoxOS 全栈安装脚本（RouterOS x86_64）
 # 适配用户环境：bridge-lan / 10.0.0.0/24
 # 不修改 DNS、DHCP、NAT、默认路由、Mangle 或现有防火墙。
-# 请先在电脑执行 prepare-install.ps1，生成 foxos-full-install.local.rsc。
+# 只需修改下面四行。脚本不自动生成、不限制内容。
+
+:local foxosRouterPassword "在这里填写RouterOS服务账号密码"
+:local foxosMihomoSecret "在这里填写config.yaml中的Mihomo-secret"
+:local foxosApiToken "在这里填写FoxOS登录Token"
+:local foxosConfirmationKey "在这里填写FoxOS确认密钥"
 
 :local managementBridge "bridge-lan"
 :local routerAddress "10.0.0.1"
@@ -58,23 +63,23 @@
   /user/group set [find where name="foxos-rest"] policy=read,write,rest-api
 }
 :if ([:len [/user find where name="foxos-service"]] = 0) do={
-  /user add name=foxos-service group=foxos-rest address=10.0.0.4/32 password="__ROUTEROS_PASSWORD__" comment="foxos:service"
+  /user add name=foxos-service group=foxos-rest address=10.0.0.4/32 password=$foxosRouterPassword comment="foxos:service"
 } else={
   :if ([/user get [find where name="foxos-service"] comment] != "foxos:service") do={
     :error "同名用户 foxos-service 不是 FoxOS 创建，拒绝覆盖"
   }
-  /user set [find where name="foxos-service"] group=foxos-rest address=10.0.0.4/32 password="__ROUTEROS_PASSWORD__"
+  /user set [find where name="foxos-service"] group=foxos-rest address=10.0.0.4/32 password=$foxosRouterPassword
 }
 
 :put "FoxOS: 写入容器环境变量..."
 /container/envs remove [find where list="foxos-env"]
-/container/envs add list=foxos-env key=FOXOS_API_TOKEN value="__FOXOS_API_TOKEN__"
-/container/envs add list=foxos-env key=FOXOS_CONFIRMATION_KEY value="__FOXOS_CONFIRMATION_KEY__"
+/container/envs add list=foxos-env key=FOXOS_API_TOKEN value=$foxosApiToken
+/container/envs add list=foxos-env key=FOXOS_CONFIRMATION_KEY value=$foxosConfirmationKey
 /container/envs add list=foxos-env key=FOXOS_ROUTEROS_URL value="http://10.0.0.1"
 /container/envs add list=foxos-env key=FOXOS_ROUTEROS_USERNAME value="foxos-service"
-/container/envs add list=foxos-env key=FOXOS_ROUTEROS_PASSWORD value="__ROUTEROS_PASSWORD__"
+/container/envs add list=foxos-env key=FOXOS_ROUTEROS_PASSWORD value=$foxosRouterPassword
 /container/envs add list=foxos-env key=FOXOS_MIHOMO_URL value="http://10.0.0.2:9090"
-/container/envs add list=foxos-env key=FOXOS_MIHOMO_SECRET value="__MIHOMO_SECRET__"
+/container/envs add list=foxos-env key=FOXOS_MIHOMO_SECRET value=$foxosMihomoSecret
 /container/envs add list=foxos-env key=FOXOS_MIHOMO_LOCAL_CONFIG value="/data/mihomo/config.yaml"
 /container/envs add list=foxos-env key=FOXOS_MIHOMO_RUNTIME_CONFIG value="/root/.config/mihomo/config.yaml"
 /container/envs add list=foxos-env key=FOXOS_MIHOMO_BACKUP_DIR value="/backups/mihomo"

@@ -97,14 +97,15 @@ Core CI 的 `foxos-full-amd64-<commit>` 包含：
 - `foxos-amd64.tar`
 - `mihomo_amd64.tar`
 - `mosdns-amd64.tar`
-- `prepare-install.ps1`
-- `full-install.template.rsc`
+- `SETUP.cmd`
+- `fetch-configs.ps1`
+- `foxos-full-install.rsc`
 - `foxos-start-all.rsc`
 - `QUICK-INSTALL.md`
 
-为避免把可能含节点凭据或私网规则的配置再次发布到 Actions Artifact，`prepare-install.ps1` 在用户电脑上从自己的仓库复制 `mihomo/config` 和 `mosdns-config`，生成本地安装目录。
+为避免把可能含节点凭据或私网规则的配置再次发布到 Actions Artifact，双击 `SETUP.cmd` 后只在用户电脑上取得 `mihomo/config` 和 `mosdns-config`。它不会生成或修改密钥。
 
-先在电脑运行 `prepare-install.ps1`，再按快速安装文档上传和导入。安装器固定使用：
+在自动打开的 `foxos-full-install.rsc` 顶部手工填写 RouterOS 服务密码、Mihomo Secret、FoxOS Token 和确认密钥，再按快速安装文档上传和导入。安装器固定使用：
 
 - `bridge-lan`
 - Mihomo `10.0.0.2/24`

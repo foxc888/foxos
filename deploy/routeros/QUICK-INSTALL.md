@@ -28,30 +28,30 @@
    /system/backup/save name=before-foxos
    ```
 
-## 第 1 步：在 Windows 电脑生成本机密钥
+## 第 1 步：解压并填写自己的密钥
 
-解压 GitHub Actions 下载的 ZIP。进入解压后的 `foxos-full-amd64-*` 目录，在 PowerShell 中执行：
+只解压从 GitHub Actions 下载的外层 ZIP。三个 `.tar` 是 RouterOS 容器镜像，不能继续解压。
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\prepare-install.ps1
+进入解压目录，双击：
+
+```text
+SETUP.cmd
 ```
 
-脚本会：
+它只负责从你自己的仓库取得 `mihomo-config` 和 `mosdns-config`，随后用记事本打开 `foxos-full-install.rsc`。它不会生成、修改或保存任何密钥。
 
-- 从你自己的公开仓库 `foxc888/foxos` 的 `agent/foxos-core` 分支下载 Mihomo、MosDNS 配置到本机安装目录；配置不会被重新发布到 GitHub Actions Artifact；
-- 自动生成 FoxOS API Token、确认密钥、RouterOS 专用服务密码和 Mihomo Controller 密钥；
-- 生成 `foxos-full-install.local.rsc`；
-- 只在本地修改 `mihomo-config/config.yaml` 的 `secret`，不会修改任何 DNS 字段；
-- 生成仅保存在电脑上的 `FOXOS-LOGIN.txt`。
+在文件最上方填写四项：
 
-不要把 `FOXOS-LOGIN.txt` 或 `foxos-full-install.local.rsc` 提交到 GitHub。
-
-如果电脑无法访问 GitHub，但已经有本仓库源码，可指定本地源码目录：
-
-```powershell
-.\prepare-install.ps1 -ConfigSourceDirectory "D:\foxos-agent-foxos-core"
+```routeros
+:local foxosRouterPassword "你自己填写"
+:local foxosMihomoSecret "与 mihomo-config/config.yaml 的 secret 完全一致"
+:local foxosApiToken "你自己填写"
+:local foxosConfirmationKey "你自己填写"
 ```
+
+脚本本身不自动限制内容。为了让当前 FoxOS 服务正常启动，`foxosApiToken` 和 `foxosConfirmationKey` 各填写至少 32 个字符；可以使用你自己容易保存的任意内容。RouterOS 密码和 Mihomo Secret 由你自行决定。
+
+保存并关闭记事本。不要把填写后的 `foxos-full-install.rsc` 再提交到 GitHub。
 
 ## 第 2 步：上传到 RouterOS
 
@@ -63,7 +63,7 @@ mihomo_amd64.tar
 mosdns-amd64.tar
 mihomo-config/
 mosdns-config/
-foxos-full-install.local.rsc
+foxos-full-install.rsc
 foxos-start-all.rsc
 ```
 
@@ -74,7 +74,7 @@ foxos-start-all.rsc
 在 RouterOS Terminal 执行：
 
 ```routeros
-/import file-name=foxos-full-install.local.rsc
+/import file-name=foxos-full-install.rsc
 ```
 
 该脚本会进行预检，然后创建：
@@ -113,7 +113,7 @@ foxos-start-all.rsc
 http://10.0.0.4:8090
 ```
 
-把电脑上 `FOXOS-LOGIN.txt` 里的 API Token 填入 FoxOS 登录/设置页。
+把你在 `foxos-full-install.rsc` 中填写的 `foxosApiToken` 输入 FoxOS 登录/设置页。
 
 ## 为什么是两次 import
 
@@ -123,12 +123,12 @@ RouterOS 在 `/container/add file=...` 后会异步解压镜像，而且不会�
 
 确认三项服务正常后：
 
-1. 把 `FOXOS-LOGIN.txt` 的 Token 存到密码管理器并删除该文件；
-2. 在 RouterOS Files 中删除 `foxos-full-install.local.rsc`；
+1. 保存好你填写的 FoxOS Token；
+2. 在 RouterOS Files 中删除含明文密钥的 `foxos-full-install.rsc`；
 3. 镜像 tar 可在容器正常运行后删除以释放空间；不要删除 `mihomo-config`、`mosdns-config`、`foxos-data` 或 `foxos-backups`。
 
 ```routeros
-/file/remove [find where name="foxos-full-install.local.rsc"]
+/file/remove [find where name="foxos-full-install.rsc"]
 /file/remove [find where name="foxos-amd64.tar"]
 /file/remove [find where name="mihomo_amd64.tar"]
 /file/remove [find where name="mosdns-amd64.tar"]
