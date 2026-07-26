@@ -28,17 +28,12 @@
    /system/backup/save name=before-foxos
    ```
 
-## 第 1 步：解压并准备配置
+## 第 1 步：解压安装包
 
 只解压从 GitHub Actions 下载的外层 ZIP。三个 `.tar` 是 RouterOS 容器镜像，不能继续解压。
 
-进入解压目录，双击：
-
-```text
-SETUP.cmd
-```
-
-它只负责从你自己的仓库取得 `mihomo-config` 和 `mosdns-config`。不需要打开文件或填写密钥。
+解压后，安装包已经包含 `mihomo-config` 和 `mosdns-config` 两个完整目录。
+不需要运行 PowerShell，不需要再次下载配置，也不需要打开文件填写密钥。
 
 RouterOS 安装器会在每次首次安装时自动随机生成：
 
@@ -68,6 +63,14 @@ foxos-start-all.rsc
 ```
 
 请保留目录结构，不要只上传目录中的单个文件。镜像和配置合计较大，等待 WinBox 上传完成后再继续。
+
+上传完成后先执行：
+
+```routeros
+/file print where name~"mihomo-config/config.yaml|mosdns-config/config_custom.yaml|mihomo_amd64.tar|mosdns-amd64.tar|foxos-amd64.tar"
+```
+
+必须能看到五项结果，缺少任何一项都不要开始导入。
 
 ## 第 3 步：导入全栈
 

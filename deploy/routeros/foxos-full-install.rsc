@@ -36,10 +36,16 @@
   :error "空间不足；请释放空间或把安装包与 root-dir 调整到足够大的磁盘"
 }
 
-:foreach requiredFile in={"mihomo_amd64.tar";"mosdns-amd64.tar";"foxos-amd64.tar";"mihomo-config";"mosdns-config"} do={
+:foreach requiredFile in={"mihomo_amd64.tar";"mosdns-amd64.tar";"foxos-amd64.tar"} do={
   :if ([:len [/file find where name=$requiredFile]] = 0) do={
-    :error ("缺少安装文件或目录: " . $requiredFile)
+    :error ("缺少容器镜像: " . $requiredFile)
   }
+}
+:if ([:len [/file find where name="mihomo-config/config.yaml"]] = 0) do={
+  :error "缺少 mihomo-config/config.yaml；请上传安装包中的完整 mihomo-config 文件夹"
+}
+:if ([:len [/file find where name="mosdns-config/config_custom.yaml"]] = 0) do={
+  :error "缺少 mosdns-config/config_custom.yaml；请上传安装包中的完整 mosdns-config 文件夹"
 }
 
 :put "FoxOS: 更新 Mihomo Controller Secret..."

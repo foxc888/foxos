@@ -60,17 +60,21 @@ jobs:
           cp foxos-amd64.tar foxos-full-amd64/
           cp mihomo/install/mihomo_amd64.tar foxos-full-amd64/
           cp mihomo/install/mosdns-v0.6.4-2ac30e8-amd64.tar foxos-full-amd64/mosdns-amd64.tar
+          cp -a mihomo/config foxos-full-amd64/mihomo-config
+          cp -a mosdns-config foxos-full-amd64/mosdns-config
+          sed -i -E 's/^secret:.*/secret: ""/' foxos-full-amd64/mihomo-config/config.yaml
           cp deploy/routeros/foxos-full-install.rsc foxos-full-amd64/
           cp deploy/routeros/foxos-start-all.rsc foxos-full-amd64/
-          cp deploy/routeros/fetch-configs.ps1 foxos-full-amd64/
-          cp deploy/routeros/SETUP.cmd foxos-full-amd64/
           cp deploy/routeros/QUICK-INSTALL.md foxos-full-amd64/
           find foxos-full-amd64 -name .DS_Store -delete
           test -s foxos-full-amd64/foxos-amd64.tar
           test -s foxos-full-amd64/mihomo_amd64.tar
           test -s foxos-full-amd64/mosdns-amd64.tar
+          test -s foxos-full-amd64/mihomo-config/config.yaml
+          test -s foxos-full-amd64/mosdns-config/config_custom.yaml
+          grep -Fxq 'secret: ""' foxos-full-amd64/mihomo-config/config.yaml
           test -f foxos-full-amd64/foxos-full-install.rsc
-          test -f foxos-full-amd64/SETUP.cmd
+          test -f foxos-full-amd64/foxos-start-all.rsc
       - uses: actions/upload-artifact@v4
         with:
           name: foxos-full-amd64-${{ github.sha }}

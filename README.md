@@ -165,7 +165,7 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 | MosDNS | `10.0.0.3:53` |
 | FoxOS | `10.0.0.4:8090` |
 
-管理桥固定为 `bridge-lan`。因此应下载 `foxos-full-amd64-<commit>`，不要使用 arm64 镜像。全量包包含 FoxOS、Mihomo、MosDNS 三个镜像、自动随机凭据的 RouterOS 安装脚本和配置下载工具。两套配置只下载到你的电脑，不会被二次发布到 Actions Artifact。
+管理桥固定为 `bridge-lan`。因此应下载 `foxos-full-amd64-<commit>`，不要使用 arm64 镜像。全量包已经包含 FoxOS、Mihomo、MosDNS 三个镜像、两套完整配置目录和自动随机凭据的 RouterOS 安装脚本。解压后可以直接上传，不需要运行 PowerShell 或再次下载配置。
 
 ### 推荐：全栈快速安装
 
@@ -173,8 +173,8 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 
 1. 下载并解压最新绿色 Core CI 的 `foxos-full-amd64-<commit>`。
 2. 确认 RouterOS 已安装同版本 x86 `container` package、`container=yes`，并有至少 512 MiB 可用空间。
-3. 双击 `SETUP.cmd` 准备 Mihomo/MosDNS 配置，不需要填写密钥。
-4. 用 WinBox 上传文档列出的七项文件/目录。
+3. 用 WinBox 上传文档列出的七项文件/目录。
+4. 用 `/file print` 确认三个镜像和两个配置入口文件都存在。
 5. 执行 `/import file-name=foxos-full-install.rsc`。
 6. 等三个容器全部 `status=stopped` 后执行 `/import file-name=foxos-start-all.rsc`。
 7. 启动脚本会在终端打印四个随机凭据；保存后打开 `http://10.0.0.4:8090`，使用打印出的 FoxOS Token。
