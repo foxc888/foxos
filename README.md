@@ -68,7 +68,7 @@ Mihomo 配置管理借鉴 [qianfree/ClashManager](https://github.com/qianfree/Cl
 
 - 管理员首次初始化和浏览器会话
 - 前端与真实 API 全面接线
-- 持久化操作审计与失败补偿记录
+- 失败补偿与恢复记录
 - 设备出口路由执行器
 - RouterOS 原生 L2TP 增删查改
 - 链式代理可视化编排和应用
@@ -117,7 +117,7 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 - `GET/PUT/DELETE /api/v1/device-policies/{id}`
 - `GET /api/v1/routeros/overview`
 - `GET /api/v1/mihomo/overview`
-- `POST /api/v1/routeros/plans/device-binding`\n- `POST /api/v1/routeros/plans/device-binding/execute`
+- `POST /api/v1/routeros/plans/device-binding`\n- `POST /api/v1/routeros/plans/device-binding/execute`\n- `GET /api/v1/audit-events?limit=100`
 
 节点查询不会返回密码、UUID 或完整凭据，只返回 `hasCredential`。
 
@@ -210,7 +210,7 @@ docs/                       中文设计、安装和使用说明
 - [RouterOS 连接](docs/routeros-setup.md)
 - [节点管理](docs/node-management.md)
 - [设备管理](docs/device-management.md)
-- [备份与恢复](docs/backup-restore.md)\n- [操作确认与执行安全](docs/operation-confirmation.md)
+- [备份与恢复](docs/backup-restore.md)\n- [操作确认与执行安全](docs/operation-confirmation.md)\n- [操作审计](docs/logs.md)
 - [ClashManager 来源说明](docs/clashmanager-origin.md)
 
 ## DNS 边界
