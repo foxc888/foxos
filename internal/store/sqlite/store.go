@@ -21,13 +21,13 @@ type Store struct{ db *sql.DB }
 func Open(path string) (*Store, error) {
 	if path == "" { return nil, errors.New("database path is required") }
 	if path != ":memory:" {
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil { return nil, err }
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { return nil, err }
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil { return nil, err }
 	db.SetMaxOpenConns(1)
 	store := &Store{db: db}
-	if err := store.migrate(context.Background()); err != nil { _ = db.Close(); return nil, err }
+	if err := store.migrate(context.Background()); err != nil { _ = db.Close(); return nil, err }\n\tif path != \":memory:\" { _ = os.Chmod(path, 0o600) }
 	return store, nil
 }
 
