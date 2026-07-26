@@ -30,7 +30,7 @@ Mihomo 配置管理借鉴 [qianfree/ClashManager](https://github.com/qianfree/Cl
 - SQLite 自动建表
 - 数据目录与数据库权限收紧
 - Bearer Token API 认证
-- GitHub Actions 格式与测试检查
+- GitHub Actions 后端测试、前端类型检查与生产构建
 
 ### Mihomo
 
@@ -59,6 +59,20 @@ Mihomo 配置管理借鉴 [qianfree/ClashManager](https://github.com/qianfree/Cl
 - L2TP 密码字段不进入模型或 API
 - `foxos:l2tp:` 所有权识别
 
+### Web UI 实时接线
+
+- 顶部明确区分“连接中 / 实时数据 / 演示数据”
+- 浏览器 API Token 只保存在当前浏览器，不写入源码
+- 总览读取 RouterOS 与 Mihomo 状态
+- 代理节点读取 SQLite 节点并合并 RouterOS 原生 L2TP
+- 普通节点删除调用真实后端；L2TP 保持只读
+- 设备页读取 RouterOS DHCP 与 ARP 合并清单
+- 日志页读取持久化审计
+- 本地 Vite 只代理到固定的 `127.0.0.1:8090`
+- TypeScript 类型检查和 Vite 生产构建已在本地通过
+
+详见 [Web UI 与 API 接线](docs/web-api-integration.md)。
+
 ### 设备策略
 
 - SQLite 持久化
@@ -76,7 +90,7 @@ Mihomo 配置管理借鉴 [qianfree/ClashManager](https://github.com/qianfree/Cl
 ## 尚未完成
 
 - 管理员首次初始化和浏览器会话
-- 前端与真实 API 全面接线
+- 前端新增/编辑节点、设备确认执行、链式代理等写入操作全面接线
 - 失败补偿与恢复记录
 - 设备出口路由执行器
 - RouterOS 原生 L2TP 新增、编辑、删除和回读验证
@@ -185,6 +199,8 @@ FOXOS_API_TOKEN=01234567890123456789012345678901 \
 ```bash
 cd web
 npm install
+npm run typecheck
+npm run build
 npm run dev
 ```
 
@@ -242,6 +258,7 @@ docs/                       中文设计、安装和使用说明
 - [操作确认与执行安全](docs/operation-confirmation.md)
 - [操作审计](docs/logs.md)
 - [ClashManager 来源说明](docs/clashmanager-origin.md)
+- [Web UI 与 API 接线](docs/web-api-integration.md)
 
 ## DNS 边界
 
