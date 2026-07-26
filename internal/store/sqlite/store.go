@@ -65,6 +65,16 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS audit_events (
+			id TEXT PRIMARY KEY,
+			action TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			outcome TEXT NOT NULL,
+			details_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS audit_events_created_at ON audit_events(created_at DESC);
 		INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, CURRENT_TIMESTAMP);
 	`)
 	return err
@@ -200,3 +210,24 @@ func (s *Store) DeleteDevicePolicy(ctx context.Context,id string)error{
 	result,err:=s.db.ExecContext(ctx,`DELETE FROM device_policies WHERE id=?`,id);if err!=nil{return err};affected,err:=result.RowsAffected();if err!=nil{return err};if affected==0{return ErrNotFound};return nil
 }
 func normalizeStoreMAC(value string)string{return strings.ToUpper(strings.TrimSpace(value))}
+
+
+func (s *Store) SaveAudit(ctx context.Context, event domain.AuditEvent) error {
+	if event.ID==""||event.Action==""||event.TargetID=="" { return errors.New("invalid audit event") }
+	details,err:=json.Marshal(event.Details);if err!=nil{return err}
+	now:=time.Now().UTC()
+	if event.CreatedAt.IsZero(){event.CreatedAt=now};event.UpdatedAt=now
+	_,err=s.db.ExecContext(ctx,`
+		INSERT INTO audit_events(id,action,target_id,outcome,details_json,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET outcome=excluded.outcome,details_json=excluded.details_json,updated_at=excluded.updated_at
+	`,event.ID,event.Action,event.TargetID,event.Outcome,string(details),event.CreatedAt.Format(time.RFC3339Nano),event.UpdatedAt.Format(time.RFC3339Nano))
+	return err
+}
+func (s *Store) AuditEvents(ctx context.Context,limit int)([]domain.AuditEvent,error){
+	if limit<1||limit>500{limit=100}
+	rows,err:=s.db.QueryContext(ctx,`SELECT id,action,target_id,outcome,details_json,created_at,updated_at FROM audit_events ORDER BY created_at DESC LIMIT ?`,limit);if err!=nil{return nil,err};defer rows.Close()
+	events:=make([]domain.AuditEvent,0)
+	for rows.Next(){var event domain.AuditEvent;var details,created,updated string;if err:=rows.Scan(&event.ID,&event.Action,&event.TargetID,&event.Outcome,&details,&created,&updated);err!=nil{return nil,err};_ = json.Unmarshal([]byte(details),&event.Details);event.CreatedAt,_=time.Parse(time.RFC3339Nano,created);event.UpdatedAt,_=time.Parse(time.RFC3339Nano,updated);events=append(events,event)}
+	return events,rows.Err()
+}
