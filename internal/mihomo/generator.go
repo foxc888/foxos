@@ -87,21 +87,45 @@ func renderNode(node domain.Node) map[string]any {
 		out[key] = value
 	}
 	out["name"], out["type"], out["server"], out["port"] = node.Name, node.Type, node.Server, node.Port
-	if node.Username != "" { out["username"] = node.Username }
-	if node.Password != "" {
-		if node.Type == "hysteria2" { out["password"] = node.Password } else { out["password"] = node.Password }
+	if node.Username != "" {
+		out["username"] = node.Username
 	}
-	if node.UUID != "" { out["uuid"] = node.UUID }
-	if node.Cipher != "" { out["cipher"] = node.Cipher }
-	if node.Network != "" { out["network"] = node.Network }
-	if node.SNI != "" { out["servername"] = node.SNI }
-	if node.UDP { out["udp"] = true }
-	if node.TLS { out["tls"] = true }
-	if node.SkipCertVerify { out["skip-cert-verify"] = true }
+	if node.Password != "" {
+		if node.Type == "hysteria2" {
+			out["password"] = node.Password
+		} else {
+			out["password"] = node.Password
+		}
+	}
+	if node.UUID != "" {
+		out["uuid"] = node.UUID
+	}
+	if node.Cipher != "" {
+		out["cipher"] = node.Cipher
+	}
+	if node.Network != "" {
+		out["network"] = node.Network
+	}
+	if node.SNI != "" {
+		out["servername"] = node.SNI
+	}
+	if node.UDP {
+		out["udp"] = true
+	}
+	if node.TLS {
+		out["tls"] = true
+	}
+	if node.SkipCertVerify {
+		out["skip-cert-verify"] = true
+	}
 	if node.Path != "" || node.Host != "" {
 		opts := map[string]any{}
-		if node.Path != "" { opts["path"] = node.Path }
-		if node.Host != "" { opts["headers"] = map[string]any{"Host": node.Host} }
+		if node.Path != "" {
+			opts["path"] = node.Path
+		}
+		if node.Host != "" {
+			opts["headers"] = map[string]any{"Host": node.Host}
+		}
 		out["ws-opts"] = opts
 	}
 	return out
@@ -111,18 +135,30 @@ func renderGroup(group domain.Group, nodes, groups map[string]string) (map[strin
 	members := make([]string, 0, len(group.NodeIDs)+len(group.GroupIDs))
 	for _, id := range group.NodeIDs {
 		name, ok := nodes[id]
-		if !ok { return nil, fmt.Errorf("%w: unknown node %q", ErrInvalidConfig, id) }
+		if !ok {
+			return nil, fmt.Errorf("%w: unknown node %q", ErrInvalidConfig, id)
+		}
 		members = append(members, name)
 	}
 	for _, id := range group.GroupIDs {
 		name, ok := groups[id]
-		if !ok || id == group.ID { return nil, fmt.Errorf("%w: invalid group reference %q", ErrInvalidConfig, id) }
+		if !ok || id == group.ID {
+			return nil, fmt.Errorf("%w: invalid group reference %q", ErrInvalidConfig, id)
+		}
 		members = append(members, name)
 	}
 	out := map[string]any{"name": group.Name, "type": group.Type, "proxies": members}
-	if group.URL != "" { out["url"] = group.URL }
-	if group.Interval > 0 { out["interval"] = group.Interval }
-	if group.Tolerance > 0 { out["tolerance"] = group.Tolerance }
-	if group.Strategy != "" { out["strategy"] = group.Strategy }
+	if group.URL != "" {
+		out["url"] = group.URL
+	}
+	if group.Interval > 0 {
+		out["interval"] = group.Interval
+	}
+	if group.Tolerance > 0 {
+		out["tolerance"] = group.Tolerance
+	}
+	if group.Strategy != "" {
+		out["strategy"] = group.Strategy
+	}
 	return out, nil
 }
