@@ -31,11 +31,11 @@ func main(){
 	app,err:=api.New(store,runtimeConfig.APIToken);if err!=nil{log.Fatal(err)}
 
 	var ros api.RouterOSReader
-	var leases api.LeaseReader
+	var leases api.LeaseReader\n\tvar l2tp api.L2TPReader
 	var bindingExecutor api.BindingExecutor
 	if runtimeConfig.RouterOS.URL!=""{
 		client,err:=routeros.NewClient(runtimeConfig.RouterOS.URL,runtimeConfig.RouterOS.Username,runtimeConfig.RouterOS.Password);if err!=nil{log.Fatal(err)}
-		ros=client;leases=client
+		ros=client;leases=client;l2tp=client
 		executor,err:=routeros.NewBindingExecutor(client,signer);if err!=nil{log.Fatal(err)}
 		bindingExecutor=executor.WithVerifier(client)
 	}
@@ -50,7 +50,7 @@ func main(){
 	mux.HandleFunc("GET /api/v1/health/ready",func(w http.ResponseWriter,_ *http.Request){writeJSON(w,200,health{Status:"ready",Version:version,Time:time.Now().UTC().Format(time.RFC3339)})})
 	app.Register(mux)
 	app.RegisterDevicePolicies(mux,store)\n\tapp.RegisterAudit(mux,store)
-	app.RegisterStatus(mux,ros,clash)
+	app.RegisterStatus(mux,ros,clash)\n\tapp.RegisterL2TP(mux,l2tp)
 	app.RegisterBindingPlan(mux,leases,signer,bindingExecutor,confirmation.NewReplayGuard(),store)
 	if info,err:=os.Stat(*staticDir);err==nil&&info.IsDir(){mux.Handle("/",http.FileServer(http.Dir(*staticDir)))}
 
