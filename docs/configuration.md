@@ -6,7 +6,7 @@ FoxOS 使用容器环境变量接收连接信息。真实密码和 Token 不写�
 
 | 变量 | 说明 |
 |---|---|
-| `FOXOS_API_TOKEN` | FoxOS API 令牌，至少 32 个字符 |
+| `FOXOS_API_TOKEN` | FoxOS API 令牌，至少 32 个字符 |\n| `FOXOS_CONFIRMATION_KEY` | 操作计划签名密钥，至少 32 个字符且应与 API Token 不同 |
 
 ## RouterOS
 
@@ -42,3 +42,4 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 ```
 
 响应不包含 RouterOS 密码、Mihomo Secret 或节点凭据。
+\n## 确认密钥\n\n`FOXOS_CONFIRMATION_KEY` 用于签署 RouterOS 写入计划。不要与 API Token、RouterOS 密码或 Mihomo Secret 共用。更换密钥后，旧的未执行确认令牌会立即失效。\n
