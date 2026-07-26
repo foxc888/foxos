@@ -200,7 +200,7 @@ npm run dev
 - 覆盖计划篡改、无所有权、缺少验证器和回读失败测试
 - L2TP API 模型不包含密码字段，并有防泄漏测试
 
-GitHub Actions 会继续运行 `gofmt -l cmd internal` 和 `go test ./...`。在 Actions 全部通过、浏览器端到端测试完成、并经过真实 RouterOS 测试环境验证以前，本分支仍属于开发版本，不建议直接接管生产网络。
+GitHub Actions 会运行 `go mod tidy`、`go mod verify`、`gofmt -l cmd internal` 和 `go test ./...`。FoxOS Core CI 第 141 次运行已经通过全部格式和单元测试。浏览器端到端测试与真实 RouterOS 测试环境验证尚未完成，因此本分支仍属于开发版本，不建议直接接管生产网络。
 
 ## 项目结构
 
