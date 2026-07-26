@@ -16,10 +16,12 @@
 ## 安装前
 
 1. 用 `/system/resource/print` 确认 `architecture-name=x86_64`。
-2. 用 `/system/device-mode/print` 确认 `container: yes`。
-3. 如果刚执行过 `/system/device-mode/update container=yes`，请按 RouterOS 提示完成物理确认；x86 通常需要彻底断电后再开机。
-4. 执行 `/container/print`，确认目前没有旧的 FoxOS、Mihomo、MosDNS 容器。
-5. 备份 RouterOS：
+2. 用 `/system/package/print where name="container"` 确认已安装与 RouterOS **完全相同版本**的 `container` package。如果没有输出，请先从 MikroTik 对应版本的 Extra packages 中取得 x86 `container-*.npk`，上传到 RouterOS 并重启。
+3. 用 `/system/device-mode/print` 确认 `container: yes`。
+4. 如果刚执行过 `/system/device-mode/update container=yes`，请按 RouterOS 提示完成物理确认；x86 通常需要彻底断电后再开机。
+5. 执行 `/container/print`，确认命令有效，并且目前没有旧的 FoxOS、Mihomo、MosDNS 容器。
+6. 用 `/system/resource/print` 确认可用磁盘空间至少 `512 MiB`。安装器会再次检查。
+7. 备份 RouterOS：
 
    ```routeros
    /export hide-sensitive file=before-foxos
@@ -143,6 +145,15 @@ RouterOS 在 `/container/add file=...` 后会异步解压镜像，而且不会�
 ```
 
 按照终端提示确认；x86 通常需要彻底断电再开机，然后重新检查 `/system/device-mode/print`。
+
+### `bad command name container`
+
+当前 RouterOS 没有安装 `container` package，或 package 与 RouterOS 主系统版本不一致。安装匹配版本的 x86 `container-*.npk` 并重启，再执行：
+
+```routeros
+/system/package/print where name="container"
+/container/print
+```
 
 ### 提示缺少文件或目录
 

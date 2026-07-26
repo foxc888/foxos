@@ -172,11 +172,12 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 完整操作见 [`deploy/routeros/QUICK-INSTALL.md`](deploy/routeros/QUICK-INSTALL.md)。最短流程是：
 
 1. 下载并解压最新绿色 Core CI 的 `foxos-full-amd64-<commit>`。
-2. 在 Windows PowerShell 执行 `.\prepare-install.ps1`。
-3. 用 WinBox 上传文档列出的七项文件/目录。
-4. 执行 `/import file-name=foxos-full-install.local.rsc`。
-5. 等三个容器全部 `status=stopped` 后执行 `/import file-name=foxos-start-all.rsc`。
-6. 打开 `http://10.0.0.4:8090`，使用电脑上 `FOXOS-LOGIN.txt` 中的 Token。
+2. 确认 RouterOS 已安装同版本 x86 `container` package、`container=yes`，并有至少 512 MiB 可用空间。
+3. 在 Windows PowerShell 执行 `.\prepare-install.ps1`。
+4. 用 WinBox 上传文档列出的七项文件/目录。
+5. 执行 `/import file-name=foxos-full-install.local.rsc`。
+6. 等三个容器全部 `status=stopped` 后执行 `/import file-name=foxos-start-all.rsc`。
+7. 打开 `http://10.0.0.4:8090`，使用电脑上 `FOXOS-LOGIN.txt` 中的 Token。
 
 必须分成两次 import：RouterOS 会异步解压 `/container/add file=...` 导入的镜像，而且首次不会自动启动；固定等待时间不能保证三张镜像都已完成。
 
