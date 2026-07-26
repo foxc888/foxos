@@ -83,6 +83,7 @@ func main() {
 		writeJSON(w, 200, health{Status: "ready", Version: version, Time: time.Now().UTC().Format(time.RFC3339)})
 	})
 	app.Register(mux)
+	app.RegisterGroups(mux, store)
 	app.RegisterDevicePolicies(mux, store)
 	app.RegisterAudit(mux, store)
 	app.RegisterStatus(mux, ros, clash)

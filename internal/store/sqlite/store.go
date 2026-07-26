@@ -97,18 +97,44 @@ func (s *Store) SaveNode(ctx context.Context, node domain.Node) error {
 	if err := node.Validate(); err != nil {
 		return err
 	}
-	body, err := json.Marshal(node)
+	return s.saveNodes(ctx, []domain.Node{node})
+}
+
+func (s *Store) SaveNodes(ctx context.Context, nodes []domain.Node) error {
+	if len(nodes) == 0 {
+		return errors.New("at least one node is required")
+	}
+	for _, node := range nodes {
+		if err := node.Validate(); err != nil {
+			return err
+		}
+	}
+	return s.saveNodes(ctx, nodes)
+}
+
+func (s *Store) saveNodes(ctx context.Context, nodes []domain.Node) error {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.db.ExecContext(ctx, `
+	for _, node := range nodes {
+		body, err := json.Marshal(node)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `
 		INSERT INTO nodes(id,name,type,payload_json,created_at,updated_at)
 		VALUES(?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name,type=excluded.type,payload_json=excluded.payload_json,updated_at=excluded.updated_at
 	`, node.ID, node.Name, node.Type, string(body), now, now)
-	return err
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Node(ctx context.Context, id string) (domain.Node, error) {

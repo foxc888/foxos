@@ -70,6 +70,19 @@ export type LiveSnapshot = {
   loadedAt: string;
 };
 
+export type NodeProbe = {
+  reachable: boolean;
+  latencyMs: number;
+  error?: string;
+};
+
+export type DeviceBindingPlan = {
+  policyId: string;
+  operations: Array<{ method: string; path: string; summary: string }>;
+  warnings: string[];
+  requiresConfirmation: boolean;
+};
+
 const tokenKey = "foxos.apiToken";
 
 export function getApiToken(): string {
@@ -121,4 +134,43 @@ export async function loadLiveSnapshot(): Promise<LiveSnapshot> {
 
 export async function deleteNode(id: string): Promise<void> {
   await request<void>(`/api/v1/nodes/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function createNode(input: {
+  name: string;
+  type: string;
+  server: string;
+  port: number;
+  username?: string;
+  password?: string;
+  uuid?: string;
+}): Promise<ApiNode> {
+  return request<ApiNode>("/api/v1/nodes", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function importNodeLinks(links: string): Promise<{ imported: number; nodes: ApiNode[] }> {
+  return request("/api/v1/nodes/import", { method: "POST", body: JSON.stringify({ links }) });
+}
+
+export async function probeNode(id: string): Promise<NodeProbe> {
+  return request<NodeProbe>(`/api/v1/nodes/${encodeURIComponent(id)}/probe`, { method: "POST" });
+}
+
+export async function planDeviceBinding(input: {
+  id: string;
+  name: string;
+  macAddress: string;
+  staticIp: string;
+  dhcpServer: string;
+  egress: "direct" | "mihomo-node" | "proxy-chain" | "l2tp" | "blocked";
+  targetId?: string;
+}): Promise<{ plan: DeviceBindingPlan; confirmationToken: string; expiresInSeconds: number }> {
+  return request("/api/v1/routeros/plans/device-binding", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function executeDeviceBinding(plan: DeviceBindingPlan, confirmationToken: string): Promise<void> {
+  await request("/api/v1/routeros/plans/device-binding/execute", {
+    method: "POST",
+    body: JSON.stringify({ plan, confirmationToken }),
+  });
 }

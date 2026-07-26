@@ -40,6 +40,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/nodes/{id}", s.auth(http.HandlerFunc(s.getNode)))
 	mux.Handle("PUT /api/v1/nodes/{id}", s.auth(http.HandlerFunc(s.updateNode)))
 	mux.Handle("DELETE /api/v1/nodes/{id}", s.auth(http.HandlerFunc(s.deleteNode)))
+	s.registerNodeExtras(mux)
 }
 
 type nodeInput struct {

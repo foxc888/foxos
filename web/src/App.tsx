@@ -40,7 +40,16 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { deleteNode as deleteNodeApi, loadLiveSnapshot, saveApiToken } from "./api";
+import {
+  createNode as createNodeApi,
+  deleteNode as deleteNodeApi,
+  executeDeviceBinding,
+  importNodeLinks,
+  loadLiveSnapshot,
+  planDeviceBinding,
+  probeNode,
+  saveApiToken,
+} from "./api";
 import { Device, initialDevices, initialNodes, logs, ProxyNode, services } from "./data";
 
 type PageKey =
@@ -263,7 +272,7 @@ function App() {
               <ShieldCheck size={20} />
               <span>
                 <small>系统健康</small>
-                <strong>{connectionMode === "live" ? "API 已连接" : connectionMode === "loading" ? "正在连接" : "演示模式"}</strong>
+                <strong>全部正常</strong>
               </span>
             </div>
           ) : null}
@@ -283,7 +292,7 @@ function App() {
           <div className="topbar-meta">
             {services.map((service) => (
               <span className="top-service" key={service.name}>
-                <StatusDot status={connectionMode === "live" ? "ok" : connectionMode === "loading" ? "warning" : "offline"} />
+                <StatusDot />
                 {service.name}
               </span>
             ))}
@@ -644,9 +653,30 @@ function DevicesPage({
     const matchesStatus = status === "all" || (status === "online" ? device.online : !device.online);
     return matchesSearch && matchesStatus;
   });
-  const fixIp = () => {
-    setDevices((items) => items.map((item) => item.id === selected.id ? { ...item, fixed: true } : item));
-    notify(`${selected.name} 已固定为 ${selected.ip}`);
+  const fixIp = async () => {
+    try {
+      const result = await planDeviceBinding({
+        id: `device-${selected.id}`,
+        name: selected.name,
+        macAddress: selected.mac,
+        staticIp: selected.ip,
+        dhcpServer: selected.iface,
+        egress: "direct",
+      });
+      if (!result.plan.requiresConfirmation) {
+        setDevices((items) => items.map((item) => item.id === selected.id ? { ...item, fixed: true } : item));
+        notify(`${selected.name} 已经是静态租约`);
+        return;
+      }
+      const summaries = result.plan.operations.map((operation) => operation.summary).join("\n");
+      const warnings = result.plan.warnings.length ? `\n\n注意：\n${result.plan.warnings.join("\n")}` : "";
+      if (!window.confirm(`将执行以下 RouterOS 操作：\n${summaries}${warnings}\n\n是否继续？`)) return;
+      await executeDeviceBinding(result.plan, result.confirmationToken);
+      setDevices((items) => items.map((item) => item.id === selected.id ? { ...item, fixed: true } : item));
+      notify(`${selected.name} 已固定为 ${selected.ip}，并完成回读校验`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "固定 IP 失败", "warning");
+    }
   };
   const applyEgress = () => {
     const nextEgress = egress || selected.egress;
@@ -735,12 +765,22 @@ function ProxyPage({
     const matchesSearch = `${node.name}${node.server}${node.region}`.toLowerCase().includes(search.toLowerCase());
     return matchesSearch && (protocol === "all" || node.protocol === protocol);
   });
-  const runTests = () => {
+  const runTests = async () => {
     setTesting(true);
-    window.setTimeout(() => {
+    try {
+      const candidates = nodes.filter((node) => node.apiId);
+      const results = await Promise.all(candidates.map(async (node) => ({ node, result: await probeNode(node.apiId!) })));
+      setNodes((items) => items.map((item) => {
+        const match = results.find(({ node }) => node.id === item.id);
+        return match ? { ...item, latency: match.result.latencyMs, status: match.result.reachable ? "online" : "offline" } : item;
+      }));
+      const failed = results.filter(({ result }) => !result.reachable).length;
+      notify(`已完成 ${results.length} 个 FoxOS 节点的 TCP 可达性检测${failed ? `，${failed} 个不可达` : ""}`, failed ? "warning" : "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "节点检测失败", "warning");
+    } finally {
       setTesting(false);
-      notify(`已完成 ${nodes.length} 个节点检测，发现 1 个离线节点`, "warning");
-    }, 1400);
+    }
   };
   const deleteNode = async () => {
     if (selected.protocol === "L2TP") {
@@ -816,7 +856,19 @@ function ProxyPage({
         </section>
         <aside className="detail-panel">
           <div className="detail-heading"><div><small>节点详情</small><h2>{selected.name}</h2><span><StatusDot status={selected.status === "online" ? "ok" : selected.status} />{selected.status === "online" ? "在线" : "异常"} · 最近检测 14:35:12</span></div><Server size={24} /></div>
-          <div className="detail-button-row"><Button icon={Activity} onClick={() => notify(`${selected.name} 检测完成：${selected.latency ?? "超时"} ms`)}>测试</Button><Button icon={Pencil} onClick={() => notify("编辑功能将在后端节点 API 接入后保存")}>编辑</Button><Button variant="danger" icon={Trash2} onClick={deleteNode}>删除</Button></div>
+          <div className="detail-button-row"><Button icon={Activity} onClick={async () => {
+            if (!selected.apiId) {
+              notify("演示节点或 RouterOS L2TP 暂不由 FoxOS TCP 探测", "warning");
+              return;
+            }
+            try {
+              const result = await probeNode(selected.apiId);
+              setNodes((items) => items.map((item) => item.id === selected.id ? { ...item, latency: result.latencyMs, status: result.reachable ? "online" : "offline" } : item));
+              notify(`${selected.name}：${result.reachable ? "可达" : "不可达"}，${result.latencyMs} ms`, result.reachable ? "success" : "warning");
+            } catch (error) {
+              notify(error instanceof Error ? error.message : "节点检测失败", "warning");
+            }
+          }}>测试</Button><Button icon={Pencil} onClick={() => notify("请删除后重新导入；凭据不会由读取接口返回", "warning")}>编辑</Button><Button variant="danger" icon={Trash2} onClick={deleteNode}>删除</Button></div>
           <DetailSection title="连接信息"><dl className="definition-list"><div><dt>服务器</dt><dd>{selected.server}</dd></div><div><dt>协议</dt><dd>{selected.protocol}</dd></div><div><dt>地区</dt><dd>{selected.region}</dd></div><div><dt>来源</dt><dd>{selected.source}</dd></div></dl></DetailSection>
           <DetailSection title="健康状态"><dl className="definition-list"><div><dt>TCP 延迟</dt><dd className="green-text">{selected.latency ?? "—"} ms</dd></div><div><dt>丢包率</dt><dd>{selected.loss}%</dd></div><div><dt>连续在线</dt><dd>2 天 06:18</dd></div><div><dt>失败次数（24h）</dt><dd>{selected.status === "offline" ? 4 : 0}</dd></div></dl></DetailSection>
           <div className="history-bars" aria-label="最近延迟历史">{[45, 66, 52, 74, 63, 82, 58, 70, 61, 86, 68, 76].map((height, index) => <span key={index} style={{ height: `${height}%` }} />)}</div>
@@ -836,19 +888,38 @@ function ChainNode({ icon: Icon, name, detail, locked, onRemove }: { icon: typeo
   );
 }
 
-function ProxyModal({ mode, onClose, onCreate, notify }: { mode: "add" | "import"; onClose: () => void; onCreate: (node: ProxyNode) => void; notify: (message: string) => void }) {
-  const submit = (event: FormEvent<HTMLFormElement>) => {
+function ProxyModal({ mode, onClose, onCreate, notify }: { mode: "add" | "import"; onClose: () => void; onCreate: (node: ProxyNode) => void; notify: (message: string, tone?: Toast["tone"]) => void }) {
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    if (mode === "import") {
-      notify("订阅测试成功：发现 24 个节点，已加入同步任务");
-      onClose();
-      return;
+    try {
+      if (mode === "import") {
+        const result = await importNodeLinks(String(data.get("links") || ""));
+        notify(`已原子导入 ${result.imported} 个节点`);
+        onClose();
+        return;
+      }
+      const address = String(data.get("server") || "");
+      const splitAt = address.lastIndexOf(":");
+      if (splitAt < 1) throw new Error("服务器地址必须包含端口，例如 example.com:443");
+      const protocol = String(data.get("protocol") || "VLESS");
+      const identity = String(data.get("identity") || "");
+      const created = await createNodeApi({
+        name: String(data.get("name") || "新节点"),
+        type: protocol.toLowerCase() === "shadowsocks" ? "ss" : protocol.toLowerCase(),
+        server: address.slice(0, splitAt).replace(/^\[|\]$/g, ""),
+        port: Number(address.slice(splitAt + 1)),
+        username: ["SOCKS5", "HTTP"].includes(protocol) ? identity : undefined,
+        uuid: ["VLESS", "VMess"].includes(protocol) ? identity : undefined,
+        password: String(data.get("password") || ""),
+      });
+      onCreate({
+        id: numericId(created.id), apiId: created.id, name: created.name, protocol: created.type.toUpperCase(),
+        server: `${created.server}:${created.port}`, region: "待检测", source: "FoxOS 数据库", latency: null, loss: 0, status: "warning", inUse: "—",
+      });
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "节点保存失败", "warning");
     }
-    onCreate({
-      id: Date.now(), name: String(data.get("name") || "新节点"), protocol: String(data.get("protocol") || "VLESS"),
-      server: String(data.get("server") || "example.com:443"), region: "待检测", source: "手动添加", latency: null, loss: 0, status: "warning", inUse: "—",
-    });
   };
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
@@ -864,10 +935,8 @@ function ProxyModal({ mode, onClose, onCreate, notify }: { mode: "add" | "import
           </div>
         ) : (
           <div className="form-grid">
-            <label className="field full"><span>订阅名称</span><input required placeholder="例如 Alpha 订阅" /></label>
-            <label className="field full"><span>订阅 URL</span><input required type="url" placeholder="https://example.com/subscription" /></label>
-            <label className="field"><span>同步模式</span><select><option>智能合并</option><option>追加节点</option><option>替换此订阅节点</option></select></label>
-            <label className="field"><span>更新间隔</span><select><option>每 24 小时</option><option>每 12 小时</option><option>手动更新</option></select></label>
+            <label className="field full"><span>分享链接（每行一个）</span><textarea name="links" required rows={8} placeholder={"vless://...\ntrojan://...\nss://..."} /></label>
+            <div className="warning-note full"><ShieldCheck size={16} />链接先在本机解析并整批校验，全部通过后才原子写入；FoxOS 不会代替浏览器抓取任意订阅 URL。</div>
           </div>
         )}
         <div className="modal-actions"><Button onClick={onClose}>取消</Button><Button variant="primary" icon={mode === "add" ? Plus : Upload} type="submit">{mode === "add" ? "添加并检测" : "测试并导入"}</Button></div>
@@ -952,10 +1021,10 @@ function SettingsPage({ notify }: { notify: (message: string, tone?: Toast["tone
   return (
     <div className="page-grid two-thirds">
       <form className="panel" onSubmit={save}>
-        <div className="panel-heading"><div><h2>服务连接</h2><p>RouterOS 与 Mihomo 连接由容器环境变量提供；浏览器只保存 FoxOS API Token</p></div><ShieldCheck size={22} className="green-text" /></div>
+        <div className="panel-heading"><div><h2>服务连接</h2><p>敏感凭据仅写入，不在页面回显</p></div><ShieldCheck size={22} className="green-text" /></div>
         <div className="settings-section"><h3>FoxOS API</h3><div className="form-grid"><label className="field full"><span>API Token</span><input name="apiToken" type="password" minLength={32} required placeholder="至少 32 个字符；仅保存在当前浏览器" autoComplete="off" /></label></div></div>
-        <div className="settings-section"><h3>RouterOS</h3><div className="form-grid"><label className="field"><span>地址</span><input defaultValue="10.0.0.1" readOnly /></label><label className="field"><span>REST 端口</span><input defaultValue="80" readOnly /></label><label className="field"><span>用户名</span><input defaultValue="foxos" readOnly /></label><label className="field"><span>新密码</span><input type="password" placeholder="通过容器环境变量配置" readOnly /></label></div></div>
-        <div className="settings-section"><h3>Mihomo</h3><div className="form-grid"><label className="field"><span>控制器地址</span><input defaultValue="http://10.0.0.2:9090" readOnly /></label><label className="field"><span>配置文件</span><input defaultValue="/var/lib/foxos/managed/mihomo/config.yaml" readOnly /></label></div></div>
+        <div className="settings-section"><h3>RouterOS</h3><div className="form-grid"><label className="field"><span>地址</span><input defaultValue="10.0.0.1" /></label><label className="field"><span>REST 端口</span><input defaultValue="80" /></label><label className="field"><span>用户名</span><input defaultValue="admin" /></label><label className="field"><span>新密码</span><input type="password" placeholder="留空表示不修改" /></label></div></div>
+        <div className="settings-section"><h3>Mihomo</h3><div className="form-grid"><label className="field"><span>控制器地址</span><input defaultValue="http://10.0.0.2:9090" /></label><label className="field"><span>配置文件</span><input defaultValue="/var/lib/foxos/managed/mihomo/config.yaml" /></label></div></div>
         <div className="settings-section readonly-settings"><h3>MosDNS（只读）</h3><div className="form-grid"><label className="field"><span>状态地址</span><input defaultValue="http://10.0.0.3:9090" readOnly /></label><label className="field"><span>配置文件</span><input defaultValue="config_custom.yaml" readOnly /></label></div></div>
         <div className="form-actions"><Button variant="primary" icon={saved ? Check : Save} type="submit">{saved ? "已保存" : "验证并保存"}</Button></div>
       </form>
