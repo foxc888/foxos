@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
+	"time"\n\t"strings"
 
 	"github.com/foxc888/foxos/internal/domain"
 	_ "modernc.org/sqlite"
@@ -53,6 +53,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL UNIQUE,
 			type TEXT NOT NULL,
+			payload_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS device_policies (
+			id TEXT PRIMARY KEY,
+			mac_address TEXT NOT NULL UNIQUE,
+			static_ip TEXT NOT NULL UNIQUE,
 			payload_json TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
@@ -158,3 +166,37 @@ func (s *Store) DeleteGroup(ctx context.Context, id string) error {
 	if affected == 0 { return ErrNotFound }
 	return nil
 }
+
+
+func (s *Store) SaveDevicePolicy(ctx context.Context, policy domain.DevicePolicy) error {
+	if err := policy.Validate(); err != nil { return err }
+	body, err := json.Marshal(policy)
+	if err != nil { return err }
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO device_policies(id,mac_address,static_ip,payload_json,created_at,updated_at)
+		VALUES(?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			mac_address=excluded.mac_address,static_ip=excluded.static_ip,payload_json=excluded.payload_json,updated_at=excluded.updated_at
+	`, policy.ID, normalizeStoreMAC(policy.MACAddress), policy.StaticIP, string(body), now, now)
+	return err
+}
+func (s *Store) DevicePolicy(ctx context.Context,id string)(domain.DevicePolicy,error){
+	var payload string
+	err:=s.db.QueryRowContext(ctx,`SELECT payload_json FROM device_policies WHERE id=?`,id).Scan(&payload)
+	if errors.Is(err,sql.ErrNoRows){return domain.DevicePolicy{},ErrNotFound}
+	if err!=nil{return domain.DevicePolicy{},err}
+	var policy domain.DevicePolicy
+	if err:=json.Unmarshal([]byte(payload),&policy);err!=nil{return domain.DevicePolicy{},fmt.Errorf("decode device policy: %w",err)}
+	return policy,nil
+}
+func (s *Store) DevicePolicies(ctx context.Context)([]domain.DevicePolicy,error){
+	rows,err:=s.db.QueryContext(ctx,`SELECT payload_json FROM device_policies ORDER BY id`);if err!=nil{return nil,err};defer rows.Close()
+	policies:=make([]domain.DevicePolicy,0)
+	for rows.Next(){var payload string;if err:=rows.Scan(&payload);err!=nil{return nil,err};var policy domain.DevicePolicy;if err:=json.Unmarshal([]byte(payload),&policy);err!=nil{return nil,err};policies=append(policies,policy)}
+	return policies,rows.Err()
+}
+func (s *Store) DeleteDevicePolicy(ctx context.Context,id string)error{
+	result,err:=s.db.ExecContext(ctx,`DELETE FROM device_policies WHERE id=?`,id);if err!=nil{return err};affected,err:=result.RowsAffected();if err!=nil{return err};if affected==0{return ErrNotFound};return nil
+}
+func normalizeStoreMAC(value string)string{return strings.ToUpper(strings.TrimSpace(value))}
