@@ -62,17 +62,17 @@ Mihomo 配置管理借鉴 [qianfree/ClashManager](https://github.com/qianfree/Cl
 - 静态 IP
 - 直连、Mihomo 节点、代理链、L2TP 和阻断出口模型
 - 受认证的增删查改 API
-- RouterOS 写入前预览计划
+- RouterOS 写入前预览计划\n- HMAC 计划确认令牌（绑定完整计划和过期时间）\n- 篡改、过期、越权路径和非 FoxOS 资源写入拒绝\n- 静态绑定受控执行器及模拟 Writer 安全测试
 
 ## 尚未完成
 
 - 管理员首次初始化和浏览器会话
 - 前端与真实 API 全面接线
-- RouterOS 静态绑定执行器
+- 真实 RouterOS HTTP Writer 与静态绑定回读验证
 - 设备出口路由执行器
 - RouterOS 原生 L2TP 增删查改
 - 链式代理可视化编排和应用
-- 任务队列、确认令牌和审计页面
+- 任务队列和审计页面
 - MosDNS 状态适配
 - RouterOS Container 最终镜像
 - amd64/arm64 GitHub Releases
@@ -94,7 +94,7 @@ RouterOS 修改遵循：
 → 只修改foxos:资源 → 验证 → 失败补偿
 ```
 
-FoxOS 不接管没有 `foxos:` 标识的用户规则。
+FoxOS 不接管没有 `foxos:` 标识的用户规则。\n\nRouterOS 计划确认令牌使用 HMAC-SHA256，完整绑定方法、路径、请求体、所有权标识和过期时间。计划发生任何变化后必须重新预览和确认。当前静态绑定执行器只允许 DHCP Lease 的 PUT/PATCH 路径。
 
 ## API
 
@@ -210,7 +210,7 @@ docs/                       中文设计、安装和使用说明
 - [RouterOS 连接](docs/routeros-setup.md)
 - [节点管理](docs/node-management.md)
 - [设备管理](docs/device-management.md)
-- [备份与恢复](docs/backup-restore.md)
+- [备份与恢复](docs/backup-restore.md)\n- [操作确认与执行安全](docs/operation-confirmation.md)
 - [ClashManager 来源说明](docs/clashmanager-origin.md)
 
 ## DNS 边界
