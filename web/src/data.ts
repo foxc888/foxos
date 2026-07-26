@@ -7,6 +7,7 @@ export type ServiceStatus = {
 
 export type Device = {
   id: number;
+  apiId?: string;
   name: string;
   kind: "phone" | "computer" | "server" | "tv" | "iot";
   ip: string;
@@ -21,6 +22,7 @@ export type Device = {
 
 export type ProxyNode = {
   id: number;
+  apiId?: string;
   name: string;
   protocol: string;
   server: string;
