@@ -32,6 +32,8 @@ GitHub `Release artifacts` 工作流构建：
 
 必须确认 `container=yes`、CPU 架构匹配、磁盘空间充足。设备模式切换可能要求物理确认，按 RouterOS 官方提示执行。
 
+用户当前 RouterOS 是 `x86_64`，应使用 `foxos-amd64.tar`。安装脚本会读取 `architecture-name` 自动选包；不应为部署 FoxOS 改动现有 CPU 架构、LAN 网段或 DHCP 池。
+
 ## 3. 构建
 
 在 GitHub Actions 手动运行 `Release artifacts`，或推送 `v*` 标签。每个平台会得到 Go 二进制和 RouterOS 可导入的容器镜像 tar。
@@ -53,6 +55,17 @@ docker buildx build \
 
 账号创建属于安全敏感操作，仓库不内置密码。请在 RouterOS 终端中使用本地生成的高强度密码，随后把密码只写入 RouterOS Container env list。不得提交到 GitHub、README、日志或截图。
 
+RouterOS 7.25.x 示例：
+
+```routeros
+/user/group/add name=foxos-rest policy=read,write,rest-api
+/user/add name=foxos-service group=foxos-rest password="替换为强密码" disabled=no
+/ip/service/enable www
+/ip/service/set www port=80 address=10.0.0.0/24
+```
+
+env 模板使用 `http://10.0.0.1`。`www` 必须仅允许管理网段，不能暴露到 WAN。若改成 `www-ssl`，应配置 FoxOS 可以验证的可信证书；当前实现不会跳过 TLS 证书校验。
+
 FoxOS Writer 还会执行第二层限制：
 
 - 只接受 DHCP Lease `PUT/PATCH`。
@@ -73,6 +86,8 @@ openssl rand -hex 32
 
 Mihomo Controller 必须允许来自 FoxOS 容器的管理访问。`FOXOS_MIHOMO_RUNTIME_CONFIG` 是 Mihomo 进程看到的配置路径，不是 FoxOS 容器内路径。
 
+用户当前 Mihomo mount 为 `/root/.config/mihomo/config.yaml`，因此模板的 runtime path 已固定为该路径。不要填写宿主机的 `/mihomo/config/config.yaml` 作为 Controller reload path。
+
 ## 6. 安装
 
 1. 上传正确架构的 `foxos-*.tar`。
@@ -86,7 +101,14 @@ Mihomo Controller 必须允许来自 FoxOS 容器的管理访问。`FOXOS_MIHOMO
 5. 导入安装脚本。
 6. 等待 `/container/print` 中导入任务完成，再启动 `foxos:active`。
 
-安装脚本只创建 `veth-foxos`、把它接入指定的现有管理桥，并添加 FoxOS 容器；不会创建或修改 DNS、NAT、默认路由、Mangle、策略路由或防火墙。
+安装脚本默认管理桥为 `bridge1`，会按 CPU 架构选择镜像，并创建：
+
+- `veth-foxos`：`10.0.0.4/24`
+- `foxos-data` → `/data`
+- `foxos-backups` → `/backups`
+- `foxos:active` 容器
+
+如果只读预检输出的管理桥不是 `bridge1`，必须先修改脚本变量。安装脚本不会创建或修改 DNS、NAT、默认路由、Mangle、策略路由、防火墙或现有 DHCP 设置。
 
 健康检查：
 
@@ -139,7 +161,7 @@ curl -H "Authorization: Bearer $FOXOS_API_TOKEN" \
 | Mihomo 离线 | Controller 地址、secret、9090 访问范围 |
 | 固定 IP 计划冲突 | 目标 IP 是否已被其他 MAC 使用 |
 | 执行后验证失败 | DHCP Lease 的 MAC/IP/dynamic/comment 是否与计划一致 |
-| 容器无法启动 | `/container/log/print`、架构、env list、磁盘空间 |
+| 容器无法启动 | `/log/print where topics~"container"`、架构、env list、磁盘空间 |
 | 刷新页面 404 | 应通过 FoxOS 的 8090 端口访问，前端使用 hash 路由 |
 
 提交故障信息时先删除 Token、密码、节点分享链接、RouterOS 导出中的敏感字段。

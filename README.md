@@ -105,7 +105,7 @@ FOXOS_CONFIRMATION_KEY=另一个至少32字符密钥
 RouterOS：
 
 ```text
-FOXOS_ROUTEROS_URL=https://10.0.0.1
+FOXOS_ROUTEROS_URL=http://10.0.0.1
 FOXOS_ROUTEROS_USERNAME=foxos-service
 FOXOS_ROUTEROS_PASSWORD=仅运行时提供
 ```
@@ -115,8 +115,8 @@ Mihomo：
 ```text
 FOXOS_MIHOMO_URL=http://10.0.0.2:9090
 FOXOS_MIHOMO_SECRET=Controller密钥
-FOXOS_MIHOMO_LOCAL_CONFIG=/mihomo/config/config.yaml
-FOXOS_MIHOMO_RUNTIME_CONFIG=/mihomo/config/config.yaml
+FOXOS_MIHOMO_LOCAL_CONFIG=/data/mihomo/config.yaml
+FOXOS_MIHOMO_RUNTIME_CONFIG=/root/.config/mihomo/config.yaml
 FOXOS_MIHOMO_BACKUP_DIR=/backups/mihomo
 ```
 
@@ -156,15 +156,212 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 
 ## RouterOS 部署
 
-1. 在 Actions 运行 `Release artifacts`，下载匹配架构的 `foxos-amd64.tar` 或 `foxos-arm64.tar`。
-2. 在 RouterOS 确认 Container device-mode、架构、磁盘和管理桥。
-3. 在 Git 管理之外填写 `deploy/routeros/foxos-env.example.rsc`。
-4. 上传镜像，执行 `preflight.rsc`。
-5. 核对并执行 `install.rsc`。
-6. 启动容器，验证 live/ready 和只读状态。
-7. 升级用双槽 `upgrade.rsc`；验证前保留旧槽位，故障用 `rollback.rsc`。
+你的现有设备为 RouterOS x86_64，网络规划为：
 
-脚本不会修改 DNS、默认路由、NAT、Mangle 或防火墙。完整步骤、服务账号、验收和故障排查见 [发布与 RouterOS 安装](docs/release-and-routeros.md)。
+| 组件 | 地址 |
+|---|---|
+| RouterOS | `10.0.0.1` |
+| Mihomo Controller | `10.0.0.2:9090` |
+| MosDNS | `10.0.0.3:53` |
+| FoxOS | `10.0.0.4:8090` |
+
+因此应下载 `foxos-amd64.tar`。不要使用 arm64 镜像。你的 Mihomo 容器配置路径是 `/root/.config/mihomo/config.yaml`；env 模板已按此填写。
+
+### 第 1 步：下载 FoxOS 镜像
+
+在 GitHub 仓库打开：
+
+```text
+Actions → FoxOS Core CI → 最新一次绿色运行
+→ 页面底部 Artifacts
+→ foxos-routeros-amd64-<commit>
+```
+
+下载的文件是 ZIP，先在电脑解压，得到 `foxos-amd64.tar`。不要把 ZIP 直接导入 RouterOS。
+
+如果分支尚未产生 Artifact，可以先合并 PR #2，再手动运行 `Release artifacts`，下载同名 amd64 tar。
+
+### 第 2 步：上传文件
+
+使用 WinBox 打开 `Files`，上传：
+
+```text
+foxos-amd64.tar
+deploy/routeros/preflight.rsc
+deploy/routeros/install.rsc
+```
+
+脚本上传后在 RouterOS 根目录中的文件名通常是 `preflight.rsc` 和 `install.rsc`。
+
+### 第 3 步：只读预检
+
+在 WinBox Terminal 执行：
+
+```routeros
+/import file-name=preflight.rsc
+```
+
+必须检查：
+
+- Architecture 是 `x86_64`。
+- RouterOS Container 已允许。
+- `10.0.0.4` 没有被占用。
+- 输出中存在你的 LAN 管理桥；默认安装脚本使用 `bridge1`。
+- `foxos-amd64.tar` 已上传且大小正常。
+- 磁盘空间足够。
+
+如果管理桥不是 `bridge1`，先用文本编辑器修改 `install.rsc` 中：
+
+```routeros
+:local managementBridge "你的实际桥名称"
+```
+
+不要为了匹配脚本而改动现有 LAN 或 DHCP。
+
+### 第 4 步：准备 RouterOS REST 服务账号
+
+不要让 FoxOS 使用 `admin`。以下命令创建最小化专用账号；把密码替换成你本地生成的强密码：
+
+```routeros
+/user/group/add name=foxos-rest policy=read,write,rest-api
+/user/add name=foxos-service group=foxos-rest password="替换为强密码" disabled=no
+```
+
+FoxOS 通过 RouterOS REST API 工作。当前 env 模板使用内网 HTTP：
+
+```routeros
+/ip/service/enable www
+/ip/service/set www port=80 address=10.0.0.0/24
+```
+
+这只把 RouterOS Web/REST 限制在管理网段，不应暴露到 WAN。若你的 RouterOS 已使用 `www-ssl` 和可信证书，可改用 HTTPS；不要直接把自签名 HTTPS 地址填入 FoxOS，因为当前客户端不会跳过证书校验。
+
+### 第 5 步：生成 FoxOS 密钥
+
+在 Windows PowerShell 执行两次，每次保存不同结果：
+
+```powershell
+[Convert]::ToHexString(
+  [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+).ToLower()
+```
+
+分别用于：
+
+- `FOXOS_API_TOKEN`
+- `FOXOS_CONFIRMATION_KEY`
+
+两者至少 32 字符且不能相同。
+
+### 第 6 步：填写并导入 env
+
+下载 `deploy/routeros/foxos-env.example.rsc` 到电脑，复制为 `foxos-env.local.rsc`，只在本地副本中替换：
+
+```text
+FOXOS_API_TOKEN
+FOXOS_CONFIRMATION_KEY
+FOXOS_ROUTEROS_PASSWORD
+FOXOS_MIHOMO_SECRET
+```
+
+确认这些非秘密配置保持为：
+
+```text
+FOXOS_ROUTEROS_URL=http://10.0.0.1
+FOXOS_ROUTEROS_USERNAME=foxos-service
+FOXOS_MIHOMO_URL=http://10.0.0.2:9090
+FOXOS_MIHOMO_RUNTIME_CONFIG=/root/.config/mihomo/config.yaml
+```
+
+上传本地副本后执行：
+
+```routeros
+/import file-name=foxos-env.local.rsc
+/container/envs/print where list="foxos-env"
+```
+
+确认 key 全部存在即可，不要截图或复制 value。随后删除含明文的导入文件：
+
+```routeros
+/file/remove [find where name="foxos-env.local.rsc"]
+```
+
+### 第 7 步：安装 FoxOS
+
+再次确认 `install.rsc` 的管理桥名称，然后执行：
+
+```routeros
+/import file-name=install.rsc
+/container/print
+```
+
+脚本会：
+
+- 按 CPU 架构自动选择 `foxos-amd64.tar`。
+- 创建 `veth-foxos = 10.0.0.4/24`。
+- 把 veth 加入指定管理桥。
+- 创建持久化 `foxos-data` 和 `foxos-backups` mounts。
+- 导入 `foxos:active` 容器。
+
+脚本不会修改 DNS、默认路由、NAT、Mangle、防火墙或 DHCP DNS。
+
+镜像导入完成并显示 stopped 后启动：
+
+```routeros
+/container/start [find where comment="foxos:active"]
+/container/print
+/log/print where topics~"container"
+```
+
+### 第 8 步：打开和验证
+
+电脑浏览器打开：
+
+```text
+http://10.0.0.4:8090
+```
+
+在 FoxOS 设置页输入 `FOXOS_API_TOKEN`。然后依次确认：
+
+1. 总览显示“实时数据”，不是演示数据。
+2. RouterOS 显示在线。
+3. Mihomo 显示在线。
+4. MosDNS 只显示状态，不出现写入操作。
+5. 节点列表可读取并可进行 TCP 探测。
+6. 日志页面能看到审计记录。
+
+健康接口：
+
+```text
+http://10.0.0.4:8090/api/v1/health/live
+http://10.0.0.4:8090/api/v1/health/ready
+```
+
+### 第 9 步：第一次写入测试
+
+不要先操作主要设备。选择一台可随时重新联网的测试设备：
+
+1. 在设备管理中选择设备。
+2. 保持当前 IP，不修改出口策略。
+3. 点击固定 IP。
+4. 阅读 RouterOS 变更计划和警告。
+5. 确认执行。
+6. 在 RouterOS 检查该 Lease 为静态，并带有 `foxos:device:` comment。
+7. 确认设备能续租、访问网关和互联网。
+
+当前版本只执行静态 DHCP Lease；设备出口路由、链式代理写入和 L2TP 写入尚未开放。
+
+### 第 10 步：失败时停止与清理
+
+仅停止 FoxOS：
+
+```routeros
+/container/stop [find where comment="foxos:active"]
+```
+
+停止 FoxOS 不会停止 Mihomo 或 MosDNS，也不会恢复或修改 DNS，因为安装过程从未修改 DNS。
+
+完整升级、双槽回滚、备份、验收和故障排查见 [发布与 RouterOS 安装](docs/release-and-routeros.md)。
 
 ## 安全执行闭环
 
