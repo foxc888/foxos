@@ -16,7 +16,7 @@ func TestReadOverviewAndDevices(t *testing.T){
 		case "/rest/system/resource":_ = json.NewEncoder(w).Encode(Resource{Version:"7.15.2",Architecture:"x86_64",CPULoad:"12"})
 		case "/rest/interface":_ = json.NewEncoder(w).Encode([]Interface{{ID:"*1",Name:"ether1",Running:"true"}})
 		case "/rest/ip/dhcp-server/lease":_ = json.NewEncoder(w).Encode([]Lease{{ID:"*2",Address:"10.0.0.20",MACAddress:"aa:bb:cc:dd:ee:ff",HostName:"phone",Status:"bound",Dynamic:"true"}})
-		case "/rest/ip/arp":_ = json.NewEncoder(w).Encode([]ARP{{ID:"*3",Address:"10.0.0.20",MACAddress:"AA:BB:CC:DD:EE:FF",Interface:"bridge",Complete:"true"}})
+		case "/rest/ip/arp":_ = json.NewEncoder(w).Encode([]ARP{{ID:"*3",Address:"10.0.0.20",MACAddress:"AA:BB:CC:DD:EE:FF",Interface:"bridge",Complete:"true"}})\n\t\tcase "/rest/interface/l2tp-client":_,_ = w.Write([]byte(`[{"name":"JP","connect-to":"vpn.example.com","user":"fox","password":"must-not-leak","running":"true"}]`))
 		default:http.NotFound(w,r)
 		}
 	}))
@@ -24,7 +24,7 @@ func TestReadOverviewAndDevices(t *testing.T){
 	client,err:=NewClient(server.URL,"foxos","secret");if err!=nil{t.Fatal(err)};client.http=server.Client()
 	resource,err:=client.Resource(context.Background());if err!=nil||resource.Version!="7.15.2"{t.Fatalf("resource=%+v err=%v",resource,err)}
 	devices,err:=client.Devices(context.Background());if err!=nil{t.Fatal(err)}
-	if len(devices)!=1||devices[0].HostName!="phone"||devices[0].Interface!="bridge"||devices[0].MACAddress!="AA:BB:CC:DD:EE:FF"{t.Fatalf("devices=%+v",devices)}
+	if len(devices)!=1||devices[0].HostName!="phone"||devices[0].Interface!="bridge"||devices[0].MACAddress!="AA:BB:CC:DD:EE:FF"{t.Fatalf("devices=%+v",devices)}\n\tl2tp,err:=client.L2TPClients(context.Background());if err!=nil||len(l2tp)!=1||l2tp[0].Name!="JP"{t.Fatalf("l2tp=%+v err=%v",l2tp,err)}
 }
 
 func TestRejectsRedirect(t *testing.T){
