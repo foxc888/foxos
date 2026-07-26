@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -40,6 +40,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { deleteNode as deleteNodeApi, loadLiveSnapshot, saveApiToken } from "./api";
 import { Device, initialDevices, initialNodes, logs, ProxyNode, services } from "./data";
 
 type PageKey =
@@ -53,6 +54,22 @@ type PageKey =
   | "settings";
 
 type Toast = { message: string; tone: "success" | "warning" };
+type ConnectionMode = "loading" | "live" | "demo";
+
+function numericId(value: string): number {
+  let hash = 0;
+  for (const character of value) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return hash || 1;
+}
+
+function deviceKind(name: string): Device["kind"] {
+  const value = name.toLowerCase();
+  if (value.includes("phone") || value.includes("iphone") || value.includes("android")) return "phone";
+  if (value.includes("tv") || value.includes("电视")) return "tv";
+  if (value.includes("nas") || value.includes("server")) return "server";
+  if (value.includes("camera") || value.includes("摄像") || value.includes("printer") || value.includes("打印")) return "iot";
+  return "computer";
+}
 
 const navItems: { key: PageKey; label: string; icon: typeof Home }[] = [
   { key: "overview", label: "总览", icon: Home },
@@ -126,18 +143,87 @@ function App() {
   const [selectedNodeId, setSelectedNodeId] = useState(1);
   const [toast, setToast] = useState<Toast | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [connectionMode, setConnectionMode] = useState<ConnectionMode>("loading");
+  const [liveLogs, setLiveLogs] = useState(logs);
 
   const notify = (message: string, tone: Toast["tone"] = "success") => {
     setToast({ message, tone });
     window.setTimeout(() => setToast(null), 2800);
   };
 
-  const runScan = () => {
+  const refreshLiveData = async (showToast = false) => {
     setScanning(true);
-    window.setTimeout(() => {
+    try {
+      const snapshot = await loadLiveSnapshot();
+      const apiNodes: ProxyNode[] = snapshot.nodes.map((node) => ({
+        id: numericId(node.id),
+        apiId: node.id,
+        name: node.name,
+        protocol: node.type.toUpperCase(),
+        server: `${node.server}:${node.port}`,
+        region: "待检测",
+        source: "FoxOS 数据库",
+        latency: null,
+        loss: 0,
+        status: snapshot.mihomo.online ? "online" : "warning",
+        inUse: "—",
+      }));
+      const l2tpNodes: ProxyNode[] = snapshot.l2tp.map((client) => ({
+        id: numericId(`l2tp:${client.id}`),
+        name: client.name,
+        protocol: "L2TP",
+        server: client.connectTo,
+        region: "待检测",
+        source: "RouterOS 原生",
+        latency: null,
+        loss: 0,
+        status: client.running && !client.disabled ? "online" : client.disabled ? "offline" : "warning",
+        inUse: "—",
+      }));
+      setNodes([...apiNodes, ...l2tpNodes]);
+      if (apiNodes.length + l2tpNodes.length > 0) setSelectedNodeId((apiNodes[0] ?? l2tpNodes[0]).id);
+
+      const routerDevices: Device[] = (snapshot.routeros.devices ?? []).map((device) => ({
+        id: numericId(device.macAddress),
+        apiId: device.macAddress,
+        name: device.hostName || device.macAddress,
+        kind: deviceKind(device.hostName || ""),
+        ip: device.address,
+        mac: device.macAddress,
+        iface: device.interface || device.dhcpServer || "—",
+        egress: "未设置",
+        latency: null,
+        online: device.status === "bound",
+        fixed: !device.dynamic,
+        lastSeen: device.lastSeen || "刚刚",
+      }));
+      if (routerDevices.length > 0) {
+        setDevices(routerDevices);
+        setSelectedDeviceId(routerDevices[0].id);
+      }
+      setLiveLogs(snapshot.audit.map((event) => ({
+        time: new Date(event.createdAt).toLocaleTimeString("zh-CN", { hour12: false }),
+        level: event.outcome === "SUCCEEDED" ? "成功" : event.outcome === "FAILED" ? "错误" : "信息",
+        source: event.action.startsWith("routeros") ? "RouterOS" : "FoxOS",
+        event: event.action,
+        detail: event.targetId,
+      })));
+      setConnectionMode("live");
+      if (showToast) notify("已从 FoxOS API 刷新 RouterOS、Mihomo、节点、L2TP、设备与审计状态");
+    } catch (error) {
+      setConnectionMode("demo");
+      if (showToast) notify(error instanceof Error ? error.message : "FoxOS API 连接失败", "warning");
+    } finally {
       setScanning(false);
-      notify("全链路检测完成：RouterOS、Mihomo、MosDNS 均正常");
-    }, 1400);
+    }
+  };
+
+  useEffect(() => {
+    void refreshLiveData(false);
+  }, []);
+
+  const runScan = () => {
+    void refreshLiveData(true);
   };
 
   const navigate = (key: PageKey) => {
@@ -201,7 +287,8 @@ function App() {
                 {service.name}
               </span>
             ))}
-            <span className="top-time">2026-07-26&nbsp; 14:35:28</span>
+            <span className={`data-mode ${connectionMode}`}><StatusDot status={connectionMode === "live" ? "ok" : connectionMode === "loading" ? "warning" : "offline"} />{connectionMode === "live" ? "实时数据" : connectionMode === "loading" ? "连接中" : "演示数据"}</span>
+            <span className="top-time">{new Date().toLocaleString("zh-CN", { hour12: false })}</span>
             <span className="admin">
               <Users size={16} /> admin
             </span>
@@ -233,7 +320,7 @@ function App() {
             />
           ) : null}
           {page === "topology" ? <TopologyPage navigate={navigate} /> : null}
-          {page === "logs" ? <LogsPage /> : null}
+          {page === "logs" ? <LogsPage items={liveLogs} /> : null}
           {page === "settings" ? <SettingsPage notify={notify} /> : null}
         </div>
       </main>
@@ -655,10 +742,18 @@ function ProxyPage({
       notify(`已完成 ${nodes.length} 个节点检测，发现 1 个离线节点`, "warning");
     }, 1400);
   };
-  const deleteNode = () => {
+  const deleteNode = async () => {
     if (selected.protocol === "L2TP") {
       notify("RouterOS 原生 L2TP 需在 RouterOS 页面删除", "warning");
       return;
+    }
+    if (selected.apiId) {
+      try {
+        await deleteNodeApi(selected.apiId);
+      } catch (error) {
+        notify(error instanceof Error ? error.message : "节点删除失败", "warning");
+        return;
+      }
     }
     setNodes((items) => items.filter((item) => item.id !== selected.id));
     setSelectedNodeId(nodes.find((item) => item.id !== selected.id)?.id ?? 1);
@@ -820,9 +915,9 @@ function TopologyPage({ navigate }: { navigate: (page: PageKey) => void }) {
   );
 }
 
-function LogsPage() {
+function LogsPage({ items }: { items: typeof logs }) {
   const [level, setLevel] = useState("all");
-  const filtered = logs.filter((item) => level === "all" || item.level === level);
+  const filtered = items.filter((item) => level === "all" || item.level === level);
   return (
     <section className="panel">
       <div className="toolbar">
@@ -843,12 +938,22 @@ function LogsPage() {
 function SettingsPage({ notify }: { notify: (message: string, tone?: Toast["tone"]) => void }) {
   const [saved, setSaved] = useState(false);
   const save = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); setSaved(true); notify("连接设置已验证并保存"); window.setTimeout(() => setSaved(false), 1800);
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    try {
+      saveApiToken(String(data.get("apiToken") || ""));
+      setSaved(true);
+      notify("FoxOS API Token 已保存在当前浏览器，请返回总览运行全链路检测");
+      window.setTimeout(() => setSaved(false), 1800);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Token 保存失败", "warning");
+    }
   };
   return (
     <div className="page-grid two-thirds">
       <form className="panel" onSubmit={save}>
         <div className="panel-heading"><div><h2>服务连接</h2><p>敏感凭据仅写入，不在页面回显</p></div><ShieldCheck size={22} className="green-text" /></div>
+        <div className="settings-section"><h3>FoxOS API</h3><div className="form-grid"><label className="field full"><span>API Token</span><input name="apiToken" type="password" minLength={32} required placeholder="至少 32 个字符；仅保存在当前浏览器" autoComplete="off" /></label></div></div>
         <div className="settings-section"><h3>RouterOS</h3><div className="form-grid"><label className="field"><span>地址</span><input defaultValue="10.0.0.1" /></label><label className="field"><span>REST 端口</span><input defaultValue="80" /></label><label className="field"><span>用户名</span><input defaultValue="admin" /></label><label className="field"><span>新密码</span><input type="password" placeholder="留空表示不修改" /></label></div></div>
         <div className="settings-section"><h3>Mihomo</h3><div className="form-grid"><label className="field"><span>控制器地址</span><input defaultValue="http://10.0.0.2:9090" /></label><label className="field"><span>配置文件</span><input defaultValue="/var/lib/foxos/managed/mihomo/config.yaml" /></label></div></div>
         <div className="settings-section readonly-settings"><h3>MosDNS（只读）</h3><div className="form-grid"><label className="field"><span>状态地址</span><input defaultValue="http://10.0.0.3:9090" readOnly /></label><label className="field"><span>配置文件</span><input defaultValue="config_custom.yaml" readOnly /></label></div></div>
