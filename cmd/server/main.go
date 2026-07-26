@@ -51,7 +51,7 @@ func main(){
 	app.Register(mux)
 	app.RegisterDevicePolicies(mux,store)
 	app.RegisterStatus(mux,ros,clash)
-	app.RegisterBindingPlan(mux,leases,signer,bindingExecutor,confirmation.NewReplayGuard())
+	app.RegisterBindingPlan(mux,leases,signer,bindingExecutor,confirmation.NewReplayGuard(),store)
 	if info,err:=os.Stat(*staticDir);err==nil&&info.IsDir(){mux.Handle("/",http.FileServer(http.Dir(*staticDir)))}
 
 	server:=&http.Server{Addr:*address,Handler:securityHeaders(mux),ReadHeaderTimeout:5*time.Second,ReadTimeout:15*time.Second,WriteTimeout:30*time.Second,IdleTimeout:60*time.Second}
