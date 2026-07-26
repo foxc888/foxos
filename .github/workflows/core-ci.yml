@@ -1,0 +1,27 @@
+name: FoxOS Core CI
+
+on:
+  push:
+    branches: [main, agent/foxos-core]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: false
+      - name: Download dependencies
+        run: go mod download
+      - name: Check formatting
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+      - name: Test
+        run: go test ./...
