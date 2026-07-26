@@ -1,7 +1,8 @@
 package api
 
 import (
-	"context"\n\t"encoding/json"
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +14,9 @@ import (
 )
 type fakeLeases struct{leases []routeros.Lease}
 func(f fakeLeases)Leases(context.Context)([]routeros.Lease,error){return f.leases,nil}
-type fakeBindingExecutor struct{calls int}\ntype fakeAudit struct{events []domain.AuditEvent}\nfunc(a *fakeAudit)SaveAudit(_ context.Context,event domain.AuditEvent)error{a.events=append(a.events,event);return nil}
+type fakeBindingExecutor struct{calls int}
+type fakeAudit struct{events []domain.AuditEvent}
+func(a *fakeAudit)SaveAudit(_ context.Context,event domain.AuditEvent)error{a.events=append(a.events,event);return nil}
 func(f *fakeBindingExecutor)Execute(context.Context,routeros.Plan,string)error{f.calls++;return nil}
 
 func TestBindingPreviewReturnsConfirmationAndExecuteConsumesOnce(t *testing.T){
@@ -21,7 +24,8 @@ func TestBindingPreviewReturnsConfirmationAndExecuteConsumesOnce(t *testing.T){
 	app,err:=New(&memoryNodes{nodes:map[string]domain.Node{}},token);if err!=nil{t.Fatal(err)}
 	signer,err:=confirmation.New([]byte("abcdefghijklmnopqrstuvwxyz012345"));if err!=nil{t.Fatal(err)}
 	executor:=&fakeBindingExecutor{};mux:=http.NewServeMux()
-	audit:=&fakeAudit{}\n\tapp.RegisterBindingPlan(mux,fakeLeases{leases:[]routeros.Lease{{ID:"*1",Address:"10.0.0.19",MACAddress:"AA:BB:CC:DD:EE:FF",Dynamic:"true"}}},signer,executor,confirmation.NewReplayGuard(),audit)
+	audit:=&fakeAudit{}
+	app.RegisterBindingPlan(mux,fakeLeases{leases:[]routeros.Lease{{ID:"*1",Address:"10.0.0.19",MACAddress:"AA:BB:CC:DD:EE:FF",Dynamic:"true"}}},signer,executor,confirmation.NewReplayGuard(),audit)
 	body:=`{"id":"phone","name":"iPhone","macAddress":"AA:BB:CC:DD:EE:FF","staticIp":"10.0.0.20","dhcpServer":"dhcp-lan","egress":"direct"}`
 	request:=httptest.NewRequest("POST","/api/v1/routeros/plans/device-binding",strings.NewReader(body));request.Header.Set("Authorization","Bearer "+token)
 	response:=httptest.NewRecorder();mux.ServeHTTP(response,request)
@@ -35,5 +39,6 @@ func TestBindingPreviewReturnsConfirmationAndExecuteConsumesOnce(t *testing.T){
 		result:=httptest.NewRecorder();mux.ServeHTTP(result,execute)
 		if result.Code!=want{t.Fatalf("attempt=%d status=%d body=%s",index,result.Code,result.Body.String())}
 	}
-	if executor.calls!=1{t.Fatalf("calls=%d",executor.calls)}\n\tif len(audit.events)!=2||audit.events[0].Outcome!=domain.AuditStarted||audit.events[1].Outcome!=domain.AuditSucceeded{t.Fatalf("audit=%+v",audit.events)}
+	if executor.calls!=1{t.Fatalf("calls=%d",executor.calls)}
+	if len(audit.events)!=2||audit.events[0].Outcome!=domain.AuditStarted||audit.events[1].Outcome!=domain.AuditSucceeded{t.Fatalf("audit=%+v",audit.events)}
 }
