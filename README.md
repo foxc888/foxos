@@ -54,7 +54,7 @@ Mihomo 配置管理借鉴 [qianfree/ClashManager](https://github.com/qianfree/Cl
 - 静态绑定计划预览
 - MAC/IP 校验和 IP 冲突检测
 - 已正确绑定时返回空计划
-- FoxOS 资源使用 `foxos:` 标识
+- FoxOS 资源使用 `foxos:` 标识\n- RouterOS 原生 L2TP 客户端只读列表\n- L2TP 密码字段不进入模型或 API\n- `foxos:l2tp:` 所有权识别
 
 ### 设备策略
 
@@ -70,7 +70,7 @@ Mihomo 配置管理借鉴 [qianfree/ClashManager](https://github.com/qianfree/Cl
 - 前端与真实 API 全面接线
 - 失败补偿与恢复记录
 - 设备出口路由执行器
-- RouterOS 原生 L2TP 增删查改
+- RouterOS 原生 L2TP 新增、编辑、删除和回读验证
 - 链式代理可视化编排和应用
 - 任务队列和审计页面
 - MosDNS 状态适配
@@ -116,7 +116,7 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 - `GET/POST /api/v1/device-policies`
 - `GET/PUT/DELETE /api/v1/device-policies/{id}`
 - `GET /api/v1/routeros/overview`
-- `GET /api/v1/mihomo/overview`
+- `GET /api/v1/mihomo/overview`\n- `GET /api/v1/routeros/l2tp`
 - `POST /api/v1/routeros/plans/device-binding`\n- `POST /api/v1/routeros/plans/device-binding/execute`\n- `GET /api/v1/audit-events?limit=100`
 
 节点查询不会返回密码、UUID 或完整凭据，只返回 `hasCredential`。
@@ -209,7 +209,7 @@ docs/                       中文设计、安装和使用说明
 - [运行配置](docs/configuration.md)
 - [RouterOS 连接](docs/routeros-setup.md)
 - [节点管理](docs/node-management.md)
-- [设备管理](docs/device-management.md)
+- [设备管理](docs/device-management.md)\n- [RouterOS 原生 L2TP](docs/l2tp.md)
 - [备份与恢复](docs/backup-restore.md)\n- [操作确认与执行安全](docs/operation-confirmation.md)\n- [操作审计](docs/logs.md)
 - [ClashManager 来源说明](docs/clashmanager-origin.md)
 
