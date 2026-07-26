@@ -59,7 +59,7 @@ type Lease struct{
 	Status string `json:"status"`
 	Dynamic string `json:"dynamic"`
 	Server string `json:"server"`
-	LastSeen string `json:"last-seen"`
+	LastSeen string `json:"last-seen"`\n\tComment string `json:"comment"`
 }
 
 type ARP struct{
