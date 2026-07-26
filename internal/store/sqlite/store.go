@@ -1,0 +1,103 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/foxc888/foxos/internal/domain"
+	_ "modernc.org/sqlite"
+)
+
+var ErrNotFound = errors.New("not found")
+
+type Store struct{ db *sql.DB }
+
+func Open(path string) (*Store, error) {
+	if path == "" { return nil, errors.New("database path is required") }
+	if path != ":memory:" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil { return nil, err }
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil { return nil, err }
+	db.SetMaxOpenConns(1)
+	store := &Store{db: db}
+	if err := store.migrate(context.Background()); err != nil { _ = db.Close(); return nil, err }
+	return store, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) migrate(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		PRAGMA foreign_keys = ON;
+		PRAGMA busy_timeout = 5000;
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			applied_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS nodes (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			type TEXT NOT NULL,
+			payload_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, CURRENT_TIMESTAMP);
+	`)
+	return err
+}
+
+func (s *Store) SaveNode(ctx context.Context, node domain.Node) error {
+	if err := node.Validate(); err != nil { return err }
+	body, err := json.Marshal(node)
+	if err != nil { return err }
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO nodes(id,name,type,payload_json,created_at,updated_at)
+		VALUES(?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name,type=excluded.type,payload_json=excluded.payload_json,updated_at=excluded.updated_at
+	`, node.ID, node.Name, node.Type, string(body), now, now)
+	return err
+}
+
+func (s *Store) Node(ctx context.Context, id string) (domain.Node, error) {
+	var payload string
+	err := s.db.QueryRowContext(ctx, `SELECT payload_json FROM nodes WHERE id=?`, id).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) { return domain.Node{}, ErrNotFound }
+	if err != nil { return domain.Node{}, err }
+	var node domain.Node
+	if err := json.Unmarshal([]byte(payload), &node); err != nil { return domain.Node{}, fmt.Errorf("decode node: %w", err) }
+	return node, nil
+}
+
+func (s *Store) Nodes(ctx context.Context) ([]domain.Node, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT payload_json FROM nodes ORDER BY name COLLATE NOCASE`)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	nodes := make([]domain.Node, 0)
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil { return nil, err }
+		var node domain.Node
+		if err := json.Unmarshal([]byte(payload), &node); err != nil { return nil, fmt.Errorf("decode node: %w", err) }
+		nodes = append(nodes, node)
+	}
+	return nodes, rows.Err()
+}
+
+func (s *Store) DeleteNode(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id=?`, id)
+	if err != nil { return err }
+	affected, err := result.RowsAffected()
+	if err != nil { return err }
+	if affected == 0 { return ErrNotFound }
+	return nil
+}
