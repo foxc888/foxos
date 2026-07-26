@@ -31,7 +31,7 @@ func(c *Client)Verify(ctx context.Context,plan Plan)error{
 		wantMAC:=normalizeMAC(operation.Body["mac-address"]);wantIP:=operation.Body["address"];wantComment:=operation.OwnedComment
 		matched:=false
 		for _,lease:=range leases{
-			if normalizeMAC(lease.MACAddress)==wantMAC&&lease.Address==wantIP&&lease.Dynamic!="true"&&(lease.Comment==""||lease.Comment==wantComment){matched=true;break}
+			if normalizeMAC(lease.MACAddress)==wantMAC&&lease.Address==wantIP&&lease.Dynamic!="true"&&lease.Comment==wantComment{matched=true;break}
 		}
 		if !matched{return fmt.Errorf("%w: lease %s %s",ErrWriteVerification,wantMAC,wantIP)}
 	}
