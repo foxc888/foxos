@@ -33,3 +33,17 @@
 /container/print
 :put "FoxOS 已提交启动，请访问 http://10.0.0.4:8090"
 :put "若状态不是 running，请执行 /log/print where topics~\"container\""
+
+:local routerPassword [/container/envs get [find where list="foxos-env" key="FOXOS_ROUTEROS_PASSWORD"] value]
+:local mihomoSecret [/container/envs get [find where list="foxos-env" key="FOXOS_MIHOMO_SECRET"] value]
+:local apiToken [/container/envs get [find where list="foxos-env" key="FOXOS_API_TOKEN"] value]
+:local confirmationKey [/container/envs get [find where list="foxos-env" key="FOXOS_CONFIRMATION_KEY"] value]
+
+:put ""
+:put "================ FoxOS 安装凭据 ================"
+:put ("RouterOS foxos-service 密码: " . $routerPassword)
+:put ("Mihomo Controller Secret: " . $mihomoSecret)
+:put ("FoxOS 登录 Token: " . $apiToken)
+:put ("FoxOS 确认密钥: " . $confirmationKey)
+:put "=================================================="
+:put "请立即复制保存。不要截图、不要提交到 GitHub。"

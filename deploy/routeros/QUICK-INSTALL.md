@@ -28,7 +28,7 @@
    /system/backup/save name=before-foxos
    ```
 
-## 第 1 步：解压并填写自己的密钥
+## 第 1 步：解压并准备配置
 
 只解压从 GitHub Actions 下载的外层 ZIP。三个 `.tar` 是 RouterOS 容器镜像，不能继续解压。
 
@@ -38,20 +38,20 @@
 SETUP.cmd
 ```
 
-它只负责从你自己的仓库取得 `mihomo-config` 和 `mosdns-config`，随后用记事本打开 `foxos-full-install.rsc`。它不会生成、修改或保存任何密钥。
+它只负责从你自己的仓库取得 `mihomo-config` 和 `mosdns-config`。不需要打开文件或填写密钥。
 
-在文件最上方填写四项：
+RouterOS 安装器会在每次首次安装时自动随机生成：
 
-```routeros
-:local foxosRouterPassword "你自己填写"
-:local foxosMihomoSecret "与 mihomo-config/config.yaml 的 secret 完全一致"
-:local foxosApiToken "你自己填写"
-:local foxosConfirmationKey "你自己填写"
-```
+- RouterOS `foxos-service` 密码；
+- Mihomo Controller Secret；
+- FoxOS 登录 Token；
+- FoxOS 确认密钥。
 
-脚本本身不自动限制内容。为了让当前 FoxOS 服务正常启动，`foxosApiToken` 和 `foxosConfirmationKey` 各填写至少 32 个字符；可以使用你自己容易保存的任意内容。RouterOS 密码和 Mihomo Secret 由你自行决定。
+随机生成的 Mihomo Secret 会自动写入 `mihomo-config/config.yaml`，其余 DNS 配置不会修改。
 
-保存并关闭记事本。不要把填写后的 `foxos-full-install.rsc` 再提交到 GitHub。
+安装脚本使用 RouterOS 当前脚本语法中的 `:rndstr`。如果终端提示不认识
+`rndstr`，请先把 RouterOS 和 `container` package 一起升级到同一当前稳定版本，
+重启后再重新执行安装。
 
 ## 第 2 步：上传到 RouterOS
 
@@ -113,7 +113,7 @@ foxos-start-all.rsc
 http://10.0.0.4:8090
 ```
 
-把你在 `foxos-full-install.rsc` 中填写的 `foxosApiToken` 输入 FoxOS 登录/设置页。
+启动完成后，终端会统一打印四个随机凭据。立即复制保存，并把其中的 FoxOS 登录 Token 输入 FoxOS 登录/设置页。
 
 ## 为什么是两次 import
 
@@ -123,7 +123,7 @@ RouterOS 在 `/container/add file=...` 后会异步解压镜像，而且不会�
 
 确认三项服务正常后：
 
-1. 保存好你填写的 FoxOS Token；
+1. 保存好终端打印的四个随机凭据；
 2. 在 RouterOS Files 中删除含明文密钥的 `foxos-full-install.rsc`；
 3. 镜像 tar 可在容器正常运行后删除以释放空间；不要删除 `mihomo-config`、`mosdns-config`、`foxos-data` 或 `foxos-backups`。
 

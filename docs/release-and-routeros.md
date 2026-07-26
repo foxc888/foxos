@@ -103,9 +103,9 @@ Core CI 的 `foxos-full-amd64-<commit>` 包含：
 - `foxos-start-all.rsc`
 - `QUICK-INSTALL.md`
 
-为避免把可能含节点凭据或私网规则的配置再次发布到 Actions Artifact，双击 `SETUP.cmd` 后只在用户电脑上取得 `mihomo/config` 和 `mosdns-config`。它不会生成或修改密钥。
+为避免把可能含节点凭据或私网规则的配置再次发布到 Actions Artifact，双击 `SETUP.cmd` 后只在用户电脑上取得 `mihomo/config` 和 `mosdns-config`。
 
-在自动打开的 `foxos-full-install.rsc` 顶部手工填写 RouterOS 服务密码、Mihomo Secret、FoxOS Token 和确认密钥，再按快速安装文档上传和导入。安装器固定使用：
+不需要手工填写密钥。`foxos-full-install.rsc` 在 RouterOS 首次安装时用 `:rndstr` 自动生成 RouterOS 服务密码、Mihomo Secret、FoxOS Token 和确认密钥，并把 Mihomo Secret 写入 `mihomo-config/config.yaml`。`foxos-start-all.rsc` 启动三个容器后在终端统一打印四项凭据。安装器固定使用：
 
 - `bridge-lan`
 - Mihomo `10.0.0.2/24`

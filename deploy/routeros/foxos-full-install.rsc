@@ -1,12 +1,14 @@
 # FoxOS 全栈安装脚本（RouterOS x86_64）
 # 适配用户环境：bridge-lan / 10.0.0.0/24
 # 不修改 DNS、DHCP、NAT、默认路由、Mangle 或现有防火墙。
-# 只需修改下面四行。脚本不自动生成、不限制内容。
+# 每次首次安装自动生成新的随机凭据。
+# 凭据会在三个容器首次启动后统一打印。
 
-:local foxosRouterPassword "在这里填写RouterOS服务账号密码"
-:local foxosMihomoSecret "在这里填写config.yaml中的Mihomo-secret"
-:local foxosApiToken "在这里填写FoxOS登录Token"
-:local foxosConfirmationKey "在这里填写FoxOS确认密钥"
+:local randomCharacters "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+:local foxosRouterPassword [:rndstr from=$randomCharacters length=32]
+:local foxosMihomoSecret [:rndstr from=$randomCharacters length=48]
+:local foxosApiToken [:rndstr from=$randomCharacters length=64]
+:local foxosConfirmationKey [:rndstr from=$randomCharacters length=64]
 
 :local managementBridge "bridge-lan"
 :local routerAddress "10.0.0.1"
@@ -38,6 +40,32 @@
   :if ([:len [/file find where name=$requiredFile]] = 0) do={
     :error ("缺少安装文件或目录: " . $requiredFile)
   }
+}
+
+:put "FoxOS: 更新 Mihomo Controller Secret..."
+:local mihomoConfigFile [/file find where name="mihomo-config/config.yaml"]
+:if ([:len $mihomoConfigFile] != 1) do={
+  :error "未找到唯一文件 mihomo-config/config.yaml"
+}
+:local mihomoConfig [/file get $mihomoConfigFile contents]
+:local secretStart [:find $mihomoConfig "\nsecret:"]
+:if ([:typeof $secretStart] = "nil") do={
+  :if ([:find $mihomoConfig "secret:"] = 0) do={
+    :set secretStart 0
+  } else={
+    :error "mihomo-config/config.yaml 中没有找到顶层 secret 字段"
+  }
+} else={
+  :set secretStart ($secretStart + 1)
+}
+:local secretEnd [:find $mihomoConfig "\n" $secretStart]
+:if ([:typeof $secretEnd] = "nil") do={
+  :set secretEnd [:len $mihomoConfig]
+}
+:local updatedMihomoConfig (([:pick $mihomoConfig 0 $secretStart]) . "secret: \"" . $foxosMihomoSecret . "\"" . ([:pick $mihomoConfig $secretEnd [:len $mihomoConfig]]))
+/file set $mihomoConfigFile contents=$updatedMihomoConfig
+:if ([:typeof [:find [/file get $mihomoConfigFile contents] ("secret: \"" . $foxosMihomoSecret . "\"")]] = "nil") do={
+  :error "Mihomo Secret 写入后验证失败"
 }
 
 :foreach ownedVeth in={"veth-mihomo";"veth-mosdns";"veth-foxos"} do={
