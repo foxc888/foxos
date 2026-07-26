@@ -57,6 +57,10 @@ button { color: inherit; }
 .topbar p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
 .topbar-meta { display: flex; align-items: center; gap: 13px; color: #b4c4cc; font-size: 11px; }
 .top-service { display: flex; gap: 6px; align-items: center; }
+.data-mode { display: inline-flex; align-items: center; min-height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); }
+.data-mode.live { color: var(--green); border-color: rgba(56, 212, 119, .28); }
+.data-mode.loading { color: var(--yellow); }
+.data-mode.demo { color: #8799a3; }
 .top-time, .admin { border-left: 1px solid var(--line); padding-left: 13px; }
 .admin { display: flex; align-items: center; gap: 6px; }
 .page-content { padding: 16px 18px 26px; }
