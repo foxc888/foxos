@@ -1,6 +1,7 @@
 package mihomo
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -22,7 +23,6 @@ func ParseShareLinks(body string) ([]domain.Node, error) {
 		if err != nil {
 			return nil, fmt.Errorf("link %d: %w", index+1, err)
 		}
-		node.ID = fmt.Sprintf("import-%d", index+1)
 		nodes = append(nodes, node)
 	}
 	if len(nodes) == 0 {
@@ -96,7 +96,7 @@ func parseURLNode(parsed *url.URL) (domain.Node, error) {
 	if query.Get("allowInsecure") == "1" || query.Get("insecure") == "1" || query.Get("skip-cert-verify") == "true" {
 		node.SkipCertVerify = true
 	}
-	return node, node.Validate()
+	return finalizeImportedNode(node)
 }
 
 type vmessJSON struct {
@@ -132,7 +132,7 @@ func parseVMess(encoded string) (domain.Node, error) {
 		name = value.Add
 	}
 	node := domain.Node{Name: name, Type: "vmess", Server: value.Add, Port: port, UUID: value.ID, Network: value.Net, Host: value.Host, Path: value.Path, SNI: value.SNI, TLS: value.TLS != "" && value.TLS != "none"}
-	return node, node.Validate()
+	return finalizeImportedNode(node)
 }
 
 func parseSS(raw string) (domain.Node, error) {
@@ -179,8 +179,18 @@ func ssNode(credential, address, fragment string) (domain.Node, error) {
 		name = hostPort.Hostname()
 	}
 	node := domain.Node{Name: name, Type: "ss", Server: hostPort.Hostname(), Port: port, Cipher: methodPassword[0], Password: methodPassword[1], UDP: true}
-	return node, node.Validate()
+	return finalizeImportedNode(node)
 }
+func finalizeImportedNode(node domain.Node) (domain.Node, error) {
+	material := fmt.Sprintf("%s|%s|%s|%d|%s|%s|%s", node.Type, node.Name, node.Server, node.Port, node.Username, node.UUID, node.Password)
+	sum := sha256.Sum256([]byte(material))
+	node.ID = fmt.Sprintf("node-%x", sum[:8])
+	if err := node.Validate(); err != nil {
+		return domain.Node{}, err
+	}
+	return node, nil
+}
+
 func decodeBase64(value string) ([]byte, error) {
 	value = strings.TrimSpace(value)
 	for _, encoding := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.StdEncoding} {
