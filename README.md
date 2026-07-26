@@ -190,6 +190,18 @@ npm run dev
 
 生产构建最终会将 `web/dist` 与 Go 后端打包进 RouterOS Container，RouterOS 上不需要 Node.js 或 Go。
 
+## 验证状态
+
+当前分支已完成以下静态验证：
+
+- 全部 Go 文件通过 `gofmt` 解析与统一格式化
+- 清除接口拼接遗留的字面量 `\\n` / `\\t`
+- RouterOS DHCP 写入后强制执行回读验证
+- 覆盖计划篡改、无所有权、缺少验证器和回读失败测试
+- L2TP API 模型不包含密码字段，并有防泄漏测试
+
+GitHub Actions 会继续运行 `gofmt -l cmd internal` 和 `go test ./...`。在 Actions 全部通过、浏览器端到端测试完成、并经过真实 RouterOS 测试环境验证以前，本分支仍属于开发版本，不建议直接接管生产网络。
+
 ## 项目结构
 
 ```text
