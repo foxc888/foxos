@@ -10,10 +10,11 @@ WORKDIR /src
 ARG FOXOS_VERSION=dev
 RUN apk add --no-cache ca-certificates
 COPY go.mod go.sum* ./
-RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${FOXOS_VERSION:-dev}" -o /out/foxos ./cmd/server
+RUN go mod tidy \
+    && go mod verify \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${FOXOS_VERSION:-dev}" -o /out/foxos ./cmd/server
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata \
