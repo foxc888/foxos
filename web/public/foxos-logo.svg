@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">FoxOS</title>
+  <defs>
+    <linearGradient id="fox-gradient" x1="8" y1="8" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff8a3d"/>
+      <stop offset="1" stop-color="#ff4d22"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#fox-gradient)" d="M8 10l13 8 11-8 11 8 13-8-5 30-19 16L13 40 8 10z"/>
+  <path fill="#071521" d="M18 24l10 5-8 9-2-14zm28 0l-2 14-8-9 10-5zM25 42h14l-7 7-7-7z"/>
+</svg>
