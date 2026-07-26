@@ -41,7 +41,7 @@ func main(){
 	mux:=http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health/live",func(w http.ResponseWriter,_ *http.Request){writeJSON(w,200,health{Status:"ok",Version:version,Time:time.Now().UTC().Format(time.RFC3339)})})
 	mux.HandleFunc("GET /api/v1/health/ready",func(w http.ResponseWriter,_ *http.Request){writeJSON(w,200,health{Status:"ready",Version:version,Time:time.Now().UTC().Format(time.RFC3339)})})
-	app.Register(mux);app.RegisterStatus(mux,ros,clash);app.RegisterBindingPlan(mux,leases)
+	app.Register(mux);app.RegisterDevicePolicies(mux,store);app.RegisterStatus(mux,ros,clash);app.RegisterBindingPlan(mux,leases)
 	if info,err:=os.Stat(*staticDir);err==nil&&info.IsDir(){mux.Handle("/",http.FileServer(http.Dir(*staticDir)))}
 	server:=&http.Server{Addr:*address,Handler:securityHeaders(mux),ReadHeaderTimeout:5*time.Second,ReadTimeout:15*time.Second,WriteTimeout:30*time.Second,IdleTimeout:60*time.Second}
 	log.Printf("FoxOS %s listening on %s",version,*address);log.Fatal(server.ListenAndServe())
