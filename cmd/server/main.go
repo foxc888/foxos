@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/foxc888/foxos/internal/api"
+	"github.com/foxc888/foxos/internal/config"
+	"github.com/foxc888/foxos/internal/mihomo"
+	"github.com/foxc888/foxos/internal/routeros"
 	"github.com/foxc888/foxos/internal/store/sqlite"
 )
 
@@ -20,14 +23,25 @@ func main(){
 	staticDir:=flag.String("static","web/dist","built frontend directory")
 	databasePath:=flag.String("database","data/foxos.db","SQLite database path")
 	flag.Parse()
-	token:=os.Getenv("FOXOS_API_TOKEN")
-	if len(token)<32{log.Fatal("FOXOS_API_TOKEN must contain at least 32 characters")}
+	runtimeConfig,err:=config.Load();if err!=nil{log.Fatal(err)}
 	store,err:=sqlite.Open(*databasePath);if err!=nil{log.Fatal(err)};defer store.Close()
-	app,err:=api.New(store,token);if err!=nil{log.Fatal(err)}
+	app,err:=api.New(store,runtimeConfig.APIToken);if err!=nil{log.Fatal(err)}
+
+	var ros api.RouterOSReader
+	if runtimeConfig.RouterOS.URL!=""{
+		client,err:=routeros.NewClient(runtimeConfig.RouterOS.URL,runtimeConfig.RouterOS.Username,runtimeConfig.RouterOS.Password);if err!=nil{log.Fatal(err)}
+		ros=client
+	}
+	var clash api.MihomoReader
+	if runtimeConfig.Mihomo.URL!=""{
+		controller,err:=mihomo.NewController(runtimeConfig.Mihomo.URL,runtimeConfig.Mihomo.Secret,runtimeConfig.Mihomo.RuntimeConfigPath);if err!=nil{log.Fatal(err)}
+		clash=controller
+	}
+
 	mux:=http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health/live",func(w http.ResponseWriter,_ *http.Request){writeJSON(w,200,health{Status:"ok",Version:version,Time:time.Now().UTC().Format(time.RFC3339)})})
 	mux.HandleFunc("GET /api/v1/health/ready",func(w http.ResponseWriter,_ *http.Request){writeJSON(w,200,health{Status:"ready",Version:version,Time:time.Now().UTC().Format(time.RFC3339)})})
-	app.Register(mux)
+	app.Register(mux);app.RegisterStatus(mux,ros,clash)
 	if info,err:=os.Stat(*staticDir);err==nil&&info.IsDir(){mux.Handle("/",http.FileServer(http.Dir(*staticDir)))}
 	server:=&http.Server{Addr:*address,Handler:securityHeaders(mux),ReadHeaderTimeout:5*time.Second,ReadTimeout:15*time.Second,WriteTimeout:30*time.Second,IdleTimeout:60*time.Second}
 	log.Printf("FoxOS %s listening on %s",version,*address);log.Fatal(server.ListenAndServe())
