@@ -1,46 +1,218 @@
 # FoxOS
 
-FoxOS 是面向 RouterOS + Mihomo + MosDNS 的一体化网络管理后台。
+FoxOS 是运行在 RouterOS Container 环境中的网络管理后台，用一个 Web 界面管理 RouterOS、Mihomo 和 MosDNS。
 
-## 目标
+> 当前分支：核心后端开发中。Web UI 已存在；RouterOS 和 Mihomo 的真实只读连接、节点数据、设备策略、配置生成及回滚基础已经实现。尚未完成的写入功能不会显示为成功。
 
-- FoxOS、Mihomo、MosDNS 均运行在 RouterOS Container 中
-- 统一管理 RouterOS 设备、路由、L2TP 与 Mihomo 节点
-- MosDNS 第一阶段保持只读，不修改 DNS
-- 所有修改遵循：备份 → 生成 → 验证 → 应用 → 检查 → 失败回滚
+## 运行关系
 
-## 计划功能
+| 组件 | 示例地址 | 职责 |
+|---|---|---|
+| RouterOS | 10.0.0.1 | 宿主、DHCP、路由、L2TP、防火墙 |
+| Mihomo | 10.0.0.2 | 代理节点、策略组和流量出口 |
+| MosDNS | 10.0.0.3 | DNS；第一阶段只读 |
+| FoxOS | 10.0.0.4 | 统一 Web UI、API、SQLite 和任务控制 |
 
-- RouterOS 系统、接口、路由和 DHCP 状态
-- Mihomo 节点新增、删除、订阅导入和延迟检测
+FoxOS、Mihomo、MosDNS 最终都作为 RouterOS Container 运行。示例地址可以修改，安装脚本必须先检测冲突。
+
+## 设计来源
+
+Mihomo 配置管理借鉴 [qianfree/ClashManager](https://github.com/qianfree/ClashManager) 的成熟逻辑，包括节点模型、策略组、分享链接导入、配置生成和单文件部署思路。FoxOS 保留自己的 UI，并新增 RouterOS、设备绑定、L2TP、链式代理、任务、快照和回滚能力。
+
+详见 [ClashManager 来源说明](docs/clashmanager-origin.md)。
+
+## 当前已经实现
+
+### 核心服务
+
+- Go HTTP 服务入口
+- 健康与就绪接口
+- SQLite 自动建表
+- 数据目录与数据库权限收紧
+- Bearer Token API 认证
+- GitHub Actions 格式与测试检查
+
+### Mihomo
+
+- 节点模型及协议字段校验
+- SS、VMess、VLESS、Trojan、Hysteria2、SOCKS5、HTTP 分享链接解析
+- 批量解析失败时整批拒绝
 - select、url-test、fallback、load-balance 策略组
-- 链式代理
-- RouterOS 原生 L2TP
-- 设备静态 IP 绑定
-- 设备直连、单节点、代理链和 L2TP 出口策略
-- 操作任务、日志、备份和恢复
-- amd64/arm64 RouterOS Container 安装包
+- 节点与策略组稳定 ID 引用
+- Mihomo YAML 生成
+- 临时配置校验
+- 正式配置快照
+- 原子替换、热重载、健康检查和失败回滚
+- Controller Bearer Token 与重定向保护
 
-## 项目状态
+### RouterOS
 
-当前处于核心后端重构阶段。Web UI 已合并，真实设备控制接口正在开发。未接通的功能不会伪装成功。
+- REST API Basic Auth
+- 固定只读路径允许列表
+- 系统资源、接口、DHCP Lease 和 ARP 读取
+- DHCP 与 ARP 合并成设备清单
+- 静态绑定计划预览
+- MAC/IP 校验和 IP 冲突检测
+- 已正确绑定时返回空计划
+- FoxOS 资源使用 `foxos:` 标识
 
-## 架构
+### 设备策略
 
-详见 [docs/architecture.md](docs/architecture.md)。
+- SQLite 持久化
+- 静态 IP
+- 直连、Mihomo 节点、代理链、L2TP 和阻断出口模型
+- 受认证的增删查改 API
+- RouterOS 写入前预览计划
+
+## 尚未完成
+
+- 管理员首次初始化和浏览器会话
+- 前端与真实 API 全面接线
+- RouterOS 静态绑定执行器
+- 设备出口路由执行器
+- RouterOS 原生 L2TP 增删查改
+- 链式代理可视化编排和应用
+- 任务队列、确认令牌和审计页面
+- MosDNS 状态适配
+- RouterOS Container 最终镜像
+- amd64/arm64 GitHub Releases
+- 实际 RouterOS 集成测试
+
+## 安全闭环
+
+Mihomo 修改遵循：
+
+```text
+SQLite期望状态 → 生成临时YAML → 校验 → 快照
+→ 原子替换 → 热重载 → 健康检查 → 失败回滚
+```
+
+RouterOS 修改遵循：
+
+```text
+读取实际状态 → 生成计划 → 用户确认 → 备份
+→ 只修改foxos:资源 → 验证 → 失败补偿
+```
+
+FoxOS 不接管没有 `foxos:` 标识的用户规则。
+
+## API
+
+所有业务接口均需要：
+
+```http
+Authorization: Bearer <FOXOS_API_TOKEN>
+```
+
+无需认证：
+
+- `GET /api/v1/health/live`
+- `GET /api/v1/health/ready`
+
+当前业务接口：
+
+- `GET/POST /api/v1/nodes`
+- `GET/PUT/DELETE /api/v1/nodes/{id}`
+- `GET/POST /api/v1/device-policies`
+- `GET/PUT/DELETE /api/v1/device-policies/{id}`
+- `GET /api/v1/routeros/overview`
+- `GET /api/v1/mihomo/overview`
+- `POST /api/v1/routeros/plans/device-binding`
+
+节点查询不会返回密码、UUID 或完整凭据，只返回 `hasCredential`。
+
+## 运行配置
+
+必填：
+
+```text
+FOXOS_API_TOKEN=至少32个字符
+```
+
+RouterOS：
+
+```text
+FOXOS_ROUTEROS_URL=https://10.0.0.1
+FOXOS_ROUTEROS_USERNAME=foxos
+FOXOS_ROUTEROS_PASSWORD=运行时密钥
+```
+
+Mihomo：
+
+```text
+FOXOS_MIHOMO_URL=http://10.0.0.2:9090
+FOXOS_MIHOMO_SECRET=Controller密钥
+FOXOS_MIHOMO_LOCAL_CONFIG=/mnt/mihomo/config.yaml
+FOXOS_MIHOMO_RUNTIME_CONFIG=/root/.config/mihomo/config.yaml
+FOXOS_MIHOMO_BACKUP_DIR=/data/backups/mihomo
+```
+
+完整说明见 [运行配置](docs/configuration.md)。
+
+## 本地开发
+
+环境要求：
+
+- Go 1.24+
+- Node.js 18+
+
+后端：
+
+```bash
+go mod download
+go test ./...
+FOXOS_API_TOKEN=01234567890123456789012345678901 \
+  go run ./cmd/server --database ./data/foxos.db
+```
+
+前端：
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+生产构建最终会将 `web/dist` 与 Go 后端打包进 RouterOS Container，RouterOS 上不需要 Node.js 或 Go。
+
+## 项目结构
+
+```text
+cmd/server/                 FoxOS 服务入口
+internal/api/               HTTP API和认证
+internal/config/            运行时配置
+internal/domain/            节点、策略组和设备策略
+internal/mihomo/            分享链接、配置生成、Controller和回滚
+internal/routeros/          REST读取和操作计划
+internal/store/sqlite/      SQLite持久化与迁移
+web/                        FoxOS Web UI
+docs/                       中文设计、安装和使用说明
+.github/workflows/          自动测试和后续多架构构建
+```
 
 ## RouterOS 部署
 
-详见 [docs/routeros-install.md](docs/routeros-install.md)。
+最终发布：
 
-## 上游项目说明
+- `foxos_amd64.tar`
+- `foxos_arm64.tar`
+- RouterOS `.rsc` 安装与检查脚本
+- 示例配置和中文说明
 
-Mihomo 配置管理部分借鉴 ClashManager 的成熟设计。详见 [docs/clashmanager-origin.md](docs/clashmanager-origin.md)。
+配置、数据库和备份通过 mounts 独立持久化，升级只替换容器镜像。
 
-## 安全原则
+详见 [RouterOS Container 安装设计](docs/routeros-install.md)。
 
-- 凭据不提交到 GitHub
-- FoxOS 只修改带有 `foxos:` 标识的 RouterOS 规则
-- Mihomo 配置修改前自动创建快照
-- 应用后执行健康检查，失败自动恢复
-- DNS 第一阶段只读
+## 文档
+
+- [总体架构](docs/architecture.md)
+- [运行配置](docs/configuration.md)
+- [RouterOS 连接](docs/routeros-setup.md)
+- [节点管理](docs/node-management.md)
+- [设备管理](docs/device-management.md)
+- [备份与恢复](docs/backup-restore.md)
+- [ClashManager 来源说明](docs/clashmanager-origin.md)
+
+## DNS 边界
+
+当前不会修改 RouterOS DNS、DHCP 下发 DNS、Mihomo DNS 或 MosDNS 配置。MosDNS 第一阶段只读取状态。
