@@ -1,6 +1,6 @@
 # FoxOS 发布、安装、升级与回滚
 
-本文适用于把 FoxOS 作为独立 RouterOS Container 部署。Mihomo 和 MosDNS 可以继续使用仓库中已有的运行包；FoxOS 不要求特定品牌的服务器，但最终运行设备必须满足 RouterOS Container 的架构、存储和网络要求。
+本文适用于把 FoxOS、Mihomo、MosDNS 部署到 RouterOS Container。针对 `x86_64 + bridge-lan + 10.0.0.0/24` 的当前环境，优先使用 [`../deploy/routeros/QUICK-INSTALL.md`](../deploy/routeros/QUICK-INSTALL.md) 中的全量快速安装；本文后半部分保留单容器、升级与回滚细节。
 
 ## 1. 边界
 
@@ -90,6 +90,33 @@ Mihomo Controller 必须允许来自 FoxOS 容器的管理访问。`FOXOS_MIHOMO
 
 ## 6. 安装
 
+### 6.1 当前环境的全量快速安装
+
+Core CI 的 `foxos-full-amd64-<commit>` 包含：
+
+- `foxos-amd64.tar`
+- `mihomo_amd64.tar`
+- `mosdns-amd64.tar`
+- `prepare-install.ps1`
+- `full-install.template.rsc`
+- `foxos-start-all.rsc`
+- `QUICK-INSTALL.md`
+
+为避免把可能含节点凭据或私网规则的配置再次发布到 Actions Artifact，`prepare-install.ps1` 在用户电脑上从自己的仓库复制 `mihomo/config` 和 `mosdns-config`，生成本地安装目录。
+
+先在电脑运行 `prepare-install.ps1`，再按快速安装文档上传和导入。安装器固定使用：
+
+- `bridge-lan`
+- Mihomo `10.0.0.2/24`
+- MosDNS `10.0.0.3/24`
+- FoxOS `10.0.0.4/24`
+
+安装器只创建 FoxOS 所有权范围内的用户、env、mount、veth、bridge port 和容器，不创建或修改 DNS、DHCP、NAT、默认路由、Mangle、防火墙。
+
+RouterOS 的容器镜像导入是异步操作。第一次 import 只负责预检和添加三个容器；等三个容器全部 `status=stopped` 后，第二次 import 才按 Mihomo、MosDNS、FoxOS 顺序启动。这是有意设计的安全边界。
+
+### 6.2 仅安装 FoxOS 单容器
+
 1. 上传正确架构的 `foxos-*.tar`。
 2. 在本地导入已填好的 env 文件。
 3. 执行 `deploy/routeros/preflight.rsc`。
@@ -101,14 +128,14 @@ Mihomo Controller 必须允许来自 FoxOS 容器的管理访问。`FOXOS_MIHOMO
 5. 导入安装脚本。
 6. 等待 `/container/print` 中导入任务完成，再启动 `foxos:active`。
 
-安装脚本默认管理桥为 `bridge1`，会按 CPU 架构选择镜像，并创建：
+安装脚本默认管理桥为 `bridge-lan`，会按 CPU 架构选择镜像，并创建：
 
 - `veth-foxos`：`10.0.0.4/24`
 - `foxos-data` → `/data`
 - `foxos-backups` → `/backups`
 - `foxos:active` 容器
 
-如果只读预检输出的管理桥不是 `bridge1`，必须先修改脚本变量。安装脚本不会创建或修改 DNS、NAT、默认路由、Mangle、策略路由、防火墙或现有 DHCP 设置。
+如果只读预检输出的管理桥不是 `bridge-lan`，必须先修改脚本变量。安装脚本不会创建或修改 DNS、NAT、默认路由、Mangle、策略路由、防火墙或现有 DHCP 设置。
 
 健康检查：
 

@@ -165,7 +165,24 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 | MosDNS | `10.0.0.3:53` |
 | FoxOS | `10.0.0.4:8090` |
 
-因此应下载 `foxos-amd64.tar`。不要使用 arm64 镜像。你的 Mihomo 容器配置路径是 `/root/.config/mihomo/config.yaml`；env 模板已按此填写。
+管理桥固定为 `bridge-lan`。因此应下载 `foxos-full-amd64-<commit>`，不要使用 arm64 镜像。全量包包含 FoxOS、Mihomo、MosDNS 三个镜像、密钥生成脚本和 RouterOS 安装脚本。两套配置由电脑端脚本从你自己的仓库下载到本机，不会被二次发布到 Actions Artifact。
+
+### 推荐：全栈快速安装
+
+完整操作见 [`deploy/routeros/QUICK-INSTALL.md`](deploy/routeros/QUICK-INSTALL.md)。最短流程是：
+
+1. 下载并解压最新绿色 Core CI 的 `foxos-full-amd64-<commit>`。
+2. 在 Windows PowerShell 执行 `.\prepare-install.ps1`。
+3. 用 WinBox 上传文档列出的七项文件/目录。
+4. 执行 `/import file-name=foxos-full-install.local.rsc`。
+5. 等三个容器全部 `status=stopped` 后执行 `/import file-name=foxos-start-all.rsc`。
+6. 打开 `http://10.0.0.4:8090`，使用电脑上 `FOXOS-LOGIN.txt` 中的 Token。
+
+必须分成两次 import：RouterOS 会异步解压 `/container/add file=...` 导入的镜像，而且首次不会自动启动；固定等待时间不能保证三张镜像都已完成。
+
+快速安装不会修改 RouterOS DNS、DHCP DNS、Mihomo DNS、MosDNS、NAT、默认路由、Mangle 或现有防火墙。
+
+以下内容保留为“仅安装 FoxOS 单容器”的手动高级流程。
 
 ### 第 1 步：下载 FoxOS 镜像
 
@@ -174,7 +191,7 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 ```text
 Actions → FoxOS Core CI → 最新一次绿色运行
 → 页面底部 Artifacts
-→ foxos-routeros-amd64-<commit>
+→ foxos-full-amd64-<commit>
 ```
 
 下载的文件是 ZIP，先在电脑解压，得到 `foxos-amd64.tar`。不要把 ZIP 直接导入 RouterOS。
@@ -206,11 +223,11 @@ deploy/routeros/install.rsc
 - Architecture 是 `x86_64`。
 - RouterOS Container 已允许。
 - `10.0.0.4` 没有被占用。
-- 输出中存在你的 LAN 管理桥；默认安装脚本使用 `bridge1`。
+- 输出中存在你的 LAN 管理桥；默认安装脚本使用 `bridge-lan`。
 - `foxos-amd64.tar` 已上传且大小正常。
 - 磁盘空间足够。
 
-如果管理桥不是 `bridge1`，先用文本编辑器修改 `install.rsc` 中：
+如果管理桥不是 `bridge-lan`，先用文本编辑器修改 `install.rsc` 中：
 
 ```routeros
 :local managementBridge "你的实际桥名称"

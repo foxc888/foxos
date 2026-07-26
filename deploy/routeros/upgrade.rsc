@@ -10,5 +10,5 @@
 /container/stop $active
 :delay 3s
 /container/set $active comment="foxos:rollback"
-/container/add file=$imageFile interface=veth-foxos root-dir=containers/foxos-next envlist=foxos-env mounts=foxos-data,foxos-backups logging=yes start-on-boot=yes comment="foxos:active"
+/container/add file=$imageFile interface=veth-foxos root-dir=containers/foxos-next envlist=foxos-env mountlists=foxos-data,foxos-backups logging=yes start-on-boot=yes comment="foxos:active"
 :put "新镜像导入完成后启动 foxos:active，验证 /api/v1/health/ready；确认正常后再删除旧回滚槽位。"

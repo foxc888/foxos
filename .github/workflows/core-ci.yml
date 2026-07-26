@@ -54,8 +54,23 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Build amd64 image
         run: docker buildx build --platform linux/amd64 --output type=docker,dest=foxos-amd64.tar .
+      - name: Assemble RouterOS full-stack bundle
+        run: |
+          mkdir -p foxos-full-amd64
+          cp foxos-amd64.tar foxos-full-amd64/
+          cp mihomo/install/mihomo_amd64.tar foxos-full-amd64/
+          cp mihomo/install/mosdns-v0.6.4-2ac30e8-amd64.tar foxos-full-amd64/mosdns-amd64.tar
+          cp deploy/routeros/full-install.template.rsc foxos-full-amd64/
+          cp deploy/routeros/foxos-start-all.rsc foxos-full-amd64/
+          cp deploy/routeros/prepare-install.ps1 foxos-full-amd64/
+          cp deploy/routeros/QUICK-INSTALL.md foxos-full-amd64/
+          find foxos-full-amd64 -name .DS_Store -delete
+          test -s foxos-full-amd64/foxos-amd64.tar
+          test -s foxos-full-amd64/mihomo_amd64.tar
+          test -s foxos-full-amd64/mosdns-amd64.tar
+          test -f foxos-full-amd64/prepare-install.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: foxos-routeros-amd64-${{ github.sha }}
-          path: foxos-amd64.tar
+          name: foxos-full-amd64-${{ github.sha }}
+          path: foxos-full-amd64/
           retention-days: 14
