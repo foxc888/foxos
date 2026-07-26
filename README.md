@@ -68,7 +68,7 @@ Mihomo 配置管理借鉴 [qianfree/ClashManager](https://github.com/qianfree/Cl
 
 - 管理员首次初始化和浏览器会话
 - 前端与真实 API 全面接线
-- 静态绑定执行 API（当前 Writer 已实现但尚未对外开放）
+- 持久化操作审计与失败补偿记录
 - 设备出口路由执行器
 - RouterOS 原生 L2TP 增删查改
 - 链式代理可视化编排和应用
@@ -94,7 +94,7 @@ RouterOS 修改遵循：
 → 只修改foxos:资源 → 验证 → 失败补偿
 ```
 
-FoxOS 不接管没有 `foxos:` 标识的用户规则。\n\nRouterOS 计划确认令牌使用 HMAC-SHA256，完整绑定方法、路径、请求体、所有权标识和过期时间。计划发生任何变化后必须重新预览和确认。当前静态绑定执行器只允许 DHCP Lease 的 PUT/PATCH 路径。真实 Writer 写入后必须重新读取 Lease，并精确匹配 MAC、IP、dynamic=false 和 `foxos:device:` comment；不满足即报告验证失败。执行 API 尚未开放，因此当前版本仍不会从 Web 请求直接修改 RouterOS。
+FoxOS 不接管没有 `foxos:` 标识的用户规则。\n\nRouterOS 计划确认令牌使用 HMAC-SHA256，完整绑定方法、路径、请求体、所有权标识和过期时间。计划发生任何变化后必须重新预览和确认。当前静态绑定执行器只允许 DHCP Lease 的 PUT/PATCH 路径。真实 Writer 写入后必须重新读取 Lease，并精确匹配 MAC、IP、dynamic=false 和 `foxos:device:` comment；不满足即报告验证失败。执行 API 已接通，但只有在 RouterOS 已配置、API 已认证、计划签名有效、令牌未使用且回读验证通过时才返回成功。确认令牌只能使用一次。
 
 ## API
 
@@ -117,7 +117,7 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 - `GET/PUT/DELETE /api/v1/device-policies/{id}`
 - `GET /api/v1/routeros/overview`
 - `GET /api/v1/mihomo/overview`
-- `POST /api/v1/routeros/plans/device-binding`
+- `POST /api/v1/routeros/plans/device-binding`\n- `POST /api/v1/routeros/plans/device-binding/execute`
 
 节点查询不会返回密码、UUID 或完整凭据，只返回 `hasCredential`。
 
@@ -126,7 +126,7 @@ Authorization: Bearer <FOXOS_API_TOKEN>
 必填：
 
 ```text
-FOXOS_API_TOKEN=至少32个字符
+FOXOS_API_TOKEN=至少32个字符\nFOXOS_CONFIRMATION_KEY=独立的至少32字符签名密钥
 ```
 
 RouterOS：
