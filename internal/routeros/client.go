@@ -59,7 +59,8 @@ type Lease struct{
 	Status string `json:"status"`
 	Dynamic string `json:"dynamic"`
 	Server string `json:"server"`
-	LastSeen string `json:"last-seen"`\n\tComment string `json:"comment"`
+	LastSeen string `json:"last-seen"`
+	Comment string `json:"comment"`
 }
 
 type L2TPClient struct{
@@ -87,7 +88,8 @@ type ARP struct{
 func(c *Client)Resource(ctx context.Context)(Resource,error){var out Resource;err:=c.get(ctx,"/rest/system/resource",&out);return out,err}
 func(c *Client)Interfaces(ctx context.Context)([]Interface,error){var out []Interface;err:=c.get(ctx,"/rest/interface",&out);return out,err}
 func(c *Client)Leases(ctx context.Context)([]Lease,error){var out []Lease;err:=c.get(ctx,"/rest/ip/dhcp-server/lease",&out);return out,err}
-func(c *Client)ARP(ctx context.Context)([]ARP,error){var out []ARP;err:=c.get(ctx,"/rest/ip/arp",&out);return out,err}\nfunc(c *Client)L2TPClients(ctx context.Context)([]L2TPClient,error){var out []L2TPClient;err:=c.get(ctx,"/rest/interface/l2tp-client",&out);return out,err}
+func(c *Client)ARP(ctx context.Context)([]ARP,error){var out []ARP;err:=c.get(ctx,"/rest/ip/arp",&out);return out,err}
+func(c *Client)L2TPClients(ctx context.Context)([]L2TPClient,error){var out []L2TPClient;err:=c.get(ctx,"/rest/interface/l2tp-client",&out);return out,err}
 
 func(c *Client)get(ctx context.Context,path string,destination any)error{
 	if !allowedReadPath(path){return errors.New("RouterOS path is not allowed")}
