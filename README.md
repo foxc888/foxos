@@ -62,13 +62,13 @@ Mihomo 配置管理借鉴 [qianfree/ClashManager](https://github.com/qianfree/Cl
 - 静态 IP
 - 直连、Mihomo 节点、代理链、L2TP 和阻断出口模型
 - 受认证的增删查改 API
-- RouterOS 写入前预览计划\n- HMAC 计划确认令牌（绑定完整计划和过期时间）\n- 篡改、过期、越权路径和非 FoxOS 资源写入拒绝\n- 静态绑定受控执行器及模拟 Writer 安全测试
+- RouterOS 写入前预览计划\n- HMAC 计划确认令牌（绑定完整计划和过期时间）\n- 篡改、过期、越权路径和非 FoxOS 资源写入拒绝\n- 静态绑定受控执行器及模拟 Writer 安全测试\n- 真实 RouterOS DHCP Lease Writer\n- 写入后二次读取租约并核对 MAC、IP、静态状态和所有权 comment\n- Writer 与执行器双层路径允许列表
 
 ## 尚未完成
 
 - 管理员首次初始化和浏览器会话
 - 前端与真实 API 全面接线
-- 真实 RouterOS HTTP Writer 与静态绑定回读验证
+- 静态绑定执行 API（当前 Writer 已实现但尚未对外开放）
 - 设备出口路由执行器
 - RouterOS 原生 L2TP 增删查改
 - 链式代理可视化编排和应用
@@ -94,7 +94,7 @@ RouterOS 修改遵循：
 → 只修改foxos:资源 → 验证 → 失败补偿
 ```
 
-FoxOS 不接管没有 `foxos:` 标识的用户规则。\n\nRouterOS 计划确认令牌使用 HMAC-SHA256，完整绑定方法、路径、请求体、所有权标识和过期时间。计划发生任何变化后必须重新预览和确认。当前静态绑定执行器只允许 DHCP Lease 的 PUT/PATCH 路径。
+FoxOS 不接管没有 `foxos:` 标识的用户规则。\n\nRouterOS 计划确认令牌使用 HMAC-SHA256，完整绑定方法、路径、请求体、所有权标识和过期时间。计划发生任何变化后必须重新预览和确认。当前静态绑定执行器只允许 DHCP Lease 的 PUT/PATCH 路径。真实 Writer 写入后必须重新读取 Lease，并精确匹配 MAC、IP、dynamic=false 和 `foxos:device:` comment；不满足即报告验证失败。执行 API 尚未开放，因此当前版本仍不会从 Web 请求直接修改 RouterOS。
 
 ## API
 
