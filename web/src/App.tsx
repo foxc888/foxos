@@ -263,7 +263,7 @@ function App() {
               <ShieldCheck size={20} />
               <span>
                 <small>系统健康</small>
-                <strong>全部正常</strong>
+                <strong>{connectionMode === "live" ? "API 已连接" : connectionMode === "loading" ? "正在连接" : "演示模式"}</strong>
               </span>
             </div>
           ) : null}
@@ -283,7 +283,7 @@ function App() {
           <div className="topbar-meta">
             {services.map((service) => (
               <span className="top-service" key={service.name}>
-                <StatusDot />
+                <StatusDot status={connectionMode === "live" ? "ok" : connectionMode === "loading" ? "warning" : "offline"} />
                 {service.name}
               </span>
             ))}
@@ -952,10 +952,10 @@ function SettingsPage({ notify }: { notify: (message: string, tone?: Toast["tone
   return (
     <div className="page-grid two-thirds">
       <form className="panel" onSubmit={save}>
-        <div className="panel-heading"><div><h2>服务连接</h2><p>敏感凭据仅写入，不在页面回显</p></div><ShieldCheck size={22} className="green-text" /></div>
+        <div className="panel-heading"><div><h2>服务连接</h2><p>RouterOS 与 Mihomo 连接由容器环境变量提供；浏览器只保存 FoxOS API Token</p></div><ShieldCheck size={22} className="green-text" /></div>
         <div className="settings-section"><h3>FoxOS API</h3><div className="form-grid"><label className="field full"><span>API Token</span><input name="apiToken" type="password" minLength={32} required placeholder="至少 32 个字符；仅保存在当前浏览器" autoComplete="off" /></label></div></div>
-        <div className="settings-section"><h3>RouterOS</h3><div className="form-grid"><label className="field"><span>地址</span><input defaultValue="10.0.0.1" /></label><label className="field"><span>REST 端口</span><input defaultValue="80" /></label><label className="field"><span>用户名</span><input defaultValue="admin" /></label><label className="field"><span>新密码</span><input type="password" placeholder="留空表示不修改" /></label></div></div>
-        <div className="settings-section"><h3>Mihomo</h3><div className="form-grid"><label className="field"><span>控制器地址</span><input defaultValue="http://10.0.0.2:9090" /></label><label className="field"><span>配置文件</span><input defaultValue="/var/lib/foxos/managed/mihomo/config.yaml" /></label></div></div>
+        <div className="settings-section"><h3>RouterOS</h3><div className="form-grid"><label className="field"><span>地址</span><input defaultValue="10.0.0.1" readOnly /></label><label className="field"><span>REST 端口</span><input defaultValue="80" readOnly /></label><label className="field"><span>用户名</span><input defaultValue="foxos" readOnly /></label><label className="field"><span>新密码</span><input type="password" placeholder="通过容器环境变量配置" readOnly /></label></div></div>
+        <div className="settings-section"><h3>Mihomo</h3><div className="form-grid"><label className="field"><span>控制器地址</span><input defaultValue="http://10.0.0.2:9090" readOnly /></label><label className="field"><span>配置文件</span><input defaultValue="/var/lib/foxos/managed/mihomo/config.yaml" readOnly /></label></div></div>
         <div className="settings-section readonly-settings"><h3>MosDNS（只读）</h3><div className="form-grid"><label className="field"><span>状态地址</span><input defaultValue="http://10.0.0.3:9090" readOnly /></label><label className="field"><span>配置文件</span><input defaultValue="config_custom.yaml" readOnly /></label></div></div>
         <div className="form-actions"><Button variant="primary" icon={saved ? Check : Save} type="submit">{saved ? "已保存" : "验证并保存"}</Button></div>
       </form>
