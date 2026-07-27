@@ -73,6 +73,19 @@ func (s *Server) RegisterGroups(mux *http.ServeMux, groups GroupStore) {
 		writeJSON(w, 200, group)
 	})))
 	mux.Handle("DELETE /api/v1/proxy-groups/{id}", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if references, ok := groups.(interface {
+			GroupReferences(context.Context, string) ([]string, error)
+		}); ok {
+			items, err := references.GroupReferences(r.Context(), r.PathValue("id"))
+			if err != nil {
+				problemCode(w, http.StatusInternalServerError, "reference_check_failed")
+				return
+			}
+			if len(items) > 0 {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": "group_in_use", "message": "proxy group is referenced", "references": items})
+				return
+			}
+		}
 		err := groups.DeleteGroup(r.Context(), r.PathValue("id"))
 		if errors.Is(err, storepkg.ErrNotFound) {
 			problem(w, 404, "not_found", err)

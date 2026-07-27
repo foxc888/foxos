@@ -10,17 +10,41 @@ import (
 )
 
 type fakeRuntime struct {
-	validateErr, reloadErr, healthErr error
-	reloads                           int
+	validateErr, reloadErr, rollbackReloadErr, healthErr error
+	reloads                                              int
 }
 
-func (f *fakeRuntime) Validate(context.Context, string) error { return f.validateErr }
+func (f *fakeRuntime) Validate(context.Context, []byte) error { return f.validateErr }
 func (f *fakeRuntime) Reload(context.Context) error {
 	f.reloads++
 	if f.reloads == 1 {
 		return f.reloadErr
 	}
-	return nil
+	return f.rollbackReloadErr
+}
+
+func TestApplyDoesNotClaimRollbackWhenNoPreviousConfigExists(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	runtime := &fakeRuntime{reloadErr: errors.New("reload failed")}
+	result, err := (Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: filepath.Join(root, "backups"), Runtime: runtime}).Apply(context.Background(), []byte("new"))
+	if !errors.Is(err, ErrRollbackFailed) || result.RolledBack {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestApplyDoesNotClaimRollbackWhenRestoredReloadFails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	config := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(config, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{healthErr: errors.New("unhealthy"), rollbackReloadErr: errors.New("restored reload failed")}
+	result, err := (Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime}).Apply(context.Background(), []byte("new"))
+	if !errors.Is(err, ErrRollbackFailed) || result.RolledBack {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
 }
 func (f *fakeRuntime) Healthy(context.Context) error { return f.healthErr }
 

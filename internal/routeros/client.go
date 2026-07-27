@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,10 +25,21 @@ func NewClient(endpoint, username, password string) (*Client, error) {
 	if err != nil || base.Host == "" || (base.Scheme != "http" && base.Scheme != "https") || base.User != nil {
 		return nil, errors.New("invalid RouterOS REST endpoint")
 	}
+	if !privateEndpointHost(base.Hostname()) {
+		return nil, errors.New("RouterOS endpoint must use a private or loopback address")
+	}
 	if username == "" || password == "" {
 		return nil, errors.New("RouterOS credentials are required")
 	}
 	return &Client{base: base, username: username, password: password, http: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+}
+
+func privateEndpointHost(host string) bool {
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".local") {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
 }
 
 type Resource struct {
@@ -89,6 +101,34 @@ type ARP struct {
 	Complete   string `json:"complete"`
 }
 
+type Route struct {
+	ID       string `json:".id"`
+	Dst      string `json:"dst-address"`
+	Gateway  string `json:"gateway"`
+	Distance string `json:"distance"`
+	Active   string `json:"active"`
+	Disabled string `json:"disabled"`
+	Comment  string `json:"comment"`
+}
+
+type DHCPServer struct {
+	ID          string `json:".id"`
+	Name        string `json:"name"`
+	Interface   string `json:"interface"`
+	AddressPool string `json:"address-pool"`
+	Disabled    string `json:"disabled"`
+	Running     string `json:"running"`
+}
+
+type Container struct {
+	ID        string `json:".id"`
+	Name      string `json:"name"`
+	Comment   string `json:"comment"`
+	Status    string `json:"status"`
+	RootDir   string `json:"root-dir"`
+	Interface string `json:"interface"`
+}
+
 func (c *Client) Resource(ctx context.Context) (Resource, error) {
 	var out Resource
 	err := c.get(ctx, "/rest/system/resource", &out)
@@ -114,6 +154,21 @@ func (c *Client) L2TPClients(ctx context.Context) ([]L2TPClient, error) {
 	err := c.get(ctx, "/rest/interface/l2tp-client", &out)
 	return out, err
 }
+func (c *Client) Routes(ctx context.Context) ([]Route, error) {
+	var out []Route
+	err := c.get(ctx, "/rest/ip/route", &out)
+	return out, err
+}
+func (c *Client) DHCPServers(ctx context.Context) ([]DHCPServer, error) {
+	var out []DHCPServer
+	err := c.get(ctx, "/rest/ip/dhcp-server", &out)
+	return out, err
+}
+func (c *Client) Containers(ctx context.Context) ([]Container, error) {
+	var out []Container
+	err := c.get(ctx, "/rest/container", &out)
+	return out, err
+}
 
 func (c *Client) get(ctx context.Context, path string, destination any) error {
 	if !allowedReadPath(path) {
@@ -128,6 +183,8 @@ func (c *Client) get(ctx context.Context, path string, destination any) error {
 	}
 	request.SetBasicAuth(c.username, c.password)
 	request.Header.Set("Accept", "application/json")
+	// #nosec G704 -- the base URL is a validated private IP literal, the REST
+	// path is selected from allowedReadPath, and redirects are disabled.
 	response, err := c.http.Do(request)
 	if err != nil {
 		return err
@@ -137,8 +194,7 @@ func (c *Client) get(ctx context.Context, path string, destination any) error {
 		return errors.New("RouterOS authentication failed")
 	}
 	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("RouterOS status %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("RouterOS status %d", response.StatusCode)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 8<<20))
 	if err := decoder.Decode(destination); err != nil {
@@ -148,7 +204,9 @@ func (c *Client) get(ctx context.Context, path string, destination any) error {
 }
 func allowedReadPath(path string) bool {
 	switch path {
-	case "/rest/system/resource", "/rest/interface", "/rest/ip/dhcp-server/lease", "/rest/ip/arp", "/rest/interface/l2tp-client":
+	case "/rest/system/resource", "/rest/interface", "/rest/ip/dhcp-server/lease", "/rest/ip/arp", "/rest/interface/l2tp-client", "/rest/ip/route", "/rest/ip/dhcp-server", "/rest/container", "/rest/routing/table":
+		return true
+	case "/rest/ip/firewall/address-list", "/rest/ip/firewall/mangle", "/rest/ip/firewall/filter":
 		return true
 	}
 	return false

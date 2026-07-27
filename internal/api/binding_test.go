@@ -42,7 +42,7 @@ func TestBindingPreviewReturnsConfirmationAndExecuteConsumesOnce(t *testing.T) {
 	executor := &fakeBindingExecutor{}
 	mux := http.NewServeMux()
 	audit := &fakeAudit{}
-	app.RegisterBindingPlan(mux, fakeLeases{leases: []routeros.Lease{{ID: "*1", Address: "10.0.0.19", MACAddress: "AA:BB:CC:DD:EE:FF", Dynamic: "true"}}}, signer, executor, confirmation.NewReplayGuard(), audit)
+	app.RegisterBindingPlan(mux, fakeLeases{leases: []routeros.Lease{{ID: "*1", Address: "10.0.0.19", MACAddress: "AA:BB:CC:DD:EE:FF", Server: "dhcp-lan", Dynamic: "false", Comment: "foxos:device:phone"}}}, signer, executor, confirmation.NewReplayGuard(), audit)
 	body := `{"id":"phone","name":"iPhone","macAddress":"AA:BB:CC:DD:EE:FF","staticIp":"10.0.0.20","dhcpServer":"dhcp-lan","egress":"direct"}`
 	request := httptest.NewRequest("POST", "/api/v1/routeros/plans/device-binding", strings.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+token)

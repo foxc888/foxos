@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,6 +13,22 @@ import (
 
 type AuditReader interface {
 	AuditEvents(context.Context, int) ([]domain.AuditEvent, error)
+}
+
+func requestAuditDetails(r *http.Request, details map[string]any) map[string]any {
+	if details == nil {
+		details = make(map[string]any)
+	}
+	details["actor"] = "api-token"
+	source := "unknown"
+	if r != nil {
+		source = r.RemoteAddr
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			source = host
+		}
+	}
+	details["source"] = source
+	return details
 }
 
 type auditOutput struct {

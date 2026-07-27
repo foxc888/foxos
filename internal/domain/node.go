@@ -16,7 +16,7 @@ type Node struct {
 	Server         string
 	Port           int
 	Username       string
-	Password       string
+	Password       string // #nosec G117 -- persisted credential material is exposed only through redacted API output.
 	UUID           string
 	Cipher         string
 	Network        string
@@ -26,6 +26,7 @@ type Node struct {
 	UDP            bool
 	TLS            bool
 	SkipCertVerify bool
+	SubscriptionID string
 	Extra          map[string]any
 }
 

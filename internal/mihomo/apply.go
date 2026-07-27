@@ -16,7 +16,7 @@ var (
 )
 
 type Runtime interface {
-	Validate(context.Context, string) error
+	Validate(context.Context, []byte) error
 	Reload(context.Context) error
 	Healthy(context.Context) error
 }
@@ -62,21 +62,21 @@ func (a Applier) Apply(ctx context.Context, body []byte) (ApplyResult, error) {
 	tempPath := temp.Name()
 	defer os.Remove(tempPath)
 	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return ApplyResult{}, err
 	}
 	if _, err := temp.Write(body); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return ApplyResult{}, err
 	}
 	if err := temp.Sync(); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return ApplyResult{}, err
 	}
 	if err := temp.Close(); err != nil {
 		return ApplyResult{}, err
 	}
-	if err := a.Runtime.Validate(ctx, tempPath); err != nil {
+	if err := a.Runtime.Validate(ctx, body); err != nil {
 		return ApplyResult{}, fmt.Errorf("%w: validate: %v", ErrApplyFailed, err)
 	}
 
@@ -93,6 +93,8 @@ func (a Applier) Apply(ctx context.Context, body []byte) (ApplyResult, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return ApplyResult{}, err
 	}
+	// #nosec G703 -- both paths are absolute, the temporary file is created in
+	// the destination directory, and Rename is required for atomic replacement.
 	if err := os.Rename(tempPath, configPath); err != nil {
 		return ApplyResult{}, fmt.Errorf("%w: replace: %v", ErrApplyFailed, err)
 	}
@@ -106,7 +108,6 @@ func (a Applier) Apply(ctx context.Context, body []byte) (ApplyResult, error) {
 }
 
 func (a Applier) rollback(ctx context.Context, result ApplyResult, configPath string, cause error) (ApplyResult, error) {
-	result.RolledBack = true
 	if result.BackupPath == "" {
 		return result, fmt.Errorf("%w: %v; no previous config", ErrRollbackFailed, cause)
 	}
@@ -116,25 +117,44 @@ func (a Applier) rollback(ctx context.Context, result ApplyResult, configPath st
 	if err := a.Runtime.Reload(ctx); err != nil {
 		return result, fmt.Errorf("%w: reload restored config: %v", ErrRollbackFailed, err)
 	}
+	result.RolledBack = true
 	return result, fmt.Errorf("%w: runtime check: %v", ErrApplyFailed, cause)
 }
 
 func copyFile(source, destination string) error {
-	input, err := os.Open(source)
+	sourcePath, err := filepath.Abs(source)
+	if err != nil {
+		return err
+	}
+	destinationPath, err := filepath.Abs(destination)
+	if err != nil {
+		return err
+	}
+	sourceRoot, err := os.OpenRoot(filepath.Dir(sourcePath))
+	if err != nil {
+		return err
+	}
+	defer sourceRoot.Close()
+	input, err := sourceRoot.Open(filepath.Base(sourcePath))
 	if err != nil {
 		return err
 	}
 	defer input.Close()
-	output, err := os.OpenFile(destination, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	destinationRoot, err := os.OpenRoot(filepath.Dir(destinationPath))
+	if err != nil {
+		return err
+	}
+	defer destinationRoot.Close()
+	output, err := destinationRoot.OpenFile(filepath.Base(destinationPath), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(output, input); err != nil {
-		output.Close()
+		_ = output.Close()
 		return err
 	}
 	if err := output.Sync(); err != nil {
-		output.Close()
+		_ = output.Close()
 		return err
 	}
 	return output.Close()

@@ -11,9 +11,15 @@ import (
 )
 
 var ErrUnsafeOperation = errors.New("unsafe RouterOS operation")
+var ErrCompensationFailed = errors.New("RouterOS compensation failed")
+var ErrBindingRolledBack = errors.New("RouterOS binding changes were rolled back")
 
 type OperationWriter interface {
 	Apply(context.Context, Operation) error
+}
+
+type OperationCompensator interface {
+	Compensate(context.Context, []Operation) error
 }
 
 type PlanVerifier interface {
@@ -50,12 +56,30 @@ func (e *BindingExecutor) Execute(ctx context.Context, plan Plan, token string) 
 			return err
 		}
 	}
+	applied := make([]Operation, 0, len(plan.Operations))
 	for _, operation := range plan.Operations {
 		if err := e.writer.Apply(ctx, operation); err != nil {
+			if len(applied) > 0 {
+				if compensator, ok := e.writer.(OperationCompensator); ok {
+					if compensationErr := compensator.Compensate(ctx, applied); compensationErr != nil {
+						return fmt.Errorf("%w: %v (original: %v)", ErrCompensationFailed, compensationErr, err)
+					}
+					return fmt.Errorf("%w: %v", ErrBindingRolledBack, err)
+				}
+			}
 			return fmt.Errorf("RouterOS operation failed: %w", err)
 		}
+		applied = append(applied, operation)
 	}
 	if err := e.verifier.Verify(ctx, plan); err != nil {
+		if len(applied) > 0 {
+			if compensator, ok := e.writer.(OperationCompensator); ok {
+				if compensationErr := compensator.Compensate(ctx, applied); compensationErr != nil {
+					return fmt.Errorf("%w: %v (original: %v)", ErrCompensationFailed, compensationErr, err)
+				}
+				return fmt.Errorf("%w: readback verification: %v", ErrBindingRolledBack, err)
+			}
+		}
 		return fmt.Errorf("RouterOS readback verification failed: %w", err)
 	}
 	return nil
@@ -66,7 +90,7 @@ func validateBindingOperation(operation Operation) error {
 		return fmt.Errorf("%w: method", ErrUnsafeOperation)
 	}
 	if operation.Path != "/rest/ip/dhcp-server/lease" &&
-		!strings.HasPrefix(operation.Path, "/rest/ip/dhcp-server/lease/*") {
+		!(strings.HasPrefix(operation.Path, "/rest/ip/dhcp-server/lease/") && safeRouterOSID(strings.TrimPrefix(operation.Path, "/rest/ip/dhcp-server/lease/"))) {
 		return fmt.Errorf("%w: path", ErrUnsafeOperation)
 	}
 	if !strings.HasPrefix(operation.OwnedComment, "foxos:device:") {
@@ -74,6 +98,12 @@ func validateBindingOperation(operation Operation) error {
 	}
 	if operation.Body["comment"] != operation.OwnedComment {
 		return fmt.Errorf("%w: comment mismatch", ErrUnsafeOperation)
+	}
+	if isManagementAddress(operation.Body["address"]) {
+		return fmt.Errorf("%w: management address", ErrUnsafeOperation)
+	}
+	if operation.Body["address"] == "" || operation.Body["mac-address"] == "" || operation.Body["server"] == "" {
+		return fmt.Errorf("%w: incomplete binding body", ErrUnsafeOperation)
 	}
 	return nil
 }

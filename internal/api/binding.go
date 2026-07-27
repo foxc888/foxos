@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"time"
@@ -20,6 +22,9 @@ type BindingExecutor interface {
 type AuditStore interface {
 	SaveAudit(context.Context, domain.AuditEvent) error
 }
+type ReplayStore interface {
+	ConsumeReplay(context.Context, string, time.Time) error
+}
 
 type bindingInput struct {
 	ID         string            `json:"id"`
@@ -35,7 +40,7 @@ type bindingExecution struct {
 	ConfirmationToken string        `json:"confirmationToken"`
 }
 
-func (s *Server) RegisterBindingPlan(mux *http.ServeMux, reader LeaseReader, signer *confirmation.Signer, executor BindingExecutor, guard *confirmation.ReplayGuard, audit AuditStore) {
+func (s *Server) RegisterBindingPlan(mux *http.ServeMux, reader LeaseReader, signer *confirmation.Signer, executor BindingExecutor, guard *confirmation.ReplayGuard, audit AuditStore, durable ...ReplayStore) {
 	mux.Handle("POST /api/v1/routeros/plans/device-binding", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if reader == nil || signer == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"configured": false, "error": "routeros_not_configured"})
@@ -82,15 +87,27 @@ func (s *Server) RegisterBindingPlan(mux *http.ServeMux, reader LeaseReader, sig
 			problem(w, 409, "confirmation_invalid", err)
 			return
 		}
-		if err := guard.Consume(input.ConfirmationToken); err != nil {
-			problem(w, 409, "confirmation_replayed", err)
-			return
-		}
 		if audit == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"configured": false, "error": "audit_store_not_configured"})
 			return
 		}
-		event := domain.AuditEvent{ID: randomID(), Action: "routeros.device-binding", TargetID: input.Plan.PolicyID, Outcome: domain.AuditStarted, Details: map[string]any{"operationCount": len(input.Plan.Operations)}}
+		if len(durable) > 0 && durable[0] != nil {
+			if err := durable[0].ConsumeReplay(r.Context(), confirmationDigest(input.ConfirmationToken), time.Now().UTC().Add(15*time.Minute)); err != nil {
+				problem(w, 409, "confirmation_replayed", err)
+				return
+			}
+		} else if guard == nil {
+			problemCode(w, http.StatusServiceUnavailable, "confirmation_replay_unavailable")
+			return
+		} else if err := guard.Consume(input.ConfirmationToken); err != nil {
+			problem(w, 409, "confirmation_replayed", err)
+			return
+		}
+		changes := make([]map[string]string, 0, len(input.Plan.Operations))
+		for _, operation := range input.Plan.Operations {
+			changes = append(changes, map[string]string{"method": operation.Method, "path": operation.Path, "summary": operation.Summary})
+		}
+		event := domain.AuditEvent{ID: randomID(), Action: "routeros.device-binding", TargetID: input.Plan.PolicyID, Outcome: domain.AuditStarted, Details: requestAuditDetails(r, map[string]any{"operationCount": len(input.Plan.Operations), "changes": changes})}
 		if err := audit.SaveAudit(r.Context(), event); err != nil {
 			problem(w, 500, "audit_start_failed", err)
 			return
@@ -99,12 +116,29 @@ func (s *Server) RegisterBindingPlan(mux *http.ServeMux, reader LeaseReader, sig
 		defer cancel()
 		if err := executor.Execute(ctx, input.Plan, input.ConfirmationToken); err != nil {
 			event.Outcome = domain.AuditFailed
-			if errors.Is(err, routeros.ErrWriteVerification) {
+			switch {
+			case errors.Is(err, routeros.ErrCompensationFailed):
+				event.Details["errorClass"] = "routeros_compensation_failed"
+				event.Details["rolledBack"] = false
+			case errors.Is(err, routeros.ErrBindingRolledBack):
+				event.Details["errorClass"] = "routeros_binding_rolled_back"
+				event.Details["rolledBack"] = true
+			case errors.Is(err, routeros.ErrWriteVerification):
 				event.Details["errorClass"] = "routeros_verification_failed"
-			} else {
+				event.Details["rolledBack"] = false
+			default:
 				event.Details["errorClass"] = "routeros_write_failed"
+				event.Details["rolledBack"] = false
 			}
 			_ = audit.SaveAudit(r.Context(), event)
+			if errors.Is(err, routeros.ErrBindingRolledBack) {
+				problem(w, http.StatusConflict, "routeros_binding_rolled_back", err)
+				return
+			}
+			if errors.Is(err, routeros.ErrCompensationFailed) {
+				problem(w, http.StatusBadGateway, "routeros_compensation_failed", err)
+				return
+			}
 			if errors.Is(err, routeros.ErrWriteVerification) {
 				problem(w, 502, "routeros_verification_failed", err)
 				return
@@ -119,4 +153,10 @@ func (s *Server) RegisterBindingPlan(mux *http.ServeMux, reader LeaseReader, sig
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "applied", "policyId": input.Plan.PolicyID, "auditId": event.ID})
 	})))
+}
+
+func confirmationDigest(token string) string {
+	// ReplayStore receives a digest, never the bearer-like confirmation token.
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }

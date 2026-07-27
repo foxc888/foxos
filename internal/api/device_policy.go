@@ -52,6 +52,14 @@ func (s *Server) RegisterDevicePolicies(mux *http.ServeMux, store DevicePolicySt
 			return
 		}
 		policy := in.domain()
+		if validator, ok := store.(interface {
+			ValidateDevicePolicyTarget(context.Context, domain.DevicePolicy) error
+		}); ok {
+			if err := validator.ValidateDevicePolicyTarget(r.Context(), policy); err != nil {
+				problem(w, http.StatusUnprocessableEntity, "invalid_policy_target", err)
+				return
+			}
+		}
 		if err := store.SaveDevicePolicy(r.Context(), policy); err != nil {
 			problem(w, 422, "invalid_policy", err)
 			return
@@ -78,6 +86,14 @@ func (s *Server) RegisterDevicePolicies(mux *http.ServeMux, store DevicePolicySt
 		}
 		in.ID = r.PathValue("id")
 		policy := in.domain()
+		if validator, ok := store.(interface {
+			ValidateDevicePolicyTarget(context.Context, domain.DevicePolicy) error
+		}); ok {
+			if err := validator.ValidateDevicePolicyTarget(r.Context(), policy); err != nil {
+				problem(w, http.StatusUnprocessableEntity, "invalid_policy_target", err)
+				return
+			}
+		}
 		if err := store.SaveDevicePolicy(r.Context(), policy); err != nil {
 			problem(w, 422, "invalid_policy", err)
 			return

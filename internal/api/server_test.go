@@ -69,3 +69,44 @@ func TestNodeAPIRequiresAuthAndRedactsSecrets(t *testing.T) {
 		t.Fatal("expected redacted credential marker")
 	}
 }
+
+func TestNodeAPIEnforcesJSONBodyLimit(t *testing.T) {
+	t.Parallel()
+	const (
+		token     = "01234567890123456789012345678901"
+		bodyLimit = 1 << 20
+	)
+	base := `{"name":"HK-01","type":"vless","server":"example.com","port":443}`
+	tests := []struct {
+		name       string
+		size       int
+		wantStatus int
+		wantSaved  int
+	}{
+		{name: "body at limit", size: bodyLimit, wantStatus: http.StatusCreated, wantSaved: 1},
+		{name: "body over limit", size: bodyLimit + 1, wantStatus: http.StatusBadRequest, wantSaved: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store := &memoryNodes{nodes: map[string]domain.Node{}}
+			app, err := New(store, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mux := http.NewServeMux()
+			app.Register(mux)
+			body := base + strings.Repeat(" ", test.size-len(base))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if len(store.nodes) != test.wantSaved {
+				t.Fatalf("saved nodes=%d, want %d", len(store.nodes), test.wantSaved)
+			}
+		})
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +66,22 @@ func TestRejectsRedirect(t *testing.T) {
 	}
 	if _, err := client.Resource(context.Background()); err == nil {
 		t.Fatal("expected redirect rejection")
+	}
+}
+
+func TestReadErrorDoesNotExposeRouterOSBody(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("device-secret-must-not-leak"))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "foxos", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Resource(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "status 500") || strings.Contains(err.Error(), "device-secret") {
+		t.Fatalf("Resource() error = %v", err)
 	}
 }

@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -24,14 +26,14 @@ type NodeStore interface {
 
 type Server struct {
 	nodes NodeStore
-	token string
+	token [sha256.Size]byte
 }
 
 func New(nodes NodeStore, token string) (*Server, error) {
 	if nodes == nil || len(token) < 32 {
 		return nil, errors.New("node store and API token of at least 32 characters are required")
 	}
-	return &Server{nodes: nodes, token: token}, nil
+	return &Server{nodes: nodes, token: sha256.Sum256([]byte(token))}, nil
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
@@ -50,7 +52,7 @@ type nodeInput struct {
 	Server         string         `json:"server"`
 	Port           int            `json:"port"`
 	Username       string         `json:"username,omitempty"`
-	Password       string         `json:"password,omitempty"`
+	Password       string         `json:"password,omitempty"` // #nosec G117 -- write-only API input; nodeOutput never includes the value.
 	UUID           string         `json:"uuid,omitempty"`
 	Cipher         string         `json:"cipher,omitempty"`
 	Network        string         `json:"network,omitempty"`
@@ -86,7 +88,8 @@ func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "Bearer "
 		value := r.Header.Get("Authorization")
-		if !strings.HasPrefix(value, prefix) || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(value, prefix)), []byte(s.token)) != 1 {
+		candidate := sha256.Sum256([]byte(strings.TrimPrefix(value, prefix)))
+		if !strings.HasPrefix(value, prefix) || subtle.ConstantTimeCompare(candidate[:], s.token[:]) != 1 {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			problem(w, http.StatusUnauthorized, "unauthorized", errors.New("valid bearer token required"))
 			return
@@ -149,6 +152,19 @@ func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, output(node))
 }
 func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
+	if references, ok := s.nodes.(interface {
+		NodeReferences(context.Context, string) ([]string, error)
+	}); ok {
+		items, err := references.NodeReferences(r.Context(), r.PathValue("id"))
+		if err != nil {
+			problemCode(w, http.StatusInternalServerError, "reference_check_failed")
+			return
+		}
+		if len(items) > 0 {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "node_in_use", "message": "node is referenced", "references": items})
+			return
+		}
+	}
 	err := s.nodes.DeleteNode(r.Context(), r.PathValue("id"))
 	if errors.Is(err, storepkg.ErrNotFound) {
 		problem(w, 404, "not_found", err)
@@ -161,7 +177,14 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 func decode(r *http.Request, dst any) error {
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+	if err != nil {
+		return err
+	}
+	if len(body) > 1<<20 {
+		return errors.New("request body exceeds 1 MiB")
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return err
@@ -185,5 +208,13 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 func problem(w http.ResponseWriter, status int, code string, err error) {
-	writeJSON(w, status, map[string]any{"error": code, "message": err.Error()})
+	message := code
+	if status < 500 && err != nil {
+		message = err.Error()
+	}
+	writeJSON(w, status, map[string]any{"error": code, "message": message})
+}
+
+func problemCode(w http.ResponseWriter, status int, code string) {
+	problem(w, status, code, nil)
 }

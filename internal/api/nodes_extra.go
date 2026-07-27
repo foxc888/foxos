@@ -69,12 +69,27 @@ func (s *Server) probeNode(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, node.Server)
+	if err != nil || len(addresses) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"reachable": false, "latencyMs": time.Since(started).Milliseconds(), "error": "dns_lookup_failed"})
+		return
+	}
+	for _, address := range addresses {
+		if blockedProbeAddress(address.IP) {
+			problemCode(w, http.StatusUnprocessableEntity, "probe_target_blocked")
+			return
+		}
+	}
 	dialer := net.Dialer{}
-	connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(node.Server, strconv.Itoa(node.Port)))
+	connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(addresses[0].IP.String(), strconv.Itoa(node.Port)))
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"reachable": false, "latencyMs": time.Since(started).Milliseconds(), "error": "tcp_connect_failed"})
 		return
 	}
 	_ = connection.Close()
 	writeJSON(w, http.StatusOK, map[string]any{"reachable": true, "latencyMs": time.Since(started).Milliseconds()})
+}
+
+func blockedProbeAddress(ip net.IP) bool {
+	return ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
 }
