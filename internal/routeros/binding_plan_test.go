@@ -58,6 +58,15 @@ func TestPlanUpdatesOwnedLease(t *testing.T) {
 	}
 }
 
+func TestPlanRejectsMovingOwnedStaticLeaseIntoDynamicPool(t *testing.T) {
+	p := policy()
+	p.StaticIP = "10.0.0.150"
+	_, err := PlanDeviceBinding(p, bindingState(Lease{ID: "*1", Address: "10.0.0.19", MACAddress: "AA:BB:CC:DD:EE:FF", Dynamic: "false", Server: "dhcp-lan", Comment: "foxos:device:phone"}))
+	if !errors.Is(err, ErrPlanConflict) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestPlanRejectsLeaseAndARPConflicts(t *testing.T) {
 	for _, test := range []struct {
 		name  string

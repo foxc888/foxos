@@ -103,16 +103,13 @@ func PlanDeviceBinding(policy domain.DevicePolicy, state BindingState) (Plan, er
 			return Plan{}, fmt.Errorf("%w: IP %s is assigned to RouterOS", ErrPlanConflict, policy.StaticIP)
 		}
 	}
-	if current == nil && addressInRanges(policy.StaticIP, poolRanges) {
-		return Plan{}, fmt.Errorf("%w: new static address must be in the reserved range outside the dynamic pool", ErrPlanConflict)
+	if addressInRanges(policy.StaticIP, poolRanges) && (current == nil || current.Address != policy.StaticIP) {
+		return Plan{}, fmt.Errorf("%w: new or changed static address must be in the reserved range outside the dynamic pool", ErrPlanConflict)
 	}
 	if current != nil {
 		if current.Dynamic == "true" {
 			if current.Server != policy.DHCPServer || strings.TrimSpace(current.Comment) != "" {
 				return Plan{}, fmt.Errorf("%w: dynamic lease is not an ordinary lease on the selected DHCP server", ErrPlanConflict)
-			}
-			if current.Address != policy.StaticIP && addressInRanges(policy.StaticIP, poolRanges) {
-				return Plan{}, fmt.Errorf("%w: changed static address must be in the reserved range outside the dynamic pool", ErrPlanConflict)
 			}
 		} else if current.Comment != comment {
 			return Plan{}, fmt.Errorf("%w: existing static lease is not owned by this FoxOS policy", ErrPlanConflict)
