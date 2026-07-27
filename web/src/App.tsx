@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -10,18 +10,18 @@ import {
   ChevronRight,
   CircleGauge,
   Database,
+  Download,
   FileText,
   Globe2,
   HardDrive,
   Home,
   Laptop,
   Link2,
-  ListFilter,
+  ListChecks,
   LockKeyhole,
   Menu,
   Monitor,
   Network,
-  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -41,18 +41,57 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  ApiError,
+  type ApiNode,
+  type AuditEvent,
+  createProxyGroup,
   createNode as createNodeApi,
   deleteNode as deleteNodeApi,
+  deleteProxyGroup,
+  type DeviceBindingPlan,
+  type DeviceInventory,
+  type DevicePolicy,
+  type DevicePresenceEvent,
+  type DeviceProfile,
+  type EgressPlan,
+  type EgressType,
   executeDeviceBinding,
+  executeDeviceEgress,
+  getDevicePresenceHistory,
   importNodeLinks,
+  type L2TPClient,
   loadLiveSnapshot,
+  type MihomoOverview,
+  type MihomoProbeResult,
+  type MosDNSOverview,
   planDeviceBinding,
+  planDeviceEgress,
   probeNode,
+  probeMihomoNode,
+  type ProxyGroup,
+  type RouterContainer,
+  type RouterDHCPServer,
+  type RouterOverview,
+  type RouterRoute,
   saveApiToken,
+  updateProxyGroup,
+  updateDeviceMetadata,
+  waitForJob,
 } from "./api";
-import { Device, initialDevices, initialNodes, logs, ProxyNode, services } from "./data";
+import { ConfirmDialog, Dialog } from "./components/Dialog";
+import { AlertBackupOperations, MihomoOperations, SubscriptionOperations } from "./components/OperationsPanels";
+import { type Device, type ProxyNode, services } from "./data";
+import { egressLabel, policyForDevice, proposedDevicePolicy } from "./policy-state";
+import {
+  expireResource,
+  initialResource,
+  markLoading,
+  mergeResult,
+  phaseLabel,
+  type ResourceState,
+} from "./live-state";
 
-type PageKey =
+export type PageKey =
   | "overview"
   | "routeros"
   | "mosdns"
@@ -60,10 +99,50 @@ type PageKey =
   | "devices"
   | "topology"
   | "logs"
+  | "operations"
   | "settings";
 
 type Toast = { message: string; tone: "success" | "warning" };
-type ConnectionMode = "loading" | "live" | "demo";
+type LogItem = { time: string; level: "成功" | "错误" | "信息"; source: string; event: string; detail: string };
+
+type LiveResources = {
+  routeros: ResourceState<RouterOverview>;
+  mihomo: ResourceState<MihomoOverview>;
+  mosdns: ResourceState<MosDNSOverview>;
+  nodes: ResourceState<ApiNode[]>;
+  l2tp: ResourceState<L2TPClient[]>;
+  routes: ResourceState<RouterRoute[]>;
+  dhcpServers: ResourceState<RouterDHCPServer[]>;
+  containers: ResourceState<RouterContainer[]>;
+  deviceInventory: ResourceState<DeviceInventory>;
+  policies: ResourceState<DevicePolicy[]>;
+  groups: ResourceState<ProxyGroup[]>;
+  audit: ResourceState<AuditEvent[]>;
+};
+
+const pageKeys: PageKey[] = ["overview", "routeros", "mosdns", "proxies", "devices", "topology", "logs", "operations", "settings"];
+
+export function pageFromHash(hash: string): PageKey {
+  const candidate = hash.replace(/^#/, "") as PageKey;
+  return pageKeys.includes(candidate) ? candidate : "overview";
+}
+
+function initialResources(): LiveResources {
+  return {
+    routeros: initialResource("FoxOS API / RouterOS REST"),
+    mihomo: initialResource("FoxOS API / Mihomo Controller"),
+    mosdns: initialResource("FoxOS API / MosDNS（只读）"),
+    nodes: initialResource("FoxOS API / SQLite"),
+    l2tp: initialResource("FoxOS API / RouterOS REST"),
+    routes: initialResource("FoxOS API / RouterOS 路由表"),
+    dhcpServers: initialResource("FoxOS API / RouterOS DHCP"),
+    containers: initialResource("FoxOS API / RouterOS Container"),
+    deviceInventory: initialResource("FoxOS API / SQLite 设备库存"),
+    policies: initialResource("FoxOS API / SQLite 设备策略"),
+    groups: initialResource("FoxOS API / SQLite 代理组"),
+    audit: initialResource("FoxOS API / SQLite"),
+  };
+}
 
 function numericId(value: string): number {
   let hash = 0;
@@ -80,6 +159,73 @@ function deviceKind(name: string): Device["kind"] {
   return "computer";
 }
 
+function mapApiNode(node: ApiNode): ProxyNode {
+  return {
+    id: numericId(node.id),
+    apiId: node.id,
+    name: node.name,
+    protocol: node.type.toUpperCase(),
+    server: `${node.server}:${node.port}`,
+    region: "未采集",
+    source: "FoxOS 数据库",
+    latency: null,
+    loss: 0,
+    status: "warning",
+    verification: "unverified",
+    inUse: "—",
+  };
+}
+
+function mapL2TPNode(client: L2TPClient): ProxyNode {
+  return {
+    id: numericId(`l2tp:${client.id}`),
+    name: client.name,
+    protocol: "L2TP",
+    server: client.connectTo,
+    region: "未采集",
+    source: "RouterOS 原生",
+    latency: null,
+    loss: 0,
+    status: client.running && !client.disabled ? "online" : client.disabled ? "offline" : "warning",
+    verification: "routeros-session",
+    inUse: "—",
+  };
+}
+
+function mapDevice(device: NonNullable<RouterOverview["devices"]>[number], profile?: DeviceProfile): Device {
+  const displayName = profile?.alias || device.hostName || device.macAddress;
+  return {
+    id: numericId(device.macAddress),
+    apiId: device.macAddress,
+    name: displayName,
+    kind: deviceKind(displayName),
+    ip: device.address,
+    mac: device.macAddress,
+    iface: device.interface || device.dhcpServer || "—",
+    dhcpServer: device.dhcpServer,
+    alias: profile?.alias,
+    vendor: profile?.vendor,
+    tags: profile?.tags ?? [],
+    firstSeen: profile?.firstSeen,
+    profileTracked: Boolean(profile),
+    egress: "未设置",
+    latency: null,
+    online: device.status === "bound",
+    fixed: !device.dynamic,
+    lastSeen: profile?.lastSeen || device.lastSeen || "未提供",
+  };
+}
+
+function mapAudit(event: AuditEvent): LogItem {
+  return {
+    time: new Date(event.createdAt).toLocaleString("zh-CN", { hour12: false }),
+    level: event.outcome === "SUCCEEDED" ? "成功" : event.outcome === "FAILED" ? "错误" : "信息",
+    source: event.action.startsWith("routeros") ? "RouterOS" : "FoxOS",
+    event: event.action,
+    detail: event.targetId || "—",
+  };
+}
+
 const navItems: { key: PageKey; label: string; icon: typeof Home }[] = [
   { key: "overview", label: "总览", icon: Home },
   { key: "routeros", label: "RouterOS", icon: Router },
@@ -88,22 +234,114 @@ const navItems: { key: PageKey; label: string; icon: typeof Home }[] = [
   { key: "devices", label: "设备管理", icon: Monitor },
   { key: "topology", label: "网络拓扑", icon: Network },
   { key: "logs", label: "日志", icon: FileText },
+  { key: "operations", label: "运维任务", icon: Activity },
   { key: "settings", label: "设置", icon: Settings },
 ];
 
 const pageTitle: Record<PageKey, { title: string; subtitle: string }> = {
-  overview: { title: "总览", subtitle: "实时掌握 RouterOS、代理出口与局域网设备" },
-  routeros: { title: "RouterOS", subtitle: "接口、路由、DHCP 与系统资源" },
-  mosdns: { title: "MosDNS", subtitle: "只读运行状态与查询指标" },
-  proxies: { title: "代理节点", subtitle: "节点、订阅、链式代理与 RouterOS 原生 L2TP" },
-  devices: { title: "设备管理", subtitle: "静态 IP 绑定与设备出口策略" },
-  topology: { title: "网络拓扑", subtitle: "以 RouterOS 为中心查看实时网络路径" },
-  logs: { title: "日志", subtitle: "统一查看系统、网络与操作审计记录" },
-  settings: { title: "设置", subtitle: "服务连接、安全操作与备份恢复" },
+  overview: { title: "总览", subtitle: "RouterOS、Mihomo、MosDNS 与局域网设备的可验证状态" },
+  routeros: { title: "RouterOS", subtitle: "资源、接口与 DHCP 只读数据" },
+  mosdns: { title: "MosDNS", subtitle: "只读运行状态，不接管 DNS 配置" },
+  proxies: { title: "代理节点", subtitle: "FoxOS 节点与 RouterOS 原生 L2TP" },
+  devices: { title: "设备管理", subtitle: "RouterOS 设备读取与受控静态租约" },
+  topology: { title: "网络拓扑", subtitle: "仅展示已由 API 验证的管理面组件" },
+  logs: { title: "审计日志", subtitle: "FoxOS API 返回的操作记录" },
+  operations: { title: "运维任务", subtitle: "配置发布、订阅、告警与备份" },
+  settings: { title: "设置", subtitle: "当前标签页凭据与服务端配置边界" },
 };
 
+function statusTone(phase: ResourceState<unknown>["phase"], online?: boolean): "ok" | "warning" | "offline" {
+  if (phase === "live") return online === false ? "offline" : "ok";
+  if (phase === "loading" || phase === "stale") return "warning";
+  return "offline";
+}
+
+function serviceLabel<T extends { configured: boolean; online: boolean }>(resource: ResourceState<T>): string {
+  if (resource.phase !== "live") return phaseLabel(resource.phase);
+  if (!resource.data?.configured) return "未配置";
+  return resource.data.online ? "在线" : "离线";
+}
+
+function formatUpdated(value?: string): string {
+  if (!value) return "尚未成功加载";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "时间未知";
+  return parsed.toLocaleString("zh-CN", { hour12: false });
+}
+
+function readableBytes(value?: string): string {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = bytes;
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit += 1;
+  }
+  return `${amount.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function usagePercent(free?: string, total?: string): string {
+  const freeValue = Number(free);
+  const totalValue = Number(total);
+  if (!Number.isFinite(freeValue) || !Number.isFinite(totalValue) || totalValue <= 0) return "—";
+  return `${Math.max(0, Math.min(100, Math.round((1 - freeValue / totalValue) * 100)))}%`;
+}
+
+function useMediaQuery(query: string): boolean {
+  const getMatch = () => typeof window.matchMedia === "function" && window.matchMedia(query).matches;
+  const [matches, setMatches] = useState(getMatch);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia(query);
+    const update = () => setMatches(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, [query]);
+  return matches;
+}
+
+function proxyStatusLabel(node: ProxyNode, sourcePhase: ResourceState<unknown>["phase"]): string {
+  if (node.verification === "tcp") {
+    return node.status === "online" ? "TCP 可达" : node.status === "offline" ? "TCP 不可达" : "TCP 未确认";
+  }
+  if (node.verification === "routeros-session") {
+    if (sourcePhase !== "live") return "上次会话状态";
+    return node.status === "online" ? "L2TP 会话运行" : node.status === "offline" ? "L2TP 已禁用" : "L2TP 会话未确认";
+  }
+  return "未检测";
+}
+
+function proxyStatusTone(node: ProxyNode, sourcePhase: ResourceState<unknown>["phase"]): "ok" | "warning" | "offline" {
+  if (node.verification === "routeros-session" && sourcePhase !== "live") return "warning";
+  return node.status === "online" ? "ok" : node.status;
+}
+
+function handleGridRowKeyDown(event: React.KeyboardEvent<HTMLTableRowElement>, select: () => void) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    select();
+    return;
+  }
+  const rows = Array.from(event.currentTarget.closest("tbody")?.querySelectorAll<HTMLTableRowElement>("tr[data-grid-row]") ?? []);
+  const currentIndex = rows.indexOf(event.currentTarget);
+  let nextIndex = currentIndex;
+  if (event.key === "ArrowDown") nextIndex = Math.min(rows.length - 1, currentIndex + 1);
+  else if (event.key === "ArrowUp") nextIndex = Math.max(0, currentIndex - 1);
+  else if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = rows.length - 1;
+  else return;
+  event.preventDefault();
+  const next = rows[nextIndex];
+  next?.focus();
+  next?.click();
+}
+
 function StatusDot({ status = "ok" }: { status?: "ok" | "warning" | "offline" }) {
-  return <span className={`status-dot ${status}`} aria-label={status} />;
+  const label = status === "ok" ? "正常" : status === "warning" ? "待确认" : "不可用";
+  return <span aria-label={label} className={`status-dot ${status}`} role="img" />;
 }
 
 function Button({
@@ -113,6 +351,7 @@ function Button({
   onClick,
   type = "button",
   disabled = false,
+  title,
 }: {
   children: React.ReactNode;
   icon?: typeof Plus;
@@ -120,10 +359,11 @@ function Button({
   onClick?: () => void;
   type?: "button" | "submit";
   disabled?: boolean;
+  title?: string;
 }) {
   return (
-    <button className={`button ${variant}`} onClick={onClick} type={type} disabled={disabled}>
-      {Icon ? <Icon size={16} /> : null}
+    <button className={`button ${variant}`} disabled={disabled} onClick={onClick} title={title} type={type}>
+      {Icon ? <Icon aria-hidden="true" size={16} /> : null}
       {children}
     </button>
   );
@@ -131,772 +371,945 @@ function Button({
 
 function ServiceIcon({ name, tone }: { name: string; tone: string }) {
   const Icon = name === "RouterOS" ? Router : name === "Mihomo" ? Network : Database;
-  return (
-    <span className={`service-icon ${tone}`}>
-      <Icon size={28} />
-    </span>
-  );
+  return <span className={`service-icon ${tone}`}><Icon aria-hidden="true" size={28} /></span>;
 }
 
 function DeviceIcon({ kind }: { kind: Device["kind"] }) {
   const Icon = kind === "phone" ? Smartphone : kind === "server" ? Server : kind === "tv" ? Tv : kind === "iot" ? Wifi : Laptop;
-  return <Icon size={17} />;
+  return <Icon aria-hidden="true" size={17} />;
+}
+
+function ResourceMeta<T>({ resource }: { resource: ResourceState<T> }) {
+  return (
+    <div aria-live="polite" className={`resource-meta ${resource.phase}`}>
+      <span><StatusDot status={statusTone(resource.phase)} />{phaseLabel(resource.phase)}</span>
+      <span>来源：{resource.source}</span>
+      <span>更新：{formatUpdated(resource.updatedAt)}</span>
+      {resource.error ? <span className="resource-error">{resource.error}</span> : null}
+    </div>
+  );
+}
+
+function EmptyState({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="empty-state" role="status">
+      <AlertTriangle aria-hidden="true" size={20} />
+      <div><strong>{title}</strong><span>{detail}</span></div>
+    </div>
+  );
+}
+
+function SummaryCard({ icon: Icon, label, value, tone = "blue" }: { icon: typeof Users; label: string; value: string | number; tone?: string }) {
+  return (
+    <div className="summary-card">
+      <span className={`summary-icon ${tone}`}><Icon aria-hidden="true" size={20} /></span>
+      <div><small>{label}</small><strong>{value}</strong></div>
+    </div>
+  );
 }
 
 function App() {
-  const [page, setPage] = useState<PageKey>("overview");
+  const [page, setPage] = useState<PageKey>(() => pageFromHash(window.location.hash));
   const [collapsed, setCollapsed] = useState(false);
-  const [devices, setDevices] = useState(initialDevices);
-  const [nodes, setNodes] = useState(initialNodes);
-  const [selectedDeviceId, setSelectedDeviceId] = useState(1);
-  const [selectedNodeId, setSelectedNodeId] = useState(1);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [nodes, setNodes] = useState<ProxyNode[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState(0);
+  const [selectedNodeId, setSelectedNodeId] = useState(0);
   const [toast, setToast] = useState<Toast | null>(null);
   const [scanning, setScanning] = useState(false);
-  const [connectionMode, setConnectionMode] = useState<ConnectionMode>("loading");
-  const [liveLogs, setLiveLogs] = useState(logs);
+  const [liveLogs, setLiveLogs] = useState<LogItem[]>([]);
+  const [resources, setResources] = useState<LiveResources>(initialResources);
+  const [clock, setClock] = useState(() => new Date());
+  const toastTimer = useRef<number | undefined>(undefined);
+  const mainRef = useRef<HTMLElement>(null);
+  const mobileMenuRef = useRef<HTMLButtonElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const isMobile = useMediaQuery("(max-width: 760px)");
 
-  const notify = (message: string, tone: Toast["tone"] = "success") => {
+  const notify = useCallback((message: string, tone: Toast["tone"] = "success") => {
+    if (toastTimer.current !== undefined) window.clearTimeout(toastTimer.current);
     setToast({ message, tone });
-    window.setTimeout(() => setToast(null), 2800);
-  };
+    toastTimer.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimer.current = undefined;
+    }, 3500);
+  }, []);
 
-  const refreshLiveData = async (showToast = false) => {
+  useEffect(() => () => {
+    if (toastTimer.current !== undefined) window.clearTimeout(toastTimer.current);
+  }, []);
+
+  const refreshLiveData = useCallback(async (showToast = false) => {
     setScanning(true);
+    setResources((current) => ({
+      routeros: markLoading(current.routeros),
+      mihomo: markLoading(current.mihomo),
+      mosdns: markLoading(current.mosdns),
+      nodes: markLoading(current.nodes),
+      l2tp: markLoading(current.l2tp),
+      routes: markLoading(current.routes),
+      dhcpServers: markLoading(current.dhcpServers),
+      containers: markLoading(current.containers),
+      deviceInventory: markLoading(current.deviceInventory),
+      policies: markLoading(current.policies),
+      groups: markLoading(current.groups),
+      audit: markLoading(current.audit),
+    }));
     try {
       const snapshot = await loadLiveSnapshot();
-      const apiNodes: ProxyNode[] = snapshot.nodes.map((node) => ({
-        id: numericId(node.id),
-        apiId: node.id,
-        name: node.name,
-        protocol: node.type.toUpperCase(),
-        server: `${node.server}:${node.port}`,
-        region: "待检测",
-        source: "FoxOS 数据库",
-        latency: null,
-        loss: 0,
-        status: snapshot.mihomo.online ? "online" : "warning",
-        inUse: "—",
+      setResources((current) => ({
+        routeros: mergeResult(current.routeros, snapshot.routeros),
+        mihomo: mergeResult(current.mihomo, snapshot.mihomo),
+        mosdns: mergeResult(current.mosdns, snapshot.mosdns),
+        nodes: mergeResult(current.nodes, snapshot.nodes),
+        l2tp: mergeResult(current.l2tp, snapshot.l2tp),
+        routes: mergeResult(current.routes, snapshot.routes),
+        dhcpServers: mergeResult(current.dhcpServers, snapshot.dhcpServers),
+        containers: mergeResult(current.containers, snapshot.containers),
+        deviceInventory: mergeResult(current.deviceInventory, snapshot.deviceInventory),
+        policies: mergeResult(current.policies, snapshot.policies),
+        groups: mergeResult(current.groups, snapshot.groups),
+        audit: mergeResult(current.audit, snapshot.audit),
       }));
-      const l2tpNodes: ProxyNode[] = snapshot.l2tp.map((client) => ({
-        id: numericId(`l2tp:${client.id}`),
-        name: client.name,
-        protocol: "L2TP",
-        server: client.connectTo,
-        region: "待检测",
-        source: "RouterOS 原生",
-        latency: null,
-        loss: 0,
-        status: client.running && !client.disabled ? "online" : client.disabled ? "offline" : "warning",
-        inUse: "—",
-      }));
-      setNodes([...apiNodes, ...l2tpNodes]);
-      if (apiNodes.length + l2tpNodes.length > 0) setSelectedNodeId((apiNodes[0] ?? l2tpNodes[0]).id);
 
-      const routerDevices: Device[] = (snapshot.routeros.devices ?? []).map((device) => ({
-        id: numericId(device.macAddress),
-        apiId: device.macAddress,
-        name: device.hostName || device.macAddress,
-        kind: deviceKind(device.hostName || ""),
-        ip: device.address,
-        mac: device.macAddress,
-        iface: device.interface || device.dhcpServer || "—",
-        egress: "未设置",
-        latency: null,
-        online: device.status === "bound",
-        fixed: !device.dynamic,
-        lastSeen: device.lastSeen || "刚刚",
-      }));
-      if (routerDevices.length > 0) {
-        setDevices(routerDevices);
-        setSelectedDeviceId(routerDevices[0].id);
+      if (snapshot.nodes.ok) {
+        const next = snapshot.nodes.data.map(mapApiNode);
+        setNodes((current) => [...next, ...current.filter((node) => node.protocol === "L2TP")]);
+        setSelectedNodeId((current) => next.some((node) => node.id === current) ? current : next[0]?.id ?? 0);
       }
-      setLiveLogs(snapshot.audit.map((event) => ({
-        time: new Date(event.createdAt).toLocaleTimeString("zh-CN", { hour12: false }),
-        level: event.outcome === "SUCCEEDED" ? "成功" : event.outcome === "FAILED" ? "错误" : "信息",
-        source: event.action.startsWith("routeros") ? "RouterOS" : "FoxOS",
-        event: event.action,
-        detail: event.targetId,
-      })));
-      setConnectionMode("live");
-      if (showToast) notify("已从 FoxOS API 刷新 RouterOS、Mihomo、节点、L2TP、设备与审计状态");
+      if (snapshot.l2tp.ok) {
+        const next = snapshot.l2tp.data.map(mapL2TPNode);
+        setNodes((current) => [...current.filter((node) => node.protocol !== "L2TP"), ...next]);
+        setSelectedNodeId((current) => current || next[0]?.id || 0);
+      }
+      if (snapshot.routeros.ok) {
+        const profiles = snapshot.deviceInventory.ok ? new Map(snapshot.deviceInventory.data.devices.map((profile) => [profile.macAddress.toUpperCase(), profile])) : new Map<string, DeviceProfile>();
+        const next = (snapshot.routeros.data.devices ?? []).map((device) => mapDevice(device, profiles.get(device.macAddress.toUpperCase())));
+        setDevices(next);
+        setSelectedDeviceId((current) => next.some((device) => device.id === current) ? current : next[0]?.id ?? 0);
+      }
+      if (snapshot.audit.ok) setLiveLogs(snapshot.audit.data.map(mapAudit));
+
+      if (showToast) {
+        const failures = Object.values(snapshot).filter((result) => !result.ok).length;
+        notify(failures ? `刷新完成，${failures} 个数据源不可用；其他数据已保留` : "全部数据源刷新完成", failures ? "warning" : "success");
+      }
     } catch (error) {
-      setConnectionMode("demo");
-      if (showToast) notify(error instanceof Error ? error.message : "FoxOS API 连接失败", "warning");
+      if (showToast) notify(error instanceof Error ? error.message : "刷新过程异常", "warning");
     } finally {
       setScanning(false);
     }
-  };
+  }, [notify]);
 
   useEffect(() => {
     void refreshLiveData(false);
+  }, [refreshLiveData]);
+
+  useEffect(() => {
+    const syncFromLocation = () => {
+      setPage(pageFromHash(window.location.hash));
+      setMobileNavOpen(false);
+      window.scrollTo({ top: 0 });
+    };
+    if (!window.location.hash || pageFromHash(window.location.hash) === "overview" && window.location.hash !== "#overview") {
+      window.history.replaceState(null, "", "#overview");
+    }
+    window.addEventListener("hashchange", syncFromLocation);
+    window.addEventListener("popstate", syncFromLocation);
+    return () => {
+      window.removeEventListener("hashchange", syncFromLocation);
+      window.removeEventListener("popstate", syncFromLocation);
+    };
   }, []);
 
-  const runScan = () => {
-    void refreshLiveData(true);
-  };
+  useEffect(() => {
+    mainRef.current?.focus({ preventScroll: true });
+  }, [page]);
+
+  useEffect(() => {
+    if (!isMobile || !mobileNavOpen) return;
+    const sidebar = sidebarRef.current;
+    const opener = mobileMenuRef.current;
+    const focusable = () => Array.from(sidebar?.querySelectorAll<HTMLElement>("button:not([disabled]), [href], [tabindex]:not([tabindex='-1'])") ?? []);
+    (sidebar?.querySelector<HTMLElement>("[aria-current='page']") ?? focusable()[0])?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMobileNavOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      opener?.focus();
+    };
+  }, [isMobile, mobileNavOpen]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setClock(new Date());
+      setResources((current) => ({
+        routeros: expireResource(current.routeros),
+        mihomo: expireResource(current.mihomo),
+        mosdns: expireResource(current.mosdns),
+        nodes: expireResource(current.nodes),
+        l2tp: expireResource(current.l2tp),
+        routes: expireResource(current.routes),
+        dhcpServers: expireResource(current.dhcpServers),
+        containers: expireResource(current.containers),
+        deviceInventory: expireResource(current.deviceInventory),
+        policies: expireResource(current.policies),
+        groups: expireResource(current.groups),
+        audit: expireResource(current.audit),
+      }));
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const navigate = (key: PageKey) => {
-    setPage(key);
-    window.history.replaceState(null, "", `#${key}`);
-    window.scrollTo(0, 0);
+    if (window.location.hash === `#${key}`) {
+      setPage(key);
+      setMobileNavOpen(false);
+      return;
+    }
+    window.location.hash = key;
   };
 
+  const criticalServices = [resources.routeros, resources.mihomo, resources.mosdns];
+  const healthy = criticalServices.every((resource) => resource.phase === "live" && resource.data?.online);
+  const availableCount = Object.values(resources).filter((resource) => resource.phase === "live").length;
+  const resourceCount = Object.keys(resources).length;
+
   return (
-    <div className={`app-shell ${collapsed ? "sidebar-collapsed" : ""}`}>
-      <aside className="sidebar">
+    <div className={`app-shell ${collapsed ? "sidebar-collapsed" : ""} ${mobileNavOpen ? "mobile-nav-open" : ""}`}>
+      <button className="skip-link" onClick={() => mainRef.current?.focus()} type="button">跳到主要内容</button>
+      <button aria-hidden="true" className="sidebar-scrim" onClick={() => setMobileNavOpen(false)} tabIndex={-1} type="button" />
+      <aside aria-hidden={isMobile && !mobileNavOpen ? "true" : undefined} className="sidebar" inert={isMobile && !mobileNavOpen ? true : undefined} ref={sidebarRef}>
         <div className="brand">
-          <img src="/foxos-logo.svg" alt="FoxOS" />
-          {!collapsed ? (
-            <span>
-              <strong>FoxOS</strong>
-              <small>Network Command Center</small>
-            </span>
-          ) : null}
+          <img alt="FoxOS" src="/foxos-logo.svg" />
+          {!collapsed ? <span><strong>FoxOS</strong><small>Network Command Center</small></span> : null}
+          <button aria-label="关闭导航" className="mobile-nav-close" onClick={() => setMobileNavOpen(false)} type="button"><X aria-hidden="true" size={20} /></button>
         </div>
         <nav aria-label="主导航">
           {navItems.map(({ key, label, icon: Icon }) => (
-            <button
-              className={page === key ? "active" : ""}
-              key={key}
-              onClick={() => navigate(key)}
-              title={collapsed ? label : undefined}
-            >
-              <Icon size={19} />
+            <button aria-current={page === key ? "page" : undefined} className={page === key ? "active" : ""} key={key} onClick={() => navigate(key)} title={collapsed ? label : undefined} type="button">
+              <Icon aria-hidden="true" size={19} />
               {!collapsed ? <span>{label}</span> : null}
             </button>
           ))}
         </nav>
         <div className="sidebar-footer">
           {!collapsed ? (
-            <div className="system-health">
-              <ShieldCheck size={20} />
-              <span>
-                <small>系统健康</small>
-                <strong>全部正常</strong>
-              </span>
+            <div className={`system-health ${healthy ? "healthy" : "unknown"}`}>
+              {healthy ? <ShieldCheck aria-hidden="true" size={20} /> : <AlertTriangle aria-hidden="true" size={20} />}
+              <span><small>系统健康</small><strong>{healthy ? "全部已验证" : "存在未确认状态"}</strong></span>
             </div>
           ) : null}
-          <button className="collapse-button" onClick={() => setCollapsed((value) => !value)}>
-            {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+          <button aria-label={collapsed ? "展开侧栏" : "收起侧栏"} className="collapse-button" onClick={() => setCollapsed((value) => !value)} type="button">
+            {collapsed ? <ChevronRight aria-hidden="true" size={18} /> : <ChevronLeft aria-hidden="true" size={18} />}
             {!collapsed ? "收起侧栏" : null}
           </button>
         </div>
       </aside>
 
-      <main className="main-shell">
+      <main aria-labelledby="page-title" className="main-shell" id="main-content" ref={mainRef} tabIndex={-1}>
         <header className="topbar">
-          <div>
-            <h1>{pageTitle[page].title}</h1>
-            <p>{pageTitle[page].subtitle}</p>
-          </div>
+          <button aria-expanded={mobileNavOpen} aria-label="打开导航" className="mobile-menu" onClick={() => setMobileNavOpen(true)} ref={mobileMenuRef} type="button"><Menu aria-hidden="true" size={20} /></button>
+          <div className="topbar-title"><h1 id="page-title">{pageTitle[page].title}</h1><p>{pageTitle[page].subtitle}</p></div>
           <div className="topbar-meta">
-            {services.map((service) => (
-              <span className="top-service" key={service.name}>
-                <StatusDot />
-                {service.name}
-              </span>
-            ))}
-            <span className={`data-mode ${connectionMode}`}><StatusDot status={connectionMode === "live" ? "ok" : connectionMode === "loading" ? "warning" : "offline"} />{connectionMode === "live" ? "实时数据" : connectionMode === "loading" ? "连接中" : "演示数据"}</span>
-            <span className="top-time">{new Date().toLocaleString("zh-CN", { hour12: false })}</span>
-            <span className="admin">
-              <Users size={16} /> admin
-            </span>
+            <span aria-live="polite" className="data-mode"><StatusDot status={availableCount === resourceCount ? "ok" : availableCount ? "warning" : "offline"} />{availableCount} / {resourceCount} 数据源实时</span>
+            <span className="top-time">{clock.toLocaleString("zh-CN", { hour12: false })}</span>
+            <span className="admin"><Users aria-hidden="true" size={16} />本地操作员</span>
           </div>
         </header>
 
         <div className="page-content">
-          {page === "overview" ? (
-            <Overview devices={devices} runScan={runScan} scanning={scanning} navigate={navigate} />
-          ) : null}
-          {page === "routeros" ? <RouterOSPage notify={notify} /> : null}
-          {page === "mosdns" ? <MosDNSPage /> : null}
-          {page === "proxies" ? (
-            <ProxyPage
-              nodes={nodes}
-              setNodes={setNodes}
-              selectedNodeId={selectedNodeId}
-              setSelectedNodeId={setSelectedNodeId}
-              notify={notify}
-            />
-          ) : null}
-          {page === "devices" ? (
-            <DevicesPage
-              devices={devices}
-              setDevices={setDevices}
-              selectedDeviceId={selectedDeviceId}
-              setSelectedDeviceId={setSelectedDeviceId}
-              notify={notify}
-            />
-          ) : null}
-          {page === "topology" ? <TopologyPage navigate={navigate} /> : null}
-          {page === "logs" ? <LogsPage items={liveLogs} /> : null}
+          {page === "overview" ? <Overview devices={devices} nodes={nodes} onRefresh={() => void refreshLiveData(true)} resources={resources} scanning={scanning} /> : null}
+          {page === "routeros" ? <RouterOSPage containers={resources.containers} dhcpServers={resources.dhcpServers} navigate={navigate} onRefresh={() => void refreshLiveData(true)} resource={resources.routeros} routes={resources.routes} scanning={scanning} /> : null}
+          {page === "mosdns" ? <MosDNSPage resource={resources.mosdns} /> : null}
+          {page === "proxies" ? <ProxyPage groupResource={resources.groups} l2tpResource={resources.l2tp} mihomoResource={resources.mihomo} navigate={navigate} nodeResource={resources.nodes} nodes={nodes} notify={notify} onRefresh={(showToast = true) => void refreshLiveData(showToast)} selectedNodeId={selectedNodeId} setNodes={setNodes} setSelectedNodeId={setSelectedNodeId} /> : null}
+          {page === "devices" ? <DevicesPage devices={devices} groupResource={resources.groups} inventoryResource={resources.deviceInventory} l2tpResource={resources.l2tp} nodeResource={resources.nodes} notify={notify} onRefresh={(showToast = true) => void refreshLiveData(showToast)} policyResource={resources.policies} resource={resources.routeros} selectedDeviceId={selectedDeviceId} setDevices={setDevices} setSelectedDeviceId={setSelectedDeviceId} /> : null}
+          {page === "topology" ? <TopologyPage devices={devices} navigate={navigate} nodes={nodes} onRefresh={() => void refreshLiveData(true)} resources={resources} /> : null}
+          {page === "logs" ? <LogsPage items={liveLogs} onRefresh={() => void refreshLiveData(true)} resource={resources.audit} /> : null}
+          {page === "operations" ? <OperationsPage notify={notify} /> : null}
           {page === "settings" ? <SettingsPage notify={notify} /> : null}
         </div>
       </main>
 
-      {toast ? (
-        <div className={`toast ${toast.tone}`}>
-          {toast.tone === "success" ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
-          {toast.message}
-        </div>
-      ) : null}
+      <div aria-atomic="true" aria-live="polite" className="toast-region">
+        {toast ? <div className={`toast ${toast.tone}`} role={toast.tone === "warning" ? "alert" : "status"}>
+          {toast.tone === "success" ? <CheckCircle2 aria-hidden="true" size={18} /> : <AlertTriangle aria-hidden="true" size={18} />}{toast.message}
+        </div> : null}
+      </div>
     </div>
   );
 }
 
-function Overview({
-  devices,
-  runScan,
-  scanning,
-  navigate,
-}: {
-  devices: Device[];
-  runScan: () => void;
-  scanning: boolean;
-  navigate: (page: PageKey) => void;
-}) {
+function OperationsPage({ notify }: { notify: (message: string, tone?: Toast["tone"]) => void }) {
+  return <div className="stack"><MihomoOperations notify={notify} /><SubscriptionOperations notify={notify} /><AlertBackupOperations notify={notify} /></div>;
+}
+
+function ServiceSummary<T extends { configured: boolean; online: boolean }>({ name, address, tone, resource }: { name: string; address: string; tone: string; resource: ResourceState<T> }) {
+  const online = resource.phase === "live" && Boolean(resource.data?.online);
+  return (
+    <div className="service-summary">
+      <ServiceIcon name={name} tone={tone} />
+      <div><strong>{name}</strong><span className={online ? "green-text" : "muted-text"}><StatusDot status={statusTone(resource.phase, online)} />{serviceLabel(resource)}</span></div>
+      <div className="service-detail"><span>{address}</span><small>{resource.source}</small><small>{formatUpdated(resource.updatedAt)}</small></div>
+    </div>
+  );
+}
+
+function Overview({ devices, nodes, resources, onRefresh, scanning }: { devices: Device[]; nodes: ProxyNode[]; resources: LiveResources; onRefresh: () => void; scanning: boolean }) {
   return (
     <div className="stack">
-      <section className="service-strip">
-        {services.map((service) => (
-          <div className="service-summary" key={service.name}>
-            <ServiceIcon name={service.name} tone={service.tone} />
-            <div>
-              <strong>{service.name}</strong>
-              <span><StatusDot />运行正常</span>
-            </div>
-            <div className="service-detail">
-              <span>{service.address}</span>
-              <small>{service.detail}</small>
-            </div>
-          </div>
-        ))}
-        <Button variant="primary" icon={scanning ? RefreshCw : Activity} onClick={runScan} disabled={scanning}>
-          {scanning ? "正在检测…" : "运行全链路检测"}
-        </Button>
+      <section aria-label="服务状态" className="service-strip">
+        <ServiceSummary {...services[0]} resource={resources.routeros} />
+        <ServiceSummary {...services[1]} resource={resources.mihomo} />
+        <ServiceSummary {...services[2]} resource={resources.mosdns} />
+        <Button disabled={scanning} icon={RefreshCw} onClick={onRefresh} variant="primary">{scanning ? "正在刷新…" : "刷新全部状态"}</Button>
       </section>
 
       <section className="panel topology-panel">
-        <div className="panel-heading">
-          <div>
-            <h2>实时网络路径</h2>
-            <p>RouterOS 作为统一入口，当前策略路由已启用</p>
-          </div>
-          <span className="healthy-label"><StatusDot />最近 24 小时无严重故障</span>
-        </div>
-        <div className="topology-flow">
-          <TopologyNode icon={Globe2} title="Internet / WAN" subtitle="可达 · 12 ms" metric="↓ 821 / ↑ 189 Mbps" />
-          <FlowArrow label="WAN" />
-          <TopologyNode icon={Router} title="RouterOS" subtitle="10.0.0.1 · 正常" metric="负载 18%" accent="orange" />
-          <div className="topology-branch">
-            <FlowArrow label="策略路由" />
-            <TopologyNode icon={Network} title="Mihomo" subtitle="10.0.0.2 · 正常" metric="68 活跃连接" accent="blue" />
-          </div>
-          <FlowArrow label="代理出口" />
-          <TopologyNode icon={Server} title="US-LAX-01" subtitle="美国洛杉矶" metric="162 ms" accent="blue" />
-          <FlowArrow />
-          <TopologyNode icon={Globe2} title="Internet" subtitle="代理出口可达" metric="0.2% 丢包" />
-        </div>
-        <div className="topology-subrow">
-          <div className="sub-route">
-            <Router size={18} />
-            <ArrowRight size={16} />
-            <Users size={18} />
-            <span>局域网 / LAN</span>
-            <strong>14 台在线</strong>
-          </div>
-          <div className="sub-route purple">
-            <Network size={18} />
-            <ArrowRight size={16} />
-            <Database size={18} />
-            <span>DNS 请求（只读）</span>
-            <strong>123 QPS</strong>
-          </div>
+        <div className="panel-heading"><div><h2>管理面状态路径</h2><p>仅表示 FoxOS 已完成的独立 API 检查，不代表互联网出口可用</p></div></div>
+        <div className="topology-flow verified-flow">
+          <TopologyNode accent="orange" icon={Router} metric={resources.routeros.data?.resource?.["cpu-load"] ? `CPU ${resources.routeros.data.resource["cpu-load"]}%` : "指标未采集"} subtitle={`10.0.0.1 · ${serviceLabel(resources.routeros)}`} title="RouterOS" />
+          <FlowArrow label="REST" />
+          <TopologyNode accent="blue" icon={Network} metric={resources.mihomo.phase === "live" && resources.mihomo.data?.online ? "控制器健康检查通过" : "控制器未验证"} subtitle={`10.0.0.2 · ${serviceLabel(resources.mihomo)}`} title="Mihomo" />
+          <FlowArrow label="只读" />
+          <TopologyNode accent="purple" icon={Database} metric="DNS 接管未开放" subtitle={`10.0.0.3 · ${serviceLabel(resources.mosdns)}`} title="MosDNS" />
         </div>
       </section>
 
       <div className="overview-grid">
         <section className="panel compact-panel">
-          <div className="panel-heading">
-            <div>
-              <h2>设备与策略摘要</h2>
-              <p>在线设备与当前出口</p>
-            </div>
-            <button className="text-link" onClick={() => navigate("devices")}>查看全部设备 <ChevronRight size={15} /></button>
-          </div>
-          <div className="device-feature">
-            <Smartphone size={24} />
-            <div><strong>iPhone 15 Pro</strong><span>bridge-lan · 在线</span></div>
-            <div><small>绑定 IP</small><strong>192.168.88.21</strong></div>
-            <div><small>当前出口</small><strong className="blue-text">US-LAX-01</strong></div>
-          </div>
-          <div className="mini-table">
-            {devices.slice(0, 4).map((device) => (
-              <div className="mini-row" key={device.id}>
-                <DeviceIcon kind={device.kind} />
-                <strong>{device.name}</strong>
-                <span>{device.ip}</span>
-                <span>{device.egress}</span>
-                <span className="latency">{device.latency ?? "—"}{device.latency ? " ms" : ""}</span>
-              </div>
-            ))}
-          </div>
+          <div className="panel-heading"><div><h2>RouterOS 设备</h2><p>来自 DHCP 与 ARP 的合并结果</p></div><ResourceMeta resource={resources.routeros} /></div>
+          {devices.length ? <div aria-label="RouterOS 设备列表" className="mini-table" role="region" tabIndex={0}>{devices.slice(0, 6).map((device) => <div className="mini-row" key={device.id}><DeviceIcon kind={device.kind} /><strong>{device.name}</strong><span>{device.ip}</span><span>{device.iface}</span><span>{resources.routeros.phase === "live" ? device.online ? "在线" : "离线" : "上次状态"}</span></div>)}</div> : <EmptyState detail="RouterOS 数据源成功返回后才会显示设备。" title="没有可验证的设备数据" />}
         </section>
-
         <section className="panel compact-panel">
-          <div className="panel-heading">
-            <div>
-              <h2>活动链路摘要</h2>
-              <p>链路 1 · 可回滚</p>
-            </div>
-            <button className="text-link" onClick={() => navigate("proxies")}>管理代理节点 <ChevronRight size={15} /></button>
-          </div>
-          <div className="chain-summary">
-            {[
-              ["RouterOS", "3 ms"],
-              ["HK-01", "26 ms"],
-              ["US-LAX-01", "162 ms"],
-              ["Internet", "可达"],
-            ].map(([name, detail], index) => (
-              <div className="chain-piece" key={name}>
-                <div><Server size={20} /><strong>{name}</strong><span>{detail}</span></div>
-                {index < 3 ? <ArrowRight size={17} /> : null}
-              </div>
-            ))}
-          </div>
-          <div className="metric-row">
-            <Metric label="链路总延迟" value="191 ms" />
-            <Metric label="丢包率" value="0.2%" />
-            <Metric label="可用率（24h）" value="99.8%" />
-            <Metric label="抖动" value="6 ms" />
-          </div>
+          <div className="panel-heading"><div><h2>代理节点</h2><p>在线仅由节点探测结果判定</p></div><ResourceMeta resource={resources.nodes} /></div>
+          {nodes.length ? <div aria-label="代理节点列表" className="mini-table" role="region" tabIndex={0}>{nodes.slice(0, 6).map((node) => <div className="mini-row" key={node.id}><Server aria-hidden="true" size={17} /><strong>{node.name}</strong><span>{node.protocol}</span><span>{node.server}</span><span>{proxyStatusLabel(node, node.verification === "routeros-session" ? resources.l2tp.phase : resources.nodes.phase)}</span></div>)}</div> : <EmptyState detail="SQLite 节点或 RouterOS L2TP 成功加载后才会显示。" title="没有节点数据" />}
         </section>
       </div>
     </div>
   );
 }
 
-function TopologyNode({
-  icon: Icon,
-  title,
-  subtitle,
-  metric,
-  accent = "",
-}: {
-  icon: typeof Router;
-  title: string;
-  subtitle: string;
-  metric: string;
-  accent?: string;
-}) {
-  return (
-    <div className={`topology-node ${accent}`}>
-      <Icon size={31} />
-      <strong>{title}</strong>
-      <span>{subtitle}</span>
-      <small>{metric}</small>
-    </div>
-  );
+function TopologyNode({ icon: Icon, title, subtitle, metric, accent = "" }: { icon: typeof Router; title: string; subtitle: string; metric: string; accent?: string }) {
+  return <div className={`topology-node ${accent}`}><Icon aria-hidden="true" size={31} /><strong>{title}</strong><span>{subtitle}</span><small>{metric}</small></div>;
 }
 
 function FlowArrow({ label }: { label?: string }) {
-  return (
-    <div className="flow-arrow">
-      {label ? <small>{label}</small> : null}
-      <ArrowRight size={22} />
-    </div>
-  );
+  return <div aria-hidden="true" className="flow-arrow">{label ? <small>{label}</small> : null}<ArrowRight size={22} /></div>;
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div className="metric"><span>{label}</span><strong>{value}</strong></div>;
-}
-
-function SummaryCard({ icon: Icon, label, value, tone = "blue" }: { icon: typeof Users; label: string; value: string | number; tone?: string }) {
-  return (
-    <div className="summary-card">
-      <span className={`summary-icon ${tone}`}><Icon size={20} /></span>
-      <div><small>{label}</small><strong>{value}</strong></div>
-    </div>
-  );
-}
-
-function RouterOSPage({ notify }: { notify: (message: string, tone?: Toast["tone"]) => void }) {
-  const interfaces = [
-    ["ether1", "WAN（PPPoE）", "203.0.113.45", "812 Mbps", "198 Mbps"],
-    ["bridge", "LAN", "10.0.0.1/24", "412 Mbps", "96 Mbps"],
-    ["veth-mihomo", "容器链路", "10.0.0.2/32", "412 Mbps", "96 Mbps"],
-    ["veth-mosdns", "容器链路", "10.0.0.3/32", "123 QPS", "12 QPS"],
-  ];
+function RouterOSPage({ resource, routes, dhcpServers, containers, onRefresh, scanning, navigate }: { resource: ResourceState<RouterOverview>; routes: ResourceState<RouterRoute[]>; dhcpServers: ResourceState<RouterDHCPServer[]>; containers: ResourceState<RouterContainer[]>; onRefresh: () => void; scanning: boolean; navigate: (key: PageKey) => void }) {
+  const overview = resource.data;
+  const live = resource.phase === "live" && Boolean(overview?.online);
+  const system = overview?.resource ?? {};
+  const interfaces = overview?.interfaces ?? [];
+  const devices = overview?.devices ?? [];
+  const routeItems = routes.data ?? [];
+  const dhcpItems = dhcpServers.data ?? [];
+  const containerItems = containers.data ?? [];
+  const activeDefaultRoutes = routeItems.filter((item) => item["dst-address"] === "0.0.0.0/0" && item.active === "true" && item.disabled !== "true");
+  const runningContainers = containerItems.filter((item) => item.status.toLowerCase() === "running");
   return (
     <div className="stack">
+      <section className="panel status-band"><ResourceMeta resource={resource} /><Button disabled={scanning} icon={RefreshCw} onClick={onRefresh}>{scanning ? "刷新中…" : "刷新 RouterOS"}</Button></section>
       <div className="summary-grid">
-        <SummaryCard icon={CircleGauge} label="CPU 使用率" value="23%" tone="orange" />
-        <SummaryCard icon={HardDrive} label="内存使用率" value="46%" />
-        <SummaryCard icon={Cable} label="活动接口" value="4" tone="green" />
-        <SummaryCard icon={Users} label="DHCP 租约" value="14 / 254" tone="purple" />
+        <SummaryCard icon={CircleGauge} label="CPU 使用率" value={system["cpu-load"] ? `${system["cpu-load"]}%` : "—"} tone="orange" />
+        <SummaryCard icon={HardDrive} label="内存使用率" value={usagePercent(system["free-memory"], system["total-memory"])} />
+        <SummaryCard icon={Globe2} label="活动默认路由" value={routes.phase === "live" ? activeDefaultRoutes.length : "—"} tone={activeDefaultRoutes.length ? "green" : "red"} />
+        <SummaryCard icon={Server} label="运行容器" value={containers.phase === "live" ? `${runningContainers.length} / ${containerItems.length}` : "—"} tone="green" />
       </div>
       <div className="page-grid two-thirds">
         <section className="panel">
-          <div className="panel-heading">
-            <div><h2>接口与流量</h2><p>来自 RouterOS 的只读实时状态</p></div>
-            <Button icon={RefreshCw} onClick={() => notify("RouterOS 状态已同步")}>同步状态</Button>
-          </div>
-          <div className="traffic-legend"><span className="rx">接收 RX</span><span className="tx">发送 TX</span><span className="traffic-value">当前 812 / 198 Mbps</span></div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>接口</th><th>角色</th><th>IP 地址</th><th>RX</th><th>TX</th><th>状态</th></tr></thead>
-              <tbody>
-                {interfaces.map((row) => <tr key={row[0]}>{row.map((cell) => <td key={cell}>{cell}</td>)}<td><StatusDot />在线</td></tr>)}
-              </tbody>
-            </table>
-          </div>
-          <div className="route-list">
-            <div><span>默认路由</span><strong>0.0.0.0/0 → ether1</strong><em><StatusDot />活动</em></div>
-            <div><span>策略路由</span><strong>routing-mark: to-mihomo → 10.0.0.2</strong><em><StatusDot />活动</em></div>
-            <div><span>NAT 规则</span><strong>srcnat (PPPoE) · masquerade</strong><em><StatusDot />活动</em></div>
-            <div><span>L2TP 客户端</span><strong>2 个配置 · 1 个在线</strong><em><StatusDot status="warning" />检查</em></div>
-          </div>
+          <div className="panel-heading"><div><h2>接口状态</h2><p>接收和发送字节为 RouterOS 累计计数</p></div></div>
+          {interfaces.length ? <div className="table-wrap"><table><thead><tr><th>接口</th><th>类型</th><th>MAC 地址</th><th>RX</th><th>TX</th><th>状态</th></tr></thead><tbody>{interfaces.map((item) => {
+            const running = live && item.running === "true" && item.disabled !== "true";
+            return <tr key={item[".id"] || item.name}><td><strong>{item.name}</strong></td><td>{item.type || "—"}</td><td>{item["mac-address"] || "—"}</td><td>{readableBytes(item["rx-byte"])}</td><td>{readableBytes(item["tx-byte"])}</td><td><StatusDot status={running ? "ok" : resource.phase === "live" ? "offline" : "warning"} />{resource.phase === "live" ? running ? "运行" : "停止" : "上次状态"}</td></tr>;
+          })}</tbody></table></div> : <EmptyState detail="该接口读取失败不会影响其他服务状态。" title="接口数据不可用" />}
         </section>
         <aside className="stack">
-          <section className="panel">
-            <div className="panel-heading"><div><h2>WAN 状态</h2><p>PPPoE 已连接</p></div><StatusDot /></div>
-            <dl className="definition-list">
-              <div><dt>公网 IP</dt><dd>203.0.113.45</dd></div>
-              <div><dt>网关</dt><dd>203.0.113.1</dd></div>
-              <div><dt>丢包率</dt><dd>0.00%</dd></div>
-              <div><dt>延迟</dt><dd>12 ms</dd></div>
-              <div><dt>运行时间</dt><dd>12 天 04:35:28</dd></div>
-            </dl>
-          </section>
-          <section className="panel danger-zone">
-            <div className="panel-heading"><div><h2>安全操作</h2><p>操作前自动创建快照</p></div></div>
-            <Button icon={ShieldCheck} onClick={() => notify("配置验证通过，未发现冲突")}>验证规则</Button>
-            <Button icon={Save} onClick={() => notify("RouterOS 配置快照已创建")}>备份配置</Button>
-          </section>
+          <section className="panel"><div className="panel-heading"><div><h2>系统资源</h2><p>{live ? "RouterOS 回读成功" : "当前不可确认"}</p></div><StatusDot status={statusTone(resource.phase, live)} /></div><dl className="definition-list"><div><dt>版本</dt><dd>{system.version || "—"}</dd></div><div><dt>架构</dt><dd>{system["architecture-name"] || "—"}</dd></div><div><dt>平台</dt><dd>{system["board-name"] || "—"}</dd></div><div><dt>运行时间</dt><dd>{system.uptime || "—"}</dd></div><div><dt>磁盘可用</dt><dd>{readableBytes(system["free-hdd-space"])}</dd></div></dl></section>
+          <section className="panel danger-zone"><div className="panel-heading"><div><h2>受控运维</h2><p>配置发布、快照和恢复均要求预览与确认</p></div></div><Button icon={ShieldCheck} onClick={() => navigate("operations")}>配置预览与校验</Button><Button icon={Save} onClick={() => navigate("operations")}>备份与恢复</Button></section>
         </aside>
-      </div>
-    </div>
-  );
-}
-
-function MosDNSPage() {
-  return (
-    <div className="stack">
-      <div className="readonly-banner"><LockKeyhole size={18} /><span><strong>只读模式</strong> DNS 配置暂不由 FoxOS 修改；这里只显示 MosDNS 运行状态。</span></div>
-      <div className="summary-grid">
-        <SummaryCard icon={Activity} label="实时查询" value="123 QPS" tone="purple" />
-        <SummaryCard icon={Database} label="缓存命中率" value="92.4%" tone="green" />
-        <SummaryCard icon={Zap} label="平均响应" value="18 ms" />
-        <SummaryCard icon={AlertTriangle} label="失败率" value="0.02%" tone="orange" />
       </div>
       <div className="page-grid two-thirds">
-        <section className="panel">
-          <div className="panel-heading"><div><h2>DNS 流量路径</h2><p>客户端与 Mihomo 查询均进入 MosDNS</p></div><span className="healthy-label"><StatusDot />运行正常</span></div>
-          <div className="dns-flow">
-            <TopologyNode icon={Users} title="LAN 客户端" subtitle="14 台设备" metric="78 QPS" />
-            <FlowArrow />
-            <TopologyNode icon={Database} title="MosDNS" subtitle="10.0.0.3:53" metric="92.4% 命中" accent="purple" />
-            <FlowArrow />
-            <div className="dns-destinations">
-              <div><Globe2 size={21} /><span><strong>国内上游</strong><small>65 QPS · 9 ms</small></span><StatusDot /></div>
-              <div><Globe2 size={21} /><span><strong>海外上游</strong><small>38 QPS · 78 ms</small></span><StatusDot /></div>
-              <div><ShieldCheck size={21} /><span><strong>广告/恶意域名</strong><small>20 QPS · 拦截</small></span><StatusDot status="warning" /></div>
-            </div>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>时间</th><th>域名</th><th>客户端</th><th>路由</th><th>响应</th><th>结果</th></tr></thead>
-              <tbody>
-                <tr><td>14:35:27</td><td>www.taobao.com</td><td>192.168.88.21</td><td>国内上游</td><td>12 ms</td><td className="green-text">成功</td></tr>
-                <tr><td>14:35:26</td><td>www.google.com</td><td>10.0.0.2</td><td>海外上游</td><td>46 ms</td><td className="green-text">成功</td></tr>
-                <tr><td>14:35:25</td><td>adservice.google.com</td><td>192.168.88.30</td><td>拦截</td><td>—</td><td className="orange-text">拦截</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-        <aside className="panel">
-          <div className="panel-heading"><div><h2>服务状态</h2><p>最后采集于刚刚</p></div><StatusDot /></div>
-          <dl className="definition-list">
-            <div><dt>进程状态</dt><dd className="green-text">运行中</dd></div>
-            <div><dt>监听端口</dt><dd>UDP/TCP 53</dd></div>
-            <div><dt>配置文件</dt><dd>config_custom.yaml</dd></div>
-            <div><dt>缓存大小</dt><dd>128.6 MB</dd></div>
-            <div><dt>控制端口</dt><dd>10.0.0.3:9090</dd></div>
-            <div><dt>指标端点</dt><dd>/metrics</dd></div>
-          </dl>
+        <section className="panel"><div className="panel-heading"><div><h2>路由与 WAN</h2><p>默认路由仅用于状态判断，不修改用户路由</p></div><ResourceMeta resource={routes} /></div>{routeItems.length ? <div className="table-wrap"><table><thead><tr><th>目标</th><th>网关</th><th>距离</th><th>状态</th><th>所有权</th></tr></thead><tbody>{routeItems.map((item) => <tr key={item[".id"]}><td>{item["dst-address"] || "—"}</td><td>{item.gateway || "—"}</td><td>{item.distance || "—"}</td><td><StatusDot status={routes.phase === "live" && item.active === "true" && item.disabled !== "true" ? "ok" : routes.phase === "live" ? "offline" : "warning"} />{routes.phase === "live" ? item.disabled === "true" ? "禁用" : item.active === "true" ? "活动" : "非活动" : "上次状态"}</td><td>{item.comment?.startsWith("foxos:") ? "FoxOS" : "用户 / 系统"}</td></tr>)}</tbody></table></div> : <EmptyState detail={routes.error || "RouterOS 未返回路由条目。"} title="路由数据不可用" />}</section>
+        <aside className="stack">
+          <section className="panel"><div className="panel-heading"><div><h2>DHCP server</h2><p>{devices.length} 个 DHCP / ARP 设备已读取</p></div><ResourceMeta resource={dhcpServers} /></div>{dhcpItems.length ? <dl className="definition-list">{dhcpItems.map((item) => <div key={item[".id"]}><dt>{item.name}</dt><dd><StatusDot status={dhcpServers.phase === "live" && item.running === "true" && item.disabled !== "true" ? "ok" : dhcpServers.phase === "live" ? "offline" : "warning"} />{item.interface} · {item["address-pool"]}</dd></div>)}</dl> : <EmptyState detail={dhcpServers.error || "RouterOS 未返回 DHCP server。"} title="DHCP 数据不可用" />}</section>
+          <section className="panel"><div className="panel-heading"><div><h2>容器</h2><p>状态来自 RouterOS /container 回读</p></div><ResourceMeta resource={containers} /></div>{containerItems.length ? <dl className="definition-list">{containerItems.map((item) => <div key={item[".id"]}><dt>{item.name || item.comment || item[".id"]}</dt><dd><StatusDot status={containers.phase === "live" && item.status.toLowerCase() === "running" ? "ok" : containers.phase === "live" ? "offline" : "warning"} />{item.status || "未知"} · {item.interface || "无接口"}</dd></div>)}</dl> : <EmptyState detail={containers.error || "RouterOS 未返回容器。"} title="容器数据不可用" />}</section>
         </aside>
       </div>
     </div>
   );
 }
 
-function DevicesPage({
-  devices,
-  setDevices,
-  selectedDeviceId,
-  setSelectedDeviceId,
-  notify,
-}: {
+function MosDNSPage({ resource }: { resource: ResourceState<MosDNSOverview> }) {
+  const live = resource.phase === "live" && Boolean(resource.data?.online);
+  return (
+    <div className="stack">
+      <div className="readonly-banner"><LockKeyhole aria-hidden="true" size={18} /><span><strong>只读模式</strong>FoxOS 不修改 DNS、DHCP 下发 DNS 或 MosDNS 配置。</span></div>
+      <section className="panel status-band"><ResourceMeta resource={resource} /></section>
+      <div className="summary-grid">
+        <SummaryCard icon={Activity} label="进程状态" value={live ? "在线" : resource.phase === "loading" ? "加载中" : "不可用"} tone={live ? "green" : "orange"} />
+        <SummaryCard icon={Database} label="实时查询" value="未采集" tone="purple" />
+        <SummaryCard icon={Zap} label="平均响应" value="未采集" />
+        <SummaryCard icon={AlertTriangle} label="失败率" value="未采集" tone="orange" />
+      </div>
+      <section className="panel"><div className="panel-heading"><div><h2>服务状态</h2><p>不会用静态样例填充 DNS 指标</p></div><StatusDot status={statusTone(resource.phase, live)} /></div>{live ? <dl className="definition-list"><div><dt>状态</dt><dd className="green-text">只读检查通过</dd></div><div><dt>地址</dt><dd>{resource.data?.address || "10.0.0.3"}</dd></div><div><dt>配置写入</dt><dd>未开放</dd></div></dl> : <EmptyState detail={resource.error || "等待 MosDNS 状态 API 返回。"} title="MosDNS 在线状态未确认" />}</section>
+    </div>
+  );
+}
+
+type PendingBinding = { plan: DeviceBindingPlan; token: string; device: Device };
+type PendingEgress = { plan: EgressPlan; token: string; device: Device };
+type DevicesPageProps = {
   devices: Device[];
   setDevices: React.Dispatch<React.SetStateAction<Device[]>>;
   selectedDeviceId: number;
   setSelectedDeviceId: (id: number) => void;
   notify: (message: string, tone?: Toast["tone"]) => void;
-}) {
+  resource: ResourceState<RouterOverview>;
+  inventoryResource: ResourceState<DeviceInventory>;
+  policyResource: ResourceState<DevicePolicy[]>;
+  nodeResource: ResourceState<ApiNode[]>;
+  groupResource: ResourceState<ProxyGroup[]>;
+  l2tpResource: ResourceState<L2TPClient[]>;
+  onRefresh: (showToast?: boolean) => void;
+};
+
+function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceId, notify, resource, inventoryResource, policyResource, nodeResource, groupResource, l2tpResource, onRefresh }: DevicesPageProps) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
-  const [egress, setEgress] = useState("");
+  const [pending, setPending] = useState<PendingBinding | null>(null);
+  const [pendingEgress, setPendingEgress] = useState<PendingEgress | null>(null);
+  const [executing, setExecuting] = useState(false);
+  const [executingEgress, setExecutingEgress] = useState(false);
+  const [egress, setEgress] = useState<EgressType>("direct");
+  const [targetId, setTargetId] = useState("");
+  const [alias, setAlias] = useState("");
+  const [vendor, setVendor] = useState("");
+  const [tagsText, setTagsText] = useState("");
+  const [metadataBusy, setMetadataBusy] = useState(false);
+  const [history, setHistory] = useState<DevicePresenceEvent[]>([]);
+  const [historyPhase, setHistoryPhase] = useState<"loading" | "live" | "unavailable">("loading");
   const selected = devices.find((device) => device.id === selectedDeviceId) ?? devices[0];
-  const filtered = devices.filter((device) => {
-    const matchesSearch = `${device.name}${device.ip}${device.mac}`.toLowerCase().includes(search.toLowerCase());
-    const matchesStatus = status === "all" || (status === "online" ? device.online : !device.online);
-    return matchesSearch && matchesStatus;
-  });
-  const fixIp = async () => {
+  const policies = policyResource.data ?? [];
+  const selectedPolicy = policyForDevice(policies, selected);
+  const filtered = devices.filter((device) => `${device.name}${device.ip}${device.mac}${device.vendor ?? ""}${device.tags.join(" ")}`.toLowerCase().includes(search.toLowerCase()) && (status === "all" || (status === "online" ? device.online : !device.online)));
+  const keyboardActiveId = filtered.some((device) => device.id === selected?.id) ? selected?.id : filtered[0]?.id;
+  const live = resource.phase === "live" && Boolean(resource.data?.online);
+  const targetRequired = egress === "mihomo-node" || egress === "proxy-chain" || egress === "l2tp";
+  const targetSourceLive = egress === "mihomo-node" ? nodeResource.phase === "live" : egress === "proxy-chain" ? groupResource.phase === "live" : egress === "l2tp" ? l2tpResource.phase === "live" : true;
+  const managementProtected = Boolean(selected && ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"].includes(selected.ip));
+  const canPrepareEgress = Boolean(selected && live && policyResource.phase === "live" && selected.fixed && (selectedPolicy?.dhcpServer || selected.dhcpServer) && !managementProtected && targetSourceLive && (!targetRequired || targetId));
+
+  useEffect(() => {
+    setEgress(selectedPolicy?.egress ?? "direct");
+    setTargetId(selectedPolicy?.targetId ?? "");
+  }, [selected?.id, selectedPolicy?.id, selectedPolicy?.egress, selectedPolicy?.targetId]);
+
+  useEffect(() => {
+    setAlias(selected?.alias ?? "");
+    setVendor(selected?.vendor ?? "");
+    setTagsText(selected?.tags.join(", ") ?? "");
+    setHistory([]);
+    if (!selected?.profileTracked || inventoryResource.phase !== "live") {
+      setHistoryPhase("unavailable");
+      return;
+    }
+    let active = true;
+    setHistoryPhase("loading");
+    void getDevicePresenceHistory(selected.mac, 20).then((items) => {
+      if (!active) return;
+      setHistory(items);
+      setHistoryPhase("live");
+    }).catch(() => {
+      if (active) setHistoryPhase("unavailable");
+    });
+    return () => { active = false; };
+  }, [selected?.id, selected?.profileTracked, inventoryResource.updatedAt]);
+
+  const saveMetadata = async () => {
+    if (!selected?.profileTracked) return;
+    setMetadataBusy(true);
     try {
-      const result = await planDeviceBinding({
-        id: `device-${selected.id}`,
-        name: selected.name,
-        macAddress: selected.mac,
-        staticIp: selected.ip,
-        dhcpServer: selected.iface,
-        egress: "direct",
-      });
-      if (!result.plan.requiresConfirmation) {
-        setDevices((items) => items.map((item) => item.id === selected.id ? { ...item, fixed: true } : item));
-        notify(`${selected.name} 已经是静态租约`);
-        return;
-      }
-      const summaries = result.plan.operations.map((operation) => operation.summary).join("\n");
-      const warnings = result.plan.warnings.length ? `\n\n注意：\n${result.plan.warnings.join("\n")}` : "";
-      if (!window.confirm(`将执行以下 RouterOS 操作：\n${summaries}${warnings}\n\n是否继续？`)) return;
-      await executeDeviceBinding(result.plan, result.confirmationToken);
-      setDevices((items) => items.map((item) => item.id === selected.id ? { ...item, fixed: true } : item));
-      notify(`${selected.name} 已固定为 ${selected.ip}，并完成回读校验`);
+      const tags = tagsText.split(",").map((item) => item.trim()).filter(Boolean);
+      const saved = await updateDeviceMetadata(selected.mac, { alias: alias.trim(), vendor: vendor.trim(), tags });
+      setAlias(saved.alias ?? "");
+      setVendor(saved.vendor ?? "");
+      setTagsText(saved.tags.join(", "));
+      setDevices((items) => items.map((item) => item.id === selected.id ? {
+        ...item,
+        alias: saved.alias,
+        vendor: saved.vendor,
+        tags: saved.tags,
+        name: saved.alias || saved.hostName || item.name,
+        firstSeen: saved.firstSeen,
+        lastSeen: saved.lastSeen || item.lastSeen,
+      } : item));
+      notify(`${saved.alias || saved.hostName || saved.macAddress} 的设备画像已保存到 SQLite 并写入审计；RouterOS 未修改`);
+      onRefresh(false);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "固定 IP 失败", "warning");
+      notify(apiFailureMessage(error, "设备画像保存失败"), "warning");
+    } finally {
+      setMetadataBusy(false);
     }
   };
-  const applyEgress = () => {
-    const nextEgress = egress || selected.egress;
-    setDevices((items) => items.map((item) => item.id === selected.id ? { ...item, egress: nextEgress } : item));
-    notify(`已应用 ${selected.name} 的出口策略，并通过连通性检测`);
+
+  const prepareBinding = async () => {
+    if (!selected) return;
+    try {
+      if (!selected.dhcpServer) throw new Error("RouterOS 未返回该租约所属 DHCP server，不能生成安全写入计划");
+      const result = await planDeviceBinding({ id: selectedPolicy?.id ?? `device-${selected.id.toString(16)}`, name: selected.name, macAddress: selected.mac, staticIp: selected.ip, dhcpServer: selected.dhcpServer, egress: selectedPolicy?.egress ?? "direct", targetId: selectedPolicy?.targetId });
+      if (!result.plan.requiresConfirmation) {
+        setDevices((items) => items.map((item) => item.id === selected.id ? { ...item, fixed: true } : item));
+        notify(`${selected.name} 已经是 FoxOS 管理的静态租约`);
+        return;
+      }
+      setPending({ plan: result.plan, token: result.confirmationToken, device: selected });
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "生成 RouterOS 计划失败", "warning");
+    }
   };
+
+  const executeBinding = async () => {
+    if (!pending) return;
+    setExecuting(true);
+    try {
+      await executeDeviceBinding(pending.plan, pending.token);
+      setDevices((items) => items.map((item) => item.id === pending.device.id ? { ...item, fixed: true } : item));
+      notify(`${pending.device.name} 已执行并完成回读校验`);
+      setPending(null);
+      onRefresh(false);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "RouterOS 写入失败", "warning");
+    } finally {
+      setExecuting(false);
+    }
+  };
+
+  const prepareEgress = async () => {
+    if (!selected) return;
+    try {
+      const policy = proposedDevicePolicy(selected, selectedPolicy, egress, targetId);
+      if (!policy.dhcpServer) throw new Error("缺少 RouterOS DHCP server，不能保存设备策略");
+      const result = await planDeviceEgress(policy.id, policy);
+      if (!result.plan.requiresConfirmation) {
+        notify(`${selected.name} 的数据库策略与 RouterOS 自有资源已经一致`);
+        return;
+      }
+      if (!result.confirmationToken) throw new Error("服务端未返回出口策略确认令牌");
+      setPendingEgress({ plan: result.plan, token: result.confirmationToken, device: selected });
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "生成设备出口计划失败", "warning");
+    }
+  };
+
+  const executeEgress = async () => {
+    if (!pendingEgress) return;
+    setExecutingEgress(true);
+    try {
+      const result = await executeDeviceEgress(pendingEgress.plan.policyId, pendingEgress.plan, pendingEgress.token);
+      const job = result.job ? await waitForJob(result.job.id) : undefined;
+      if (job?.status === "ROLLED_BACK") {
+        notify(job.errorMessage || `${pendingEgress.device.name} 出口策略应用失败，已回滚 RouterOS 变更`, "warning");
+        setPendingEgress(null);
+        onRefresh(false);
+        return;
+      }
+      if (job?.status === "FAILED") throw new Error(job.errorMessage || "设备出口策略任务失败");
+      if (job && job.status !== "SUCCEEDED") throw new Error(`设备出口策略任务结束于 ${job.status}`);
+      if (!job && result.status !== "SUCCEEDED") throw new Error(`设备出口策略执行结束于 ${result.status}`);
+      notify(`${pendingEgress.device.name} 的出口策略已执行、回读并持久化`);
+      setPendingEgress(null);
+      onRefresh(false);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "设备出口策略执行失败", "warning");
+    } finally {
+      setExecutingEgress(false);
+    }
+  };
+
+  const targetOptions = egress === "mihomo-node"
+    ? (nodeResource.data ?? []).map((node) => ({ id: node.id, label: node.name }))
+    : egress === "proxy-chain"
+      ? (groupResource.data ?? []).filter((group) => group.type === "chain").map((group) => ({ id: group.id, label: group.name }))
+      : egress === "l2tp"
+        ? (l2tpResource.data ?? []).map((client) => ({ id: client.name, label: `${client.name}${client.running && !client.disabled ? "（运行中）" : "（不可用）"}` }))
+        : [];
+
+  const changeEgress = (value: EgressType) => {
+    setEgress(value);
+    const currentTarget = value === selectedPolicy?.egress ? selectedPolicy?.targetId : "";
+    setTargetId(currentTarget ?? "");
+  };
+
   return (
     <div className="stack">
-      <div className="summary-grid">
-        <SummaryCard icon={Users} label="在线设备" value={devices.filter((d) => d.online).length} tone="green" />
-        <SummaryCard icon={LockKeyhole} label="已固定 IP" value={devices.filter((d) => d.fixed).length} />
-        <SummaryCard icon={Link2} label="未绑定" value={devices.filter((d) => !d.fixed).length} tone="orange" />
-        <SummaryCard icon={AlertTriangle} label="异常设备" value="1" tone="red" />
-      </div>
+      <section className="panel multi-resource-band"><ResourceMeta resource={resource} /><ResourceMeta resource={inventoryResource} /><ResourceMeta resource={policyResource} /><Button icon={RefreshCw} onClick={onRefresh}>刷新设备</Button></section>
+      <div className="summary-grid"><SummaryCard icon={Users} label="在线设备" value={live ? devices.filter((device) => device.online).length : "—"} tone="green" /><SummaryCard icon={LockKeyhole} label="静态租约" value={resource.data ? devices.filter((device) => device.fixed).length : "—"} /><SummaryCard icon={Link2} label="动态租约" value={resource.data ? devices.filter((device) => !device.fixed).length : "—"} tone="orange" /><SummaryCard icon={AlertTriangle} label="状态未确认" value={live ? devices.filter((device) => !device.online).length : devices.length || "—"} tone="red" /></div>
       <div className="split-view">
         <section className="panel table-panel">
-          <div className="toolbar">
-            <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索设备名称 / IP / MAC" /></label>
-            <select value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">全部状态</option><option value="online">在线</option><option value="offline">离线</option></select>
-            <select><option>全部接口</option><option>bridge-lan</option><option>iot-lan</option></select>
-            <Button icon={RefreshCw} onClick={() => notify("设备列表已从 RouterOS 刷新")}>刷新</Button>
-          </div>
-          <div className="table-wrap">
-            <table className="interactive-table">
-              <thead><tr><th>设备名称</th><th>IP 地址</th><th>MAC 地址</th><th>RouterOS 接口</th><th>出口策略</th><th>状态</th><th>延迟</th></tr></thead>
-              <tbody>
-                {filtered.map((device) => (
-                  <tr className={selected.id === device.id ? "selected" : ""} key={device.id} onClick={() => setSelectedDeviceId(device.id)}>
-                    <td><span className="name-cell"><DeviceIcon kind={device.kind} /><strong>{device.name}</strong></span></td>
-                    <td>{device.ip}</td><td>{device.mac}</td><td>{device.iface}</td>
-                    <td className={device.egress.includes("Mihomo") || device.egress.includes("US-") || device.egress.includes("HK-") ? "purple-text" : "blue-text"}>{device.egress}</td>
-                    <td><StatusDot status={device.online ? "ok" : "offline"} />{device.online ? "在线" : "离线"}</td>
-                    <td className="latency">{device.latency ? `${device.latency} ms` : "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <div className="toolbar"><label className="search-box"><Search aria-hidden="true" size={17} /><span className="sr-only">搜索设备</span><input onChange={(event) => setSearch(event.target.value)} placeholder="搜索设备名称 / IP / MAC" value={search} /></label><select aria-label="筛选设备状态" onChange={(event) => setStatus(event.target.value)} value={status}><option value="all">全部状态</option><option value="online">在线</option><option value="offline">离线</option></select></div>
+          {filtered.length ? <div className="table-wrap"><table aria-label="RouterOS 设备" className="interactive-table" role="grid"><thead><tr><th role="columnheader">设备名称</th><th role="columnheader">IP 地址</th><th role="columnheader">MAC 地址</th><th role="columnheader">RouterOS 接口</th><th role="columnheader">出口策略</th><th role="columnheader">状态</th></tr></thead><tbody>{filtered.map((device) => { const policy = policyForDevice(policies, device); return <tr aria-selected={selected?.id === device.id} className={selected?.id === device.id ? "selected" : ""} data-grid-row key={device.id} onClick={() => setSelectedDeviceId(device.id)} onKeyDown={(event) => handleGridRowKeyDown(event, () => setSelectedDeviceId(device.id))} tabIndex={keyboardActiveId === device.id ? 0 : -1}><td><span className="name-cell"><DeviceIcon kind={device.kind} /><strong>{device.name}</strong></span></td><td>{device.ip}</td><td>{device.mac}</td><td>{device.iface}</td><td>{egressLabel(policy?.egress)}</td><td><StatusDot status={live ? device.online ? "ok" : "offline" : "warning"} />{live ? device.online ? "在线" : "离线" : "上次状态"}</td></tr>; })}</tbody></table></div> : <EmptyState detail="设备接口失败不会回退到演示清单。" title="没有设备数据" />}
         </section>
         <aside className="detail-panel">
-          <div className="detail-heading"><div><small>设备详情</small><h2>{selected.name}</h2><span><StatusDot status={selected.online ? "ok" : "offline"} />{selected.online ? "在线" : "离线"} · {selected.lastSeen}</span></div><DeviceIcon kind={selected.kind} /></div>
-          <DetailSection title="设备信息">
-            <dl className="definition-list">
-              <div><dt>IP 地址</dt><dd>{selected.ip}</dd></div><div><dt>MAC 地址</dt><dd>{selected.mac}</dd></div>
-              <div><dt>RouterOS 接口</dt><dd>{selected.iface}</dd></div><div><dt>当前出口</dt><dd className="purple-text">{selected.egress}</dd></div>
-            </dl>
-          </DetailSection>
-          <DetailSection title="IP 绑定状态">
-            <div className="inline-status"><StatusDot status={selected.fixed ? "ok" : "warning"} />{selected.fixed ? "RouterOS DHCP 静态租约" : "当前为动态租约"}</div>
-            <Button icon={LockKeyhole} onClick={fixIp} disabled={selected.fixed}>{selected.fixed ? "IP 已固定" : "固定 IP"}</Button>
-          </DetailSection>
-          <DetailSection title="出口策略">
-            <label className="field"><span>选择出口</span><select value={egress || selected.egress} onChange={(event) => setEgress(event.target.value)}><option>直连 WAN</option><option>Mihomo 自动选择</option><option>HK-01</option><option>US-LAX-01</option><option>链式代理</option><option>L2TP-日本</option></select></label>
-            <div className="warning-note"><AlertTriangle size={16} />修改将更新 RouterOS 标记与路由规则，应用前会自动创建快照。</div>
-          </DetailSection>
-          <DetailSection title="出口检测">
-            <dl className="definition-list"><div><dt>出口 IP</dt><dd>23.47.108.56</dd></div><div><dt>地区</dt><dd>美国 洛杉矶</dd></div><div><dt>延迟</dt><dd className="green-text">{selected.latency ?? "—"} ms</dd></div><div><dt>丢包率</dt><dd>0%</dd></div></dl>
-          </DetailSection>
-          <div className="detail-actions"><Button variant="primary" icon={Play} onClick={applyEgress}>应用并检测</Button></div>
+          {selected ? (
+            <>
+              <div className="detail-heading">
+                <div>
+                  <small>设备详情</small>
+                  <h2>{selected.name}</h2>
+                  <span><StatusDot status={live ? selected.online ? "ok" : "offline" : "warning"} />{live ? selected.online ? "在线" : "离线" : "状态未确认"} · {selected.lastSeen}</span>
+                </div>
+                <DeviceIcon kind={selected.kind} />
+              </div>
+              <DetailSection title="设备信息">
+                <dl className="definition-list">
+                  <div><dt>IP 地址</dt><dd>{selected.ip}</dd></div>
+                  <div><dt>MAC 地址</dt><dd>{selected.mac}</dd></div>
+                  <div><dt>RouterOS 接口</dt><dd>{selected.iface}</dd></div>
+                  <div><dt>DHCP server</dt><dd>{selected.dhcpServer || "未回读"}</dd></div>
+                  <div><dt>当前出口</dt><dd>{egressLabel(selectedPolicy?.egress)}{selectedPolicy?.targetId ? ` · ${selectedPolicy.targetId}` : ""}</dd></div>
+                </dl>
+              </DetailSection>
+              <DetailSection title="设备画像">
+                <div className="profile-form">
+                  <label className="field"><span>别名</span><input disabled={!selected.profileTracked || metadataBusy} maxLength={128} onChange={(event) => setAlias(event.target.value)} value={alias} /></label>
+                  <label className="field"><span>厂商</span><input disabled={!selected.profileTracked || metadataBusy} maxLength={128} onChange={(event) => setVendor(event.target.value)} value={vendor} /></label>
+                  <label className="field full"><span>标签</span><input disabled={!selected.profileTracked || metadataBusy} onChange={(event) => setTagsText(event.target.value)} placeholder="work, trusted" value={tagsText} /></label>
+                  <Button disabled={!selected.profileTracked || inventoryResource.phase !== "live" || metadataBusy} icon={Save} onClick={() => void saveMetadata()} variant="secondary">{metadataBusy ? "保存中…" : "保存画像"}</Button>
+                </div>
+                {!selected.profileTracked ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />SQLite 设备库存不可用，画像编辑已禁用。</div> : null}
+              </DetailSection>
+              <DetailSection title="在线历史">
+                <dl className="definition-list">
+                  <div><dt>首次发现</dt><dd>{selected.firstSeen ? new Date(selected.firstSeen).toLocaleString("zh-CN", { hour12: false }) : "未记录"}</dd></div>
+                  <div><dt>最后在线</dt><dd>{selected.lastSeen === "未提供" ? selected.lastSeen : new Date(selected.lastSeen).toLocaleString("zh-CN", { hour12: false })}</dd></div>
+                </dl>
+                {historyPhase === "loading" ? <span className="muted-text">加载中…</span> : historyPhase === "unavailable" ? <span className="muted-text">历史不可用</span> : history.length ? <ol className="presence-history">{history.slice(0, 8).map((event) => <li key={event.id}><StatusDot status={event.online ? "ok" : "offline"} /><span>{event.online ? "上线" : "离线"}</span><time dateTime={event.observedAt}>{new Date(event.observedAt).toLocaleString("zh-CN", { hour12: false })}</time></li>)}</ol> : <span className="muted-text">暂无状态切换记录</span>}
+              </DetailSection>
+              <DetailSection title="IP 绑定">
+                <div className="inline-status"><StatusDot status={selected.fixed ? "ok" : "warning"} />{selected.fixed ? "静态租约" : "当前为动态租约"}</div>
+                <Button disabled={selected.fixed || !live || !selected.dhcpServer} icon={LockKeyhole} onClick={() => void prepareBinding()}>{selected.fixed ? "IP 已固定" : "生成固定 IP 计划"}</Button>
+              </DetailSection>
+              <DetailSection title="出口策略">
+                <label className="field"><span>选择出口</span><select disabled={!live || policyResource.phase !== "live"} onChange={(event) => changeEgress(event.target.value as EgressType)} value={egress}><option value="direct">直连</option><option value="mihomo-node">Mihomo 节点</option><option value="proxy-chain">链式代理</option><option value="l2tp">RouterOS L2TP</option><option value="blocked">阻断</option></select></label>
+                {targetRequired ? <label className="field"><span>目标</span><select disabled={!targetSourceLive} onChange={(event) => setTargetId(event.target.value)} value={targetId}><option value="">请选择目标</option>{targetOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label> : null}
+                {!selected.fixed ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />先将租约固定，避免 DHCP 地址变化后策略命中错误设备。</div> : managementProtected ? <div className="warning-note"><ShieldCheck aria-hidden="true" size={16} />10.0.0.1 至 10.0.0.4 为永久旁路管理面，禁止创建出口策略。</div> : policyResource.phase !== "live" || !targetSourceLive ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />策略或目标数据源不是实时状态，写入已禁用。</div> : null}
+              </DetailSection>
+              <div className="detail-actions"><Button disabled={!canPrepareEgress || executingEgress} icon={Play} onClick={() => void prepareEgress()} variant="primary">生成应用计划</Button></div>
+            </>
+          ) : <EmptyState detail="加载 RouterOS 设备后可查看详情。" title="未选择设备" />}
         </aside>
       </div>
+      {pending ? <ConfirmDialog busy={executing} confirmLabel="确认写入 RouterOS" description={`将为 ${pending.device.name} 执行 FoxOS 所有权范围内的静态租约计划。`} impacts={pending.plan.operations.map((operation) => `${operation.method} ${operation.path}：${operation.summary}`)} onCancel={() => setPending(null)} onConfirm={() => void executeBinding()} title="确认固定设备 IP" warnings={pending.plan.warnings} /> : null}
+      {pendingEgress ? <ConfirmDialog busy={executingEgress} confirmLabel="确认应用出口策略" description="服务端会重新检查策略前态和 RouterOS 摘要，逐项执行、回读验证并写审计；失败时补偿已应用的 FoxOS 自有资源。" impacts={[`设备：${pendingEgress.device.name} (${pendingEgress.plan.staticIp})`, `策略：${egressLabel(pendingEgress.plan.previousPolicy?.egress)} → ${egressLabel(pendingEgress.plan.policy.egress)}${pendingEgress.plan.policy.targetId ? ` (${pendingEgress.plan.policy.targetId})` : ""}`, ...(pendingEgress.plan.operations.length ? pendingEgress.plan.operations.map((operation) => `${operation.method} ${operation.path}：${operation.summary} [${operation.ownedComment}]`) : ["RouterOS：无需变更；只在任务验证后持久化策略"])]} onCancel={() => !executingEgress && setPendingEgress(null)} onConfirm={() => void executeEgress()} title="确认设备出口变更" warnings={pendingEgress.plan.warnings} /> : null}
     </div>
   );
 }
 
-function ProxyPage({
-  nodes,
-  setNodes,
-  selectedNodeId,
-  setSelectedNodeId,
-  notify,
-}: {
+type ProxyPageProps = {
   nodes: ProxyNode[];
   setNodes: React.Dispatch<React.SetStateAction<ProxyNode[]>>;
   selectedNodeId: number;
   setSelectedNodeId: (id: number) => void;
   notify: (message: string, tone?: Toast["tone"]) => void;
-}) {
+  nodeResource: ResourceState<ApiNode[]>;
+  mihomoResource: ResourceState<MihomoOverview>;
+  l2tpResource: ResourceState<L2TPClient[]>;
+  groupResource: ResourceState<ProxyGroup[]>;
+  onRefresh: (showToast?: boolean) => void;
+  navigate: (key: PageKey) => void;
+};
+
+function formatBytes(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return "—";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = value;
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit += 1;
+  }
+  return `${amount >= 10 || unit === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`;
+}
+
+function latestMihomoDelay(resource: ResourceState<MihomoOverview>, name: string): number | undefined {
+  if (resource.phase !== "live") return undefined;
+  const history = resource.data?.proxies?.[name]?.history ?? [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const delay = history[index]?.delay;
+    if (typeof delay === "number" && Number.isFinite(delay) && delay > 0) return delay;
+  }
+  return undefined;
+}
+
+function apiFailureMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) {
+    return error.references.length ? `${error.message}；引用：${error.references.join("、")}` : error.message;
+  }
+  return error instanceof Error ? error.message : fallback;
+}
+
+function ProxyPage({ nodes, setNodes, selectedNodeId, setSelectedNodeId, notify, nodeResource, mihomoResource, l2tpResource, groupResource, onRefresh, navigate }: ProxyPageProps) {
   const [search, setSearch] = useState("");
   const [protocol, setProtocol] = useState("all");
   const [modal, setModal] = useState<"add" | "import" | null>(null);
   const [testing, setTesting] = useState(false);
-  const [chain, setChain] = useState([1, 2]);
+  const [chainId, setChainId] = useState("");
+  const [chainName, setChainName] = useState("");
+  const [chainNodeIds, setChainNodeIds] = useState<string[]>([]);
+  const [chainBusy, setChainBusy] = useState(false);
+  const [chainDelete, setChainDelete] = useState<ProxyGroup | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [mihomoChecks, setMihomoChecks] = useState<Record<number, MihomoProbeResult>>({});
+  const [probingMihomo, setProbingMihomo] = useState(false);
   const selected = nodes.find((node) => node.id === selectedNodeId) ?? nodes[0];
-  const filtered = nodes.filter((node) => {
-    const matchesSearch = `${node.name}${node.server}${node.region}`.toLowerCase().includes(search.toLowerCase());
-    return matchesSearch && (protocol === "all" || node.protocol === protocol);
-  });
-  const runTests = async () => {
-    setTesting(true);
+  const filtered = nodes.filter((node) => `${node.name}${node.server}${node.region}`.toLowerCase().includes(search.toLowerCase()) && (protocol === "all" || node.protocol === protocol));
+  const keyboardActiveId = filtered.some((node) => node.id === selected?.id) ? selected?.id : filtered[0]?.id;
+  const chains = (groupResource.data ?? []).filter((group) => group.type === "chain");
+  const foxosNodes = nodes.filter((node): node is ProxyNode & { apiId: string } => Boolean(node.apiId));
+  const runtimeLive = mihomoResource.phase === "live" && Boolean(mihomoResource.data?.online);
+  const runtimeProxies = runtimeLive ? mihomoResource.data?.proxies ?? {} : {};
+  const runtimeSelectors = Object.entries(runtimeProxies).filter(([, proxy]) => typeof proxy.now === "string" && proxy.now);
+  const selectedRuntime = selected ? runtimeProxies[selected.name] : undefined;
+  const selectedRuntimeDelay = selected ? latestMihomoDelay(mihomoResource, selected.name) : undefined;
+  const selectedBy = selected ? runtimeSelectors.filter(([, proxy]) => proxy.now === selected.name).map(([name]) => name) : [];
+  const selectedCheck = selected ? mihomoChecks[selected.id] : undefined;
+
+  const runMihomoProbe = async () => {
+    if (!selected?.apiId) return;
+    setProbingMihomo(true);
     try {
-      const candidates = nodes.filter((node) => node.apiId);
-      const results = await Promise.all(candidates.map(async (node) => ({ node, result: await probeNode(node.apiId!) })));
-      setNodes((items) => items.map((item) => {
-        const match = results.find(({ node }) => node.id === item.id);
-        return match ? { ...item, latency: match.result.latencyMs, status: match.result.reachable ? "online" : "offline" } : item;
-      }));
-      const failed = results.filter(({ result }) => !result.reachable).length;
-      notify(`已完成 ${results.length} 个 FoxOS 节点的 TCP 可达性检测${failed ? `，${failed} 个不可达` : ""}`, failed ? "warning" : "success");
+      const result = await probeMihomoNode(selected.apiId);
+      setMihomoChecks((items) => ({ ...items, [selected.id]: result }));
+      const messages = [result.nodeHttp.success ? `节点 HTTP ${result.nodeHttp.latencyMs} ms` : "节点 HTTP 失败"];
+      messages.push(result.exit.success ? `当前策略出口 ${result.exit.ipAddress}` : result.exit.available ? "当前策略出口检测失败" : "当前策略出口未配置");
+      notify(`${selected.name}：${messages.join("；")}`, result.nodeHttp.success && (!result.exit.available || result.exit.success) ? "success" : "warning");
+    } catch (error) {
+      notify(apiFailureMessage(error, "Mihomo 代理探测失败"), "warning");
+    } finally {
+      setProbingMihomo(false);
+    }
+  };
+
+  const runTCPProbe = async () => {
+    if (!selected?.apiId) return;
+    try {
+      const result = await probeNode(selected.apiId);
+      setNodes((items) => items.map((item) => item.id === selected.id ? { ...item, latency: result.latencyMs, status: result.reachable ? "online" : "offline", verification: "tcp" } : item));
+      notify(`${selected.name}：${result.reachable ? "TCP 可达" : "TCP 不可达"}，${result.latencyMs} ms`, result.reachable ? "success" : "warning");
     } catch (error) {
       notify(error instanceof Error ? error.message : "节点检测失败", "warning");
-    } finally {
-      setTesting(false);
     }
   };
-  const deleteNode = async () => {
-    if (selected.protocol === "L2TP") {
-      notify("RouterOS 原生 L2TP 需在 RouterOS 页面删除", "warning");
+
+  const editChain = (group?: ProxyGroup) => {
+    setChainId(group?.id ?? "");
+    setChainName(group?.name ?? "");
+    setChainNodeIds(group?.nodeIds ?? []);
+  };
+
+  useEffect(() => {
+    const selectedGroup = chains.find((group) => group.id === chainId) ?? chains[0];
+    editChain(selectedGroup);
+  }, [groupResource.updatedAt]);
+
+  const runTests = async () => {
+    const candidates = nodes.filter((node) => node.apiId);
+    if (!candidates.length) {
+      notify("没有可由 FoxOS TCP 探测的节点", "warning");
       return;
     }
-    if (selected.apiId) {
-      try {
-        await deleteNodeApi(selected.apiId);
-      } catch (error) {
-        notify(error instanceof Error ? error.message : "节点删除失败", "warning");
-        return;
-      }
-    }
-    setNodes((items) => items.filter((item) => item.id !== selected.id));
-    setSelectedNodeId(nodes.find((item) => item.id !== selected.id)?.id ?? 1);
-    notify(`${selected.name} 已删除`);
+    setTesting(true);
+    const results = await Promise.allSettled(candidates.map(async (node) => ({ node, result: await probeNode(node.apiId!) })));
+    setNodes((items) => items.map((item) => {
+      const match = results.find((entry) => entry.status === "fulfilled" && entry.value.node.id === item.id);
+      if (!match || match.status !== "fulfilled") return item;
+      return { ...item, latency: match.value.result.latencyMs, status: match.value.result.reachable ? "online" : "offline", verification: "tcp" };
+    }));
+    const requestFailures = results.filter((result) => result.status === "rejected").length;
+    const unreachable = results.filter((result) => result.status === "fulfilled" && !result.value.result.reachable).length;
+    notify(`TCP 探测完成：${results.length - requestFailures} 个有结果，${unreachable} 个不可达，${requestFailures} 个请求失败`, requestFailures || unreachable ? "warning" : "success");
+    setTesting(false);
   };
+
+  const deleteSelected = async () => {
+    if (!selected?.apiId) return;
+    setDeleting(true);
+    try {
+      await deleteNodeApi(selected.apiId);
+      setNodes((items) => items.filter((item) => item.id !== selected.id));
+      setSelectedNodeId(nodes.find((item) => item.id !== selected.id)?.id ?? 0);
+      notify(`${selected.name} 已删除`);
+      setDeleteOpen(false);
+    } catch (error) {
+      notify(apiFailureMessage(error, "节点删除失败"), "warning");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const saveChain = async () => {
+    if (!chainName.trim()) {
+      notify("请输入链式代理名称", "warning");
+      return;
+    }
+    if (chainNodeIds.length < 2) {
+      notify("链式代理至少需要两个有序节点", "warning");
+      return;
+    }
+    setChainBusy(true);
+    try {
+      const payload = { id: chainId || undefined, name: chainName.trim(), type: "chain" as const, nodeIds: chainNodeIds, groupIds: [] };
+      const saved = chainId
+        ? await updateProxyGroup({ ...payload, id: chainId })
+        : await createProxyGroup(payload);
+      editChain(saved);
+      notify(`${saved.name} 已保存到 SQLite；Mihomo 运行配置尚未改变`);
+      onRefresh(false);
+    } catch (error) {
+      notify(apiFailureMessage(error, "链式代理保存失败"), "warning");
+    } finally {
+      setChainBusy(false);
+    }
+  };
+
+  const removeChain = async () => {
+    if (!chainDelete) return;
+    setChainBusy(true);
+    try {
+      await deleteProxyGroup(chainDelete.id);
+      notify(`${chainDelete.name} 已从 SQLite 删除；Mihomo 运行配置尚未改变`);
+      setChainDelete(null);
+      editChain();
+      onRefresh(false);
+    } catch (error) {
+      notify(apiFailureMessage(error, "链式代理删除失败"), "warning");
+    } finally {
+      setChainBusy(false);
+    }
+  };
+
+  const moveChainNode = (index: number, offset: -1 | 1) => {
+    const nextIndex = index + offset;
+    if (nextIndex < 0 || nextIndex >= chainNodeIds.length) return;
+    setChainNodeIds((items) => {
+      const next = [...items];
+      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      return next;
+    });
+  };
+
   return (
     <div className="stack">
-      <div className="proxy-header-row">
-        <div className="summary-grid">
-          <SummaryCard icon={Globe2} label="可用节点" value={`${nodes.filter((n) => n.status === "online").length} / ${nodes.length}`} tone="green" />
-          <SummaryCard icon={Upload} label="订阅源" value="3" tone="purple" />
-          <SummaryCard icon={Activity} label="平均延迟" value="128 ms" />
-          <SummaryCard icon={AlertTriangle} label="异常节点" value={nodes.filter((n) => n.status !== "online").length} tone="orange" />
-        </div>
-        <div className="header-actions"><Button variant="primary" icon={Plus} onClick={() => setModal("add")}>添加节点</Button><Button icon={Upload} onClick={() => setModal("import")}>导入订阅</Button><Button icon={testing ? RefreshCw : Activity} onClick={runTests} disabled={testing}>{testing ? "检测中…" : "检测全部"}</Button></div>
-      </div>
-
+      <section className="panel multi-resource-band"><ResourceMeta resource={nodeResource} /><ResourceMeta resource={mihomoResource} /><ResourceMeta resource={l2tpResource} /><ResourceMeta resource={groupResource} /><Button icon={RefreshCw} onClick={onRefresh}>刷新节点</Button></section>
+      <div className="proxy-header-row"><div className="summary-grid"><SummaryCard icon={Activity} label="Mihomo 活动连接" value={runtimeLive ? mihomoResource.data?.traffic?.connectionCount ?? mihomoResource.data?.connections?.length ?? 0 : "—"} tone="green" /><SummaryCard icon={Download} label="累计下载" value={runtimeLive ? formatBytes(mihomoResource.data?.traffic?.downloadTotal) : "—"} /><SummaryCard icon={Upload} label="累计上传" value={runtimeLive ? formatBytes(mihomoResource.data?.traffic?.uploadTotal) : "—"} tone="purple" /><SummaryCard icon={ListChecks} label="运行中选择器" value={runtimeLive ? runtimeSelectors.length : "—"} tone="orange" /></div><div className="header-actions"><Button icon={Plus} onClick={() => setModal("add")} variant="primary">添加节点</Button><Button icon={Upload} onClick={() => setModal("import")}>导入分享链接</Button><Button disabled={testing} icon={Activity} onClick={() => void runTests()}>{testing ? "检测中…" : "TCP 检测"}</Button></div></div>
+      <section className="panel runtime-policy-panel"><div className="panel-heading"><div><h2>Mihomo 当前策略</h2><p>直接读取 Controller /proxies；不代表 HTTP、DNS 或出口 IP 已验证</p></div><span className="unavailable-label"><StatusDot status={runtimeLive ? "ok" : "warning"} />{runtimeLive ? `v${mihomoResource.data?.version || "未知"}` : phaseLabel(mihomoResource.phase)}</span></div>{runtimeSelectors.length ? <dl className="definition-list compact-definition">{runtimeSelectors.map(([name, proxy]) => <div key={name}><dt>{name}</dt><dd>{proxy.now}</dd></div>)}</dl> : <EmptyState detail="Controller 未返回选择器状态时不会推断当前代理策略。" title="没有可验证的选择器数据" />}</section>
       <section className="panel chain-builder">
-        <div className="panel-heading"><div><h2>链式代理路线</h2><p>从左到右按访问顺序执行 · 应用前自动验证</p></div><span className="healthy-label"><StatusDot />链路状态正常</span></div>
-        <div className="chain-builder-row">
-          <ChainNode icon={Router} name="本机 / RouterOS" detail="设备出口" locked />
-          {chain.map((id) => {
-            const node = nodes.find((item) => item.id === id);
-            if (!node) return null;
-            return <ChainNode key={id} icon={Server} name={node.name} detail={`${node.region} · ${node.latency ?? "—"} ms`} onRemove={() => setChain((items) => items.filter((item) => item !== id))} />;
-          })}
-          <div className="add-stage">
-            <select defaultValue="" onChange={(event) => { const id = Number(event.target.value); if (id && !chain.includes(id)) setChain((items) => [...items, id]); event.currentTarget.value = ""; }}>
-              <option value="">＋ 添加链路节点</option>
-              {nodes.filter((node) => node.status !== "offline").map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}
-            </select>
-          </div>
-          <ChainNode icon={Globe2} name="Internet" detail="目标网络" locked />
-          <Button variant="primary" icon={Zap} onClick={() => notify("链式代理已验证并应用，快照已保存")}>应用链式代理</Button>
+        <div className="panel-heading"><div><h2>链式代理组</h2><p>有序节点保存在 SQLite；运行配置需单独预览和发布</p></div><span className="unavailable-label"><StatusDot status={groupResource.phase === "live" ? "ok" : "warning"} />{groupResource.phase === "live" ? `${chains.length} 个链` : phaseLabel(groupResource.phase)}</span></div>
+        <div className="chain-toolbar">
+          <label className="field"><span>编辑链</span><select disabled={groupResource.phase !== "live" || chainBusy} onChange={(event) => editChain(chains.find((group) => group.id === event.target.value))} value={chainId}><option value="">新建链式代理</option>{chains.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
+          <label className="field operation-grow"><span>名称</span><input disabled={groupResource.phase !== "live" || chainBusy} onChange={(event) => setChainName(event.target.value)} placeholder="例如：工作出口链" value={chainName} /></label>
+          <Button disabled={groupResource.phase !== "live" || chainBusy} icon={Plus} onClick={() => editChain()}>新建</Button>
+          <Button disabled={groupResource.phase !== "live" || chainBusy || chainNodeIds.length < 2 || !chainName.trim()} icon={Save} onClick={() => void saveChain()} variant="primary">保存组</Button>
+          <Button disabled={!chainId || chainBusy} icon={Trash2} onClick={() => setChainDelete(chains.find((group) => group.id === chainId) ?? null)} variant="danger">删除组</Button>
         </div>
+        <div className="chain-builder-row"><ChainNode detail="设备出口" icon={Router} locked name="RouterOS" />{chainNodeIds.map((id, index) => { const node = foxosNodes.find((item) => item.apiId === id); return <ChainNode detail={node ? `${node.protocol} · 第 ${index + 1} 跳` : `缺失引用 · 第 ${index + 1} 跳`} icon={node ? Server : AlertTriangle} key={`${id}-${index}`} name={node?.name ?? id} onMoveLeft={index > 0 ? () => moveChainNode(index, -1) : undefined} onMoveRight={index < chainNodeIds.length - 1 ? () => moveChainNode(index, 1) : undefined} onRemove={() => setChainNodeIds((items) => items.filter((_, itemIndex) => itemIndex !== index))} />; })}<div className="add-stage"><select aria-label="添加链路节点" disabled={groupResource.phase !== "live" || chainBusy} defaultValue="" onChange={(event) => { const id = event.target.value; if (id && !chainNodeIds.includes(id)) setChainNodeIds((items) => [...items, id]); event.currentTarget.value = ""; }}><option value="">添加链路节点</option>{foxosNodes.filter((node) => !chainNodeIds.includes(node.apiId)).map((node) => <option key={node.apiId} value={node.apiId}>{node.name}</option>)}</select></div><ChainNode detail="目标网络" icon={Globe2} locked name="Internet" /></div>
+        <div className="chain-publish-note"><span><FileText aria-hidden="true" size={16} />保存组不会热重载 Mihomo。发布前必须检查生成配置与脱敏 Diff。</span><Button icon={ArrowRight} onClick={() => navigate("operations")} variant="secondary">预览并发布</Button></div>
       </section>
-
       <div className="split-view">
-        <section className="panel table-panel">
-          <div className="toolbar">
-            <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索节点名称 / 服务器 / 地区" /></label>
-            <select><option>全部地区</option><option>中国香港</option><option>美国</option><option>日本</option></select>
-            <select value={protocol} onChange={(event) => setProtocol(event.target.value)}><option value="all">全部协议</option>{[...new Set(nodes.map((node) => node.protocol))].map((item) => <option key={item}>{item}</option>)}</select>
-            <select><option>全部来源</option><option>Alpha 订阅</option><option>RouterOS 原生</option></select>
-          </div>
-          <div className="table-wrap">
-            <table className="interactive-table">
-              <thead><tr><th>节点名称</th><th>协议</th><th>服务器</th><th>地区</th><th>来源</th><th>延迟</th><th>丢包率</th><th>状态</th><th>使用中</th></tr></thead>
-              <tbody>
-                {filtered.map((node) => (
-                  <tr className={selected.id === node.id ? "selected" : ""} key={node.id} onClick={() => setSelectedNodeId(node.id)}>
-                    <td><strong>{node.name}</strong></td><td>{node.protocol}</td><td>{node.server}</td><td>{node.region}</td><td>{node.source}</td>
-                    <td className={node.latency && node.latency > 200 ? "orange-text" : "green-text"}>{node.latency ? `${node.latency} ms` : "—"}</td><td>{node.loss}%</td>
-                    <td><StatusDot status={node.status === "online" ? "ok" : node.status} />{node.status === "online" ? "在线" : node.status === "warning" ? "警告" : "离线"}</td><td>{node.inUse}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <section className="panel table-panel"><div className="toolbar"><label className="search-box"><Search aria-hidden="true" size={17} /><span className="sr-only">搜索节点</span><input onChange={(event) => setSearch(event.target.value)} placeholder="搜索节点 / 服务器" value={search} /></label><select aria-label="筛选节点协议" onChange={(event) => setProtocol(event.target.value)} value={protocol}><option value="all">全部协议</option>{[...new Set(nodes.map((node) => node.protocol))].map((item) => <option key={item}>{item}</option>)}</select></div>{filtered.length ? <div className="table-wrap"><table aria-label="代理节点" className="interactive-table" role="grid"><thead><tr><th role="columnheader">节点名称</th><th role="columnheader">协议</th><th role="columnheader">服务器</th><th role="columnheader">来源</th><th role="columnheader">Mihomo 延迟</th><th role="columnheader">TCP 延迟</th><th role="columnheader">验证状态</th></tr></thead><tbody>{filtered.map((node) => { const sourcePhase = node.verification === "routeros-session" ? l2tpResource.phase : nodeResource.phase; const runtimeDelay = latestMihomoDelay(mihomoResource, node.name); return <tr aria-selected={selected?.id === node.id} className={selected?.id === node.id ? "selected" : ""} data-grid-row key={node.id} onClick={() => setSelectedNodeId(node.id)} onKeyDown={(event) => handleGridRowKeyDown(event, () => setSelectedNodeId(node.id))} tabIndex={keyboardActiveId === node.id ? 0 : -1}><td><strong>{node.name}</strong></td><td>{node.protocol}</td><td>{node.server}</td><td>{node.source}</td><td>{runtimeDelay === undefined ? "未返回" : `${runtimeDelay} ms`}</td><td>{node.verification !== "tcp" || node.latency === null ? "未检测" : `${node.latency} ms`}</td><td><StatusDot status={proxyStatusTone(node, sourcePhase)} />{proxyStatusLabel(node, sourcePhase)}</td></tr>; })}</tbody></table></div> : <EmptyState detail="节点读取失败时不会显示演示节点。" title="没有节点数据" />}</section>
         <aside className="detail-panel">
-          <div className="detail-heading"><div><small>节点详情</small><h2>{selected.name}</h2><span><StatusDot status={selected.status === "online" ? "ok" : selected.status} />{selected.status === "online" ? "在线" : "异常"} · 最近检测 14:35:12</span></div><Server size={24} /></div>
-          <div className="detail-button-row"><Button icon={Activity} onClick={async () => {
-            if (!selected.apiId) {
-              notify("演示节点或 RouterOS L2TP 暂不由 FoxOS TCP 探测", "warning");
-              return;
-            }
-            try {
-              const result = await probeNode(selected.apiId);
-              setNodes((items) => items.map((item) => item.id === selected.id ? { ...item, latency: result.latencyMs, status: result.reachable ? "online" : "offline" } : item));
-              notify(`${selected.name}：${result.reachable ? "可达" : "不可达"}，${result.latencyMs} ms`, result.reachable ? "success" : "warning");
-            } catch (error) {
-              notify(error instanceof Error ? error.message : "节点检测失败", "warning");
-            }
-          }}>测试</Button><Button icon={Pencil} onClick={() => notify("请删除后重新导入；凭据不会由读取接口返回", "warning")}>编辑</Button><Button variant="danger" icon={Trash2} onClick={deleteNode}>删除</Button></div>
-          <DetailSection title="连接信息"><dl className="definition-list"><div><dt>服务器</dt><dd>{selected.server}</dd></div><div><dt>协议</dt><dd>{selected.protocol}</dd></div><div><dt>地区</dt><dd>{selected.region}</dd></div><div><dt>来源</dt><dd>{selected.source}</dd></div></dl></DetailSection>
-          <DetailSection title="健康状态"><dl className="definition-list"><div><dt>TCP 延迟</dt><dd className="green-text">{selected.latency ?? "—"} ms</dd></div><div><dt>丢包率</dt><dd>{selected.loss}%</dd></div><div><dt>连续在线</dt><dd>2 天 06:18</dd></div><div><dt>失败次数（24h）</dt><dd>{selected.status === "offline" ? 4 : 0}</dd></div></dl></DetailSection>
-          <div className="history-bars" aria-label="最近延迟历史">{[45, 66, 52, 74, 63, 82, 58, 70, 61, 86, 68, 76].map((height, index) => <span key={index} style={{ height: `${height}%` }} />)}</div>
+          {selected ? (
+            <>
+              <div className="detail-heading">
+                <div>
+                  <small>节点详情</small>
+                  <h2>{selected.name}</h2>
+                  <span><StatusDot status={proxyStatusTone(selected, selected.verification === "routeros-session" ? l2tpResource.phase : nodeResource.phase)} />{proxyStatusLabel(selected, selected.verification === "routeros-session" ? l2tpResource.phase : nodeResource.phase)}</span>
+                </div>
+                <Server aria-hidden="true" size={24} />
+              </div>
+              <div className="detail-button-row">
+                <Button disabled={!selected.apiId} icon={Activity} onClick={() => void runTCPProbe()}>TCP 测试</Button>
+                <Button disabled={!selected.apiId || probingMihomo} icon={Globe2} onClick={() => void runMihomoProbe()}>{probingMihomo ? "探测中…" : "代理 HTTP / 出口"}</Button>
+                <Button disabled={!selected.apiId} icon={Trash2} onClick={() => setDeleteOpen(true)} variant="danger">删除</Button>
+              </div>
+              <DetailSection title="连接信息">
+                <dl className="definition-list">
+                  <div><dt>服务器</dt><dd>{selected.server}</dd></div>
+                  <div><dt>协议</dt><dd>{selected.protocol}</dd></div>
+                  <div><dt>来源</dt><dd>{selected.source}</dd></div>
+                  <div><dt>引用</dt><dd>{selected.inUse}</dd></div>
+                </dl>
+              </DetailSection>
+              <DetailSection title="Mihomo 运行态">
+                <dl className="definition-list">
+                  <div><dt>Controller 条目</dt><dd>{selectedRuntime ? selectedRuntime.type || "已返回" : runtimeLive ? "未找到同名节点" : "不可用"}</dd></div>
+                  <div><dt>历史延迟</dt><dd>{selectedRuntimeDelay === undefined ? "未返回" : selectedRuntimeDelay + " ms"}</dd></div>
+                  <div><dt>当前被选择器使用</dt><dd>{selectedBy.length ? selectedBy.join("、") : "未发现"}</dd></div>
+                </dl>
+              </DetailSection>
+              <DetailSection title="已验证范围">
+                <dl className="definition-list">
+                  <div><dt>TCP 可达性</dt><dd>{selected.verification === "tcp" && selected.latency !== null ? selected.latency + " ms" : "未检测"}</dd></div>
+                  <div><dt>RouterOS 会话</dt><dd>{selected.verification === "routeros-session" ? proxyStatusLabel(selected, l2tpResource.phase) : "不适用"}</dd></div>
+                  <div><dt>代理握手</dt><dd>未单独检测</dd></div>
+                  <div><dt>节点 HTTP</dt><dd>{selectedCheck?.nodeHttp.success ? selectedCheck.nodeHttp.latencyMs + " ms" : selectedCheck?.nodeHttp.available ? "失败" : "未检测"}</dd></div>
+                  <div><dt>DNS 解析</dt><dd>未单独检测</dd></div>
+                  <div><dt>出口 IP</dt><dd>{selectedCheck?.exit.success ? selectedCheck.exit.ipAddress + "（当前策略）" : selectedCheck?.exit.available ? "检测失败" : "未配置"}</dd></div>
+                  <div><dt>出口 HTTP 延迟</dt><dd>{selectedCheck?.exit.success ? selectedCheck.exit.latencyMs + " ms" : "未检测"}</dd></div>
+                  <div><dt>抖动 / 丢包</dt><dd>未检测</dd></div>
+                </dl>
+              </DetailSection>
+            </>
+          ) : <EmptyState detail="加载节点后可查看详情。" title="未选择节点" />}
         </aside>
       </div>
-      {modal ? <ProxyModal mode={modal} onClose={() => setModal(null)} onCreate={(node) => { setNodes((items) => [...items, node]); setModal(null); notify(`${node.name} 已添加`); }} notify={notify} /> : null}
+      {modal ? <ProxyModal mode={modal} notify={notify} onClose={() => setModal(null)} onCreate={(node) => { setNodes((items) => [...items, node]); setSelectedNodeId(node.id); setModal(null); notify(`${node.name} 已保存，尚未执行连通性检测`); }} onImported={() => onRefresh(false)} /> : null}
+      {deleteOpen && selected ? <ConfirmDialog busy={deleting} confirmLabel="确认删除节点" description="删除后节点凭据与定义将从 FoxOS 数据库移除；Mihomo 运行配置不会在本阶段自动发布。" impacts={[`节点：${selected.name}`, `服务器：${selected.server}`, `已知引用：${selected.inUse}`]} onCancel={() => setDeleteOpen(false)} onConfirm={() => void deleteSelected()} title="删除代理节点" warnings={["服务端会再次检查代理组和设备策略引用；存在引用时必须拒绝删除"]} /> : null}
+      {chainDelete ? <ConfirmDialog busy={chainBusy} confirmLabel="确认删除代理链" description="只删除 SQLite 中的代理组定义；当前 Mihomo 运行配置保持不变，直到下一次显式发布。" impacts={[`代理链：${chainDelete.name}`, `有序节点：${chainDelete.nodeIds.length} 个`, `组 ID：${chainDelete.id}`]} onCancel={() => !chainBusy && setChainDelete(null)} onConfirm={() => void removeChain()} title="确认删除链式代理" warnings={["服务端会检查设备策略和其他代理组引用；存在引用时拒绝删除"]} /> : null}
     </div>
   );
 }
 
-function ChainNode({ icon: Icon, name, detail, locked, onRemove }: { icon: typeof Router; name: string; detail: string; locked?: boolean; onRemove?: () => void }) {
-  return (
-    <div className="chain-node">
-      <Icon size={22} /><span><strong>{name}</strong><small>{detail}</small></span>
-      {!locked ? <button aria-label={`移除 ${name}`} onClick={onRemove}><X size={14} /></button> : null}
-    </div>
-  );
+function ChainNode({ icon: Icon, name, detail, locked, onRemove, onMoveLeft, onMoveRight }: { icon: typeof Router; name: string; detail: string; locked?: boolean; onRemove?: () => void; onMoveLeft?: () => void; onMoveRight?: () => void }) {
+  return <div className="chain-node"><Icon aria-hidden="true" size={22} /><span><strong>{name}</strong><small>{detail}</small></span>{!locked ? <span className="chain-node-actions"><button aria-label={`前移 ${name}`} disabled={!onMoveLeft} onClick={onMoveLeft} title="前移" type="button"><ChevronLeft size={14} /></button><button aria-label={`后移 ${name}`} disabled={!onMoveRight} onClick={onMoveRight} title="后移" type="button"><ChevronRight size={14} /></button><button aria-label={`移除 ${name}`} onClick={onRemove} title="移除" type="button"><X size={14} /></button></span> : null}</div>;
 }
 
-function ProxyModal({ mode, onClose, onCreate, notify }: { mode: "add" | "import"; onClose: () => void; onCreate: (node: ProxyNode) => void; notify: (message: string, tone?: Toast["tone"]) => void }) {
+function ProxyModal({ mode, onClose, onCreate, onImported, notify }: { mode: "add" | "import"; onClose: () => void; onCreate: (node: ProxyNode) => void; onImported: () => void; notify: (message: string, tone?: Toast["tone"]) => void }) {
+  const [submitting, setSubmitting] = useState(false);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
+    setSubmitting(true);
     try {
       if (mode === "import") {
         const result = await importNodeLinks(String(data.get("links") || ""));
-        notify(`已原子导入 ${result.imported} 个节点`);
+        notify(`已原子导入 ${result.imported} 个节点；尚未发布至 Mihomo`);
         onClose();
+        onImported();
         return;
       }
       const address = String(data.get("server") || "");
@@ -904,44 +1317,21 @@ function ProxyModal({ mode, onClose, onCreate, notify }: { mode: "add" | "import
       if (splitAt < 1) throw new Error("服务器地址必须包含端口，例如 example.com:443");
       const protocol = String(data.get("protocol") || "VLESS");
       const identity = String(data.get("identity") || "");
-      const created = await createNodeApi({
-        name: String(data.get("name") || "新节点"),
-        type: protocol.toLowerCase() === "shadowsocks" ? "ss" : protocol.toLowerCase(),
-        server: address.slice(0, splitAt).replace(/^\[|\]$/g, ""),
-        port: Number(address.slice(splitAt + 1)),
-        username: ["SOCKS5", "HTTP"].includes(protocol) ? identity : undefined,
-        uuid: ["VLESS", "VMess"].includes(protocol) ? identity : undefined,
-        password: String(data.get("password") || ""),
-      });
-      onCreate({
-        id: numericId(created.id), apiId: created.id, name: created.name, protocol: created.type.toUpperCase(),
-        server: `${created.server}:${created.port}`, region: "待检测", source: "FoxOS 数据库", latency: null, loss: 0, status: "warning", inUse: "—",
-      });
+      const created = await createNodeApi({ name: String(data.get("name") || "新节点"), type: protocol.toLowerCase() === "shadowsocks" ? "ss" : protocol.toLowerCase(), server: address.slice(0, splitAt).replace(/^\[|\]$/g, ""), port: Number(address.slice(splitAt + 1)), username: ["SOCKS5", "HTTP"].includes(protocol) ? identity : undefined, uuid: ["VLESS", "VMess"].includes(protocol) ? identity : undefined, password: String(data.get("password") || "") });
+      onCreate(mapApiNode(created));
     } catch (error) {
       notify(error instanceof Error ? error.message : "节点保存失败", "warning");
+    } finally {
+      setSubmitting(false);
     }
   };
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <form className="modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-heading"><div><small>{mode === "add" ? "手动配置" : "订阅源"}</small><h2>{mode === "add" ? "添加代理节点" : "导入订阅"}</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div>
-        {mode === "add" ? (
-          <div className="form-grid">
-            <label className="field"><span>节点名称</span><input name="name" required placeholder="例如 HK-02" /></label>
-            <label className="field"><span>协议</span><select name="protocol"><option>VLESS</option><option>Trojan</option><option>Shadowsocks</option><option>Hysteria2</option><option>SOCKS5</option></select></label>
-            <label className="field full"><span>服务器地址</span><input name="server" required placeholder="server.example.com:443" /></label>
-            <label className="field"><span>UUID / 用户名</span><input name="identity" placeholder="按协议填写" /></label>
-            <label className="field"><span>密码</span><input name="password" type="password" placeholder="按协议填写" /></label>
-          </div>
-        ) : (
-          <div className="form-grid">
-            <label className="field full"><span>分享链接（每行一个）</span><textarea name="links" required rows={8} placeholder={"vless://...\ntrojan://...\nss://..."} /></label>
-            <div className="warning-note full"><ShieldCheck size={16} />链接先在本机解析并整批校验，全部通过后才原子写入；FoxOS 不会代替浏览器抓取任意订阅 URL。</div>
-          </div>
-        )}
-        <div className="modal-actions"><Button onClick={onClose}>取消</Button><Button variant="primary" icon={mode === "add" ? Plus : Upload} type="submit">{mode === "add" ? "添加并检测" : "测试并导入"}</Button></div>
+    <Dialog eyebrow={mode === "add" ? "手动配置" : "本地分享链接"} onClose={() => !submitting && onClose()} title={mode === "add" ? "添加代理节点" : "导入代理节点"}>
+      <form className="modal-form" onSubmit={submit}>
+        {mode === "add" ? <div className="form-grid"><label className="field"><span>节点名称</span><input autoFocus data-autofocus name="name" required /></label><label className="field"><span>协议</span><select name="protocol"><option>VLESS</option><option>Trojan</option><option>Shadowsocks</option><option>Hysteria2</option><option>SOCKS5</option></select></label><label className="field full"><span>服务器地址</span><input name="server" placeholder="server.example.com:443" required /></label><label className="field"><span>UUID / 用户名</span><input name="identity" /></label><label className="field"><span>密码</span><input autoComplete="new-password" name="password" type="password" /></label></div> : <div className="form-grid"><label className="field full"><span>分享链接（每行一个）</span><textarea autoFocus data-autofocus name="links" required rows={8} /></label><div className="warning-note full"><ShieldCheck aria-hidden="true" size={16} />链接由 FoxOS 本地解析并整批校验；此入口不会抓取订阅 URL。</div></div>}
+        <div className="modal-actions"><Button disabled={submitting} onClick={onClose}>取消</Button><Button disabled={submitting} icon={mode === "add" ? Plus : Upload} type="submit" variant="primary">{submitting ? "正在保存…" : mode === "add" ? "保存节点" : "校验并导入"}</Button></div>
       </form>
-    </div>
+    </Dialog>
   );
 }
 
@@ -949,59 +1339,16 @@ function DetailSection({ title, children }: { title: string; children: React.Rea
   return <section className="detail-section"><h3>{title}</h3>{children}</section>;
 }
 
-function TopologyPage({ navigate }: { navigate: (page: PageKey) => void }) {
-  return (
-    <div className="stack">
-      <section className="panel topology-large">
-        <div className="panel-heading"><div><h2>实时网络拓扑</h2><p>点击组件进入对应管理页面</p></div><Button icon={RefreshCw}>刷新拓扑</Button></div>
-        <div className="topology-stage">
-          <button onClick={() => navigate("routeros")}><TopologyNode icon={Router} title="RouterOS" subtitle="10.0.0.1 · 核心网关" metric="↓ 812 / ↑ 198 Mbps" accent="orange" /></button>
-          <div className="topology-columns">
-            <div className="topology-group">
-              <h3>网络入口</h3><TopologyNode icon={Globe2} title="Internet / WAN" subtitle="PPPoE · 可达" metric="12 ms" />
-            </div>
-            <div className="topology-group">
-              <h3>局域网</h3><TopologyNode icon={Users} title="LAN 设备" subtitle="14 台在线" metric="3 个网段" />
-              <TopologyNode icon={Wifi} title="IoT 设备" subtitle="iot-lan" metric="4 台在线" />
-            </div>
-            <div className="topology-group">
-              <h3>代理出口</h3><button onClick={() => navigate("proxies")}><TopologyNode icon={Network} title="Mihomo" subtitle="10.0.0.2" metric="68 活跃连接" accent="blue" /></button>
-              <TopologyNode icon={Server} title="US-LAX-01" subtitle="当前出口" metric="162 ms" accent="blue" />
-            </div>
-            <div className="topology-group">
-              <h3>DNS（只读）</h3><button onClick={() => navigate("mosdns")}><TopologyNode icon={Database} title="MosDNS" subtitle="10.0.0.3:53" metric="123 QPS" accent="purple" /></button>
-            </div>
-          </div>
-        </div>
-      </section>
-      <div className="summary-grid">
-        <SummaryCard icon={Cable} label="活跃链路" value="6" tone="green" />
-        <SummaryCard icon={Users} label="在线设备" value="14" />
-        <SummaryCard icon={Activity} label="活动连接" value="68" tone="purple" />
-        <SummaryCard icon={AlertTriangle} label="拓扑异常" value="0" tone="orange" />
-      </div>
-    </div>
-  );
+function TopologyPage({ resources, devices, nodes, navigate, onRefresh }: { resources: LiveResources; devices: Device[]; nodes: ProxyNode[]; navigate: (page: PageKey) => void; onRefresh: () => void }) {
+  const failures = [resources.routeros, resources.mihomo, resources.mosdns].filter((resource) => resource.phase !== "live" || !resource.data?.online).length;
+  return <div className="stack"><section className="panel topology-large"><div className="panel-heading"><div><h2>已验证管理拓扑</h2><p>接口失败会保留在对应组件上，不推断 WAN 或代理出口可用</p></div><Button icon={RefreshCw} onClick={onRefresh}>刷新拓扑</Button></div><div className="topology-stage"><button onClick={() => navigate("routeros")} type="button"><TopologyNode accent="orange" icon={Router} metric={resources.routeros.source} subtitle={`10.0.0.1 · ${serviceLabel(resources.routeros)}`} title="RouterOS" /></button><div className="topology-columns compact-topology"><div className="topology-group"><h3>代理控制面</h3><button onClick={() => navigate("proxies")} type="button"><TopologyNode accent="blue" icon={Network} metric={resources.mihomo.source} subtitle={`10.0.0.2 · ${serviceLabel(resources.mihomo)}`} title="Mihomo" /></button></div><div className="topology-group"><h3>DNS（只读）</h3><button onClick={() => navigate("mosdns")} type="button"><TopologyNode accent="purple" icon={Database} metric={resources.mosdns.source} subtitle={`10.0.0.3 · ${serviceLabel(resources.mosdns)}`} title="MosDNS" /></button></div><div className="topology-group"><h3>管理服务</h3><TopologyNode icon={Server} metric="当前页面" subtitle="10.0.0.4:8090" title="FoxOS" /></div></div></div></section><div className="summary-grid"><SummaryCard icon={Cable} label="RouterOS 接口" value={resources.routeros.data?.interfaces?.length ?? "—"} tone="green" /><SummaryCard icon={Users} label="已读取设备" value={resources.routeros.data ? devices.length : "—"} /><SummaryCard icon={Activity} label="代理 / L2TP 节点" value={nodes.length} tone="purple" /><SummaryCard icon={AlertTriangle} label="未确认服务" value={failures} tone="orange" /></div></div>;
 }
 
-function LogsPage({ items }: { items: typeof logs }) {
+function LogsPage({ items, resource, onRefresh }: { items: LogItem[]; resource: ResourceState<AuditEvent[]>; onRefresh: () => void }) {
   const [level, setLevel] = useState("all");
-  const filtered = items.filter((item) => level === "all" || item.level === level);
-  return (
-    <section className="panel">
-      <div className="toolbar">
-        <label className="search-box"><Search size={17} /><input placeholder="搜索事件、来源或详情" /></label>
-        <select value={level} onChange={(event) => setLevel(event.target.value)}><option value="all">全部级别</option><option>成功</option><option>信息</option><option>警告</option><option>错误</option></select>
-        <select><option>全部来源</option><option>RouterOS</option><option>Mihomo</option><option>MosDNS</option></select>
-        <Button icon={RefreshCw}>刷新</Button>
-      </div>
-      <div className="table-wrap">
-        <table><thead><tr><th>时间</th><th>级别</th><th>来源</th><th>事件</th><th>详情</th></tr></thead>
-          <tbody>{filtered.map((item) => <tr key={`${item.time}-${item.event}`}><td>{item.time}</td><td><span className={`log-level ${item.level}`}>{item.level}</span></td><td>{item.source}</td><td><strong>{item.event}</strong></td><td>{item.detail}</td></tr>)}</tbody>
-        </table>
-      </div>
-    </section>
-  );
+  const [search, setSearch] = useState("");
+  const filtered = items.filter((item) => (level === "all" || item.level === level) && `${item.source}${item.event}${item.detail}`.toLowerCase().includes(search.toLowerCase()));
+  return <div className="stack"><section className="panel status-band"><ResourceMeta resource={resource} /><Button icon={RefreshCw} onClick={onRefresh}>刷新审计</Button></section><section className="panel table-panel"><div className="toolbar"><label className="search-box"><Search aria-hidden="true" size={17} /><span className="sr-only">搜索审计事件</span><input onChange={(event) => setSearch(event.target.value)} placeholder="搜索事件、来源或详情" value={search} /></label><select aria-label="筛选日志级别" onChange={(event) => setLevel(event.target.value)} value={level}><option value="all">全部级别</option><option>成功</option><option>信息</option><option>错误</option></select></div>{filtered.length ? <div className="table-wrap"><table><thead><tr><th>时间</th><th>级别</th><th>来源</th><th>事件</th><th>目标</th></tr></thead><tbody>{filtered.map((item) => <tr key={`${item.time}-${item.event}-${item.detail}`}><td>{item.time}</td><td><span className={`log-level ${item.level}`}>{item.level}</span></td><td>{item.source}</td><td><strong>{item.event}</strong></td><td>{item.detail}</td></tr>)}</tbody></table></div> : <EmptyState detail="审计接口失败时不会显示样例日志。" title="没有审计记录" />}</section></div>;
 }
 
 function SettingsPage({ notify }: { notify: (message: string, tone?: Toast["tone"]) => void }) {
@@ -1012,8 +1359,9 @@ function SettingsPage({ notify }: { notify: (message: string, tone?: Toast["tone
     try {
       saveApiToken(String(data.get("apiToken") || ""));
       setSaved(true);
-      notify("FoxOS API Token 已保存在当前浏览器，请返回总览运行全链路检测");
+			notify("API Token 仅保存在页面内存；刷新总览后生效");
       window.setTimeout(() => setSaved(false), 1800);
+      event.currentTarget.reset();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Token 保存失败", "warning");
     }
@@ -1021,21 +1369,18 @@ function SettingsPage({ notify }: { notify: (message: string, tone?: Toast["tone
   return (
     <div className="page-grid two-thirds">
       <form className="panel" onSubmit={save}>
-        <div className="panel-heading"><div><h2>服务连接</h2><p>敏感凭据仅写入，不在页面回显</p></div><ShieldCheck size={22} className="green-text" /></div>
-        <div className="settings-section"><h3>FoxOS API</h3><div className="form-grid"><label className="field full"><span>API Token</span><input name="apiToken" type="password" minLength={32} required placeholder="至少 32 个字符；仅保存在当前浏览器" autoComplete="off" /></label></div></div>
-        <div className="settings-section"><h3>RouterOS</h3><div className="form-grid"><label className="field"><span>地址</span><input defaultValue="10.0.0.1" /></label><label className="field"><span>REST 端口</span><input defaultValue="80" /></label><label className="field"><span>用户名</span><input defaultValue="admin" /></label><label className="field"><span>新密码</span><input type="password" placeholder="留空表示不修改" /></label></div></div>
-        <div className="settings-section"><h3>Mihomo</h3><div className="form-grid"><label className="field"><span>控制器地址</span><input defaultValue="http://10.0.0.2:9090" /></label><label className="field"><span>配置文件</span><input defaultValue="/var/lib/foxos/managed/mihomo/config.yaml" /></label></div></div>
-        <div className="settings-section readonly-settings"><h3>MosDNS（只读）</h3><div className="form-grid"><label className="field"><span>状态地址</span><input defaultValue="http://10.0.0.3:9090" readOnly /></label><label className="field"><span>配置文件</span><input defaultValue="config_custom.yaml" readOnly /></label></div></div>
-        <div className="form-actions"><Button variant="primary" icon={saved ? Check : Save} type="submit">{saved ? "已保存" : "验证并保存"}</Button></div>
+				<div className="panel-heading"><div><h2>FoxOS API 凭据</h2><p>仅保存在页面内存，刷新或关闭标签页后清除</p></div><ShieldCheck aria-hidden="true" className="green-text" size={22} /></div>
+        <div className="settings-section"><div className="form-grid"><label className="field full"><span>API Token</span><input autoComplete="off" minLength={32} name="apiToken" required type="password" /></label></div></div>
+        <div className="form-actions"><Button icon={saved ? Check : Save} type="submit" variant="primary">{saved ? "已保存" : "保存当前会话凭据"}</Button></div>
       </form>
       <aside className="stack">
         <section className="panel">
-          <div className="panel-heading"><div><h2>备份与恢复</h2><p>安全操作默认创建快照</p></div></div>
-          <div className="action-list"><button onClick={() => notify("控制平面快照已创建")}><Save size={18} /><span><strong>创建配置快照</strong><small>RouterOS 与 FoxOS 控制状态</small></span><ChevronRight size={16} /></button><button onClick={() => notify("诊断包已导出")}><Upload size={18} /><span><strong>导出诊断包</strong><small>日志与脱敏运行状态</small></span><ChevronRight size={16} /></button></div>
+          <div className="panel-heading"><div><h2>服务端配置边界</h2><p>以下内容仅通过容器环境变量配置</p></div></div>
+          <dl className="definition-list"><div><dt>RouterOS</dt><dd>FOXOS_ROUTEROS_*</dd></div><div><dt>Mihomo</dt><dd>FOXOS_MIHOMO_*</dd></div><div><dt>确认密钥</dt><dd>FOXOS_CONFIRMATION_KEY</dd></div><div><dt>MosDNS</dt><dd>只读状态</dd></div></dl>
         </section>
         <section className="panel">
-          <div className="panel-heading"><div><h2>系统信息</h2><p>FoxOS v1.0.0</p></div><StatusDot /></div>
-          <dl className="definition-list"><div><dt>运行环境</dt><dd>RouterOS x86</dd></div><div><dt>数据库</dt><dd>SQLite · 正常</dd></div><div><dt>API 版本</dt><dd>v1</dd></div><div><dt>最后快照</dt><dd>2026-07-26 14:31</dd></div></dl>
+          <div className="panel-heading"><div><h2>诊断导出</h2><p>暂未开放</p></div></div>
+          <div className="action-list"><button disabled type="button"><Upload size={18} /><span><strong>导出脱敏诊断包</strong><small>等待后端导出 API</small></span><ChevronRight size={16} /></button></div>
         </section>
       </aside>
     </div>

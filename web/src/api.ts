@@ -22,6 +22,36 @@ export type RouterDevice = {
   lastSeen?: string;
 };
 
+export type DeviceProfile = {
+  macAddress: string;
+  alias?: string;
+  tags: string[];
+  vendor?: string;
+  hostName?: string;
+  ipAddress?: string;
+  interface?: string;
+  dhcpServer?: string;
+  online: boolean;
+  lastKnownOnline: boolean;
+  status: "online" | "offline" | "unavailable";
+  firstSeen: string;
+  lastSeen?: string;
+  updatedAt: string;
+};
+
+export type DeviceInventory = {
+  sourceAvailable: boolean;
+  observedAt?: string;
+  error?: string;
+  devices: DeviceProfile[];
+};
+
+export type DevicePresenceEvent = {
+  id: number;
+  online: boolean;
+  observedAt: string;
+};
+
 export type RouterOverview = {
   configured: boolean;
   online: boolean;
@@ -34,6 +64,29 @@ export type RouterOverview = {
 export type MihomoOverview = {
   configured: boolean;
   online: boolean;
+  version?: string;
+  proxies?: Record<string, {
+    name?: string;
+    type?: string;
+    now?: string;
+    all?: string[];
+    alive?: boolean;
+    history?: Array<{ time?: string; delay?: number }>;
+  }>;
+  connections?: Array<Record<string, unknown>>;
+  traffic?: {
+    uploadTotal?: number;
+    downloadTotal?: number;
+    connectionCount?: number;
+  };
+  partial?: string[];
+  error?: string;
+};
+
+export type MosDNSOverview = {
+  configured: boolean;
+  online: boolean;
+  address?: string;
   error?: string;
 };
 
@@ -51,6 +104,34 @@ export type L2TPClient = {
   profile?: string;
 };
 
+export type RouterRoute = {
+  ".id": string;
+  "dst-address": string;
+  gateway: string;
+  distance: string;
+  active: string;
+  disabled: string;
+  comment?: string;
+};
+
+export type RouterDHCPServer = {
+  ".id": string;
+  name: string;
+  interface: string;
+  "address-pool": string;
+  disabled: string;
+  running: string;
+};
+
+export type RouterContainer = {
+  ".id": string;
+  name: string;
+  comment?: string;
+  status: string;
+  "root-dir": string;
+  interface: string;
+};
+
 export type AuditEvent = {
   id: string;
   action: string;
@@ -61,19 +142,60 @@ export type AuditEvent = {
   updatedAt: string;
 };
 
+export type EgressType = "direct" | "mihomo-node" | "proxy-chain" | "l2tp" | "blocked";
+
+export type DevicePolicy = {
+  id: string;
+  name: string;
+  macAddress: string;
+  staticIp: string;
+  dhcpServer: string;
+  egress: EgressType;
+  targetId?: string;
+};
+
+export type ProxyGroup = {
+  id: string;
+  name: string;
+  type: "select" | "url-test" | "fallback" | "load-balance" | "chain";
+  nodeIds: string[];
+  groupIds?: string[];
+  url?: string;
+  interval?: number;
+  tolerance?: number;
+  strategy?: string;
+};
+
+export type LoadResult<T> =
+  | { ok: true; data: T; loadedAt: string }
+  | { ok: false; error: string; loadedAt: string };
+
 export type LiveSnapshot = {
-  routeros: RouterOverview;
-  mihomo: MihomoOverview;
-  nodes: ApiNode[];
-  l2tp: L2TPClient[];
-  audit: AuditEvent[];
-  loadedAt: string;
+  routeros: LoadResult<RouterOverview>;
+  mihomo: LoadResult<MihomoOverview>;
+  mosdns: LoadResult<MosDNSOverview>;
+  nodes: LoadResult<ApiNode[]>;
+  l2tp: LoadResult<L2TPClient[]>;
+  routes: LoadResult<RouterRoute[]>;
+  dhcpServers: LoadResult<RouterDHCPServer[]>;
+  containers: LoadResult<RouterContainer[]>;
+  deviceInventory: LoadResult<DeviceInventory>;
+  policies: LoadResult<DevicePolicy[]>;
+  groups: LoadResult<ProxyGroup[]>;
+  audit: LoadResult<AuditEvent[]>;
 };
 
 export type NodeProbe = {
   reachable: boolean;
   latencyMs: number;
   error?: string;
+};
+
+export type MihomoProbeResult = {
+  nodeId: string;
+  nodeName: string;
+  nodeHttp: { available: boolean; success: boolean; latencyMs?: number; error?: string };
+  exit: { available: boolean; success: boolean; latencyMs?: number; error?: string; scope: "current-policy"; ipAddress?: string };
 };
 
 export type DeviceBindingPlan = {
@@ -83,10 +205,152 @@ export type DeviceBindingPlan = {
   requiresConfirmation: boolean;
 };
 
+export type EgressOperation = {
+  method: string;
+  path: string;
+  body?: Record<string, string>;
+  summary: string;
+  ownedComment: string;
+  rollback?: EgressOperation;
+};
+
+export type EgressPlan = {
+  policyId: string;
+  staticIp: string;
+  egress: EgressType;
+  targetId?: string;
+  policy: DevicePolicy;
+  previousPolicy?: DevicePolicy;
+  stateDigest: string;
+  operations: EgressOperation[];
+  warnings: string[];
+  requiresConfirmation: boolean;
+};
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly references: string[];
+
+  constructor(message: string, status: number, code?: string, references: string[] = []) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.references = references;
+  }
+}
+
+export type MihomoDraft = {
+  id?: string;
+  mode: string;
+  mixedPort: number;
+  allowLan: boolean;
+  rules: string[];
+  revision?: number;
+  updatedAt?: string;
+};
+
+export type MihomoPreview = {
+  draft: MihomoDraft;
+  digest: string;
+  yaml: string;
+  diff: string;
+  hasSecret: boolean;
+};
+
+export type MihomoSnapshot = {
+  id: string;
+  digest: string;
+  label: string;
+  createdAt: string;
+};
+
+export type Job = {
+  id: string;
+  kind: string;
+  status: "QUEUED" | "RUNNING" | "VERIFYING" | "SUCCEEDED" | "FAILED" | "ROLLED_BACK";
+  progress: number;
+  result?: Record<string, unknown>;
+  errorClass?: string;
+  errorMessage?: string;
+  attempts: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Subscription = {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  interval: number;
+  lastDigest?: string;
+  lastSuccessAt?: string;
+  lastAttemptAt?: string;
+  lastError?: string;
+};
+
+export type SubscriptionUpdatePlan = {
+  action: "subscription.update";
+  subscriptionId: string;
+  digest: string;
+  nodeIds: string[];
+  removedNodeIds: string[];
+  existingCount: number;
+  nodeCount: number;
+  addCount: number;
+  updateCount: number;
+  removeCount: number;
+};
+
+export type SubscriptionDeletePlan = {
+  action: "subscription.delete";
+  subscriptionId: string;
+  nodeIds: string[];
+  nodeCount: number;
+};
+
+export type Alert = {
+  id: string;
+  key: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  message: string;
+  acknowledged: boolean;
+  firstSeen: string;
+  lastSeen: string;
+  resolvedAt?: string;
+};
+
+export type BackupManifest = {
+  id: string;
+  label: string;
+  createdAt: string;
+  database: string;
+  mihomo?: string;
+  fileCount: number;
+  checksums: Record<string, string>;
+};
+
 const tokenKey = "foxos.apiToken";
+let apiToken = migrateLegacyToken();
+
+function migrateLegacyToken(): string {
+  if (typeof window === "undefined") return "";
+  let legacy = "";
+  try {
+    legacy = window.sessionStorage.getItem(tokenKey)?.trim() ?? "";
+    window.sessionStorage.removeItem(tokenKey);
+    window.localStorage.removeItem(tokenKey);
+  } catch {
+    return "";
+  }
+  return legacy.length >= 32 ? legacy : "";
+}
 
 export function getApiToken(): string {
-  return window.localStorage.getItem(tokenKey)?.trim() ?? "";
+  return apiToken;
 }
 
 export function saveApiToken(token: string): void {
@@ -94,7 +358,13 @@ export function saveApiToken(token: string): void {
   if (value.length < 32) {
     throw new Error("FoxOS API Token 至少需要 32 个字符");
   }
-  window.localStorage.setItem(tokenKey, value);
+	apiToken = value;
+	try {
+		window.localStorage.removeItem(tokenKey);
+		window.sessionStorage.removeItem(tokenKey);
+	} catch {
+		// Storage may be disabled; the token remains available only in memory.
+	}
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -102,7 +372,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!token) {
     throw new Error("尚未配置 FoxOS API Token");
   }
-  const response = await fetch(path, {
+  const response = await fetch(new URL(path, window.location.origin), {
     ...init,
     headers: {
       Accept: "application/json",
@@ -112,8 +382,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    const problem = await response.json().catch(() => null) as { message?: string } | null;
-    throw new Error(problem?.message ?? `FoxOS API 请求失败（${response.status}）`);
+    const problem = await response.json().catch(() => null) as { message?: string; error?: string; references?: unknown } | null;
+    const references = Array.isArray(problem?.references) ? problem.references.filter((item): item is string => typeof item === "string") : [];
+    throw new ApiError(problem?.message ?? `FoxOS API 请求失败（${response.status}）`, response.status, problem?.error, references);
   }
   if (response.status === 204) {
     return undefined as T;
@@ -121,15 +392,46 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function settle<T>(promise: Promise<T>): Promise<LoadResult<T>> {
+  try {
+    return { ok: true, data: await promise, loadedAt: new Date().toISOString() };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "FoxOS API 请求失败",
+      loadedAt: new Date().toISOString(),
+    };
+  }
+}
+
 export async function loadLiveSnapshot(): Promise<LiveSnapshot> {
-  const [routeros, mihomo, nodes, l2tp, audit] = await Promise.all([
-    request<RouterOverview>("/api/v1/routeros/overview"),
-    request<MihomoOverview>("/api/v1/mihomo/overview"),
-    request<ApiNode[]>("/api/v1/nodes"),
-    request<L2TPClient[]>("/api/v1/routeros/l2tp").catch(() => []),
-    request<AuditEvent[]>("/api/v1/audit-events?limit=100"),
+  const [routeros, mihomo, mosdns, nodes, l2tp, routes, dhcpServers, containers, deviceInventory, policies, groups, audit] = await Promise.all([
+    settle(request<RouterOverview>("/api/v1/routeros/overview")),
+    settle(request<MihomoOverview>("/api/v1/mihomo/overview")),
+    settle(request<MosDNSOverview>("/api/v1/mosdns/overview")),
+    settle(request<ApiNode[]>("/api/v1/nodes")),
+    settle(request<L2TPClient[]>("/api/v1/routeros/l2tp")),
+    settle(request<RouterRoute[]>("/api/v1/routeros/routes")),
+    settle(request<RouterDHCPServer[]>("/api/v1/routeros/dhcp-servers")),
+    settle(request<RouterContainer[]>("/api/v1/routeros/containers")),
+    settle(request<DeviceInventory>("/api/v1/devices")),
+    settle(request<DevicePolicy[]>("/api/v1/device-policies")),
+    settle(request<ProxyGroup[]>("/api/v1/proxy-groups")),
+    settle(request<AuditEvent[]>("/api/v1/audit-events?limit=100")),
   ]);
-  return { routeros, mihomo, nodes, l2tp, audit, loadedAt: new Date().toISOString() };
+  return { routeros, mihomo, mosdns, nodes, l2tp, routes, dhcpServers, containers, deviceInventory, policies, groups, audit };
+}
+
+export async function updateDeviceMetadata(macAddress: string, input: { alias: string; vendor: string; tags: string[] }): Promise<DeviceProfile> {
+  return request<DeviceProfile>(`/api/v1/devices/${encodeURIComponent(macAddress)}`, { method: "PUT", body: JSON.stringify(input) });
+}
+
+export async function getDevicePresenceHistory(macAddress: string, limit = 100): Promise<DevicePresenceEvent[]> {
+  return request<DevicePresenceEvent[]>(`/api/v1/devices/${encodeURIComponent(macAddress)}/history?limit=${limit}`);
+}
+
+export async function probeMihomoNode(id: string): Promise<MihomoProbeResult> {
+  return request<MihomoProbeResult>(`/api/v1/mihomo/probes/${encodeURIComponent(id)}`, { method: "POST" });
 }
 
 export async function deleteNode(id: string): Promise<void> {
@@ -162,7 +464,7 @@ export async function planDeviceBinding(input: {
   macAddress: string;
   staticIp: string;
   dhcpServer: string;
-  egress: "direct" | "mihomo-node" | "proxy-chain" | "l2tp" | "blocked";
+  egress: EgressType;
   targetId?: string;
 }): Promise<{ plan: DeviceBindingPlan; confirmationToken: string; expiresInSeconds: number }> {
   return request("/api/v1/routeros/plans/device-binding", { method: "POST", body: JSON.stringify(input) });
@@ -173,4 +475,144 @@ export async function executeDeviceBinding(plan: DeviceBindingPlan, confirmation
     method: "POST",
     body: JSON.stringify({ plan, confirmationToken }),
   });
+}
+
+export async function listDevicePolicies(): Promise<DevicePolicy[]> {
+  return request<DevicePolicy[]>("/api/v1/device-policies");
+}
+
+export async function createDevicePolicy(policy: DevicePolicy): Promise<DevicePolicy> {
+  return request<DevicePolicy>("/api/v1/device-policies", { method: "POST", body: JSON.stringify(policy) });
+}
+
+export async function updateDevicePolicy(policy: DevicePolicy): Promise<DevicePolicy> {
+  return request<DevicePolicy>(`/api/v1/device-policies/${encodeURIComponent(policy.id)}`, { method: "PUT", body: JSON.stringify(policy) });
+}
+
+export async function deleteDevicePolicy(id: string): Promise<void> {
+  await request<void>(`/api/v1/device-policies/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function planDeviceEgress(id: string, policy?: DevicePolicy): Promise<{ plan: EgressPlan; confirmationToken?: string; expiresInSeconds?: number }> {
+  return request(`/api/v1/routeros/plans/egress/${encodeURIComponent(id)}`, {
+    method: "POST",
+    ...(policy ? { body: JSON.stringify(policy) } : {}),
+  });
+}
+
+export async function executeDeviceEgress(id: string, plan: EgressPlan, confirmationToken: string): Promise<{ status: string; job?: Job; auditId?: string }> {
+  return request(`/api/v1/routeros/plans/egress/${encodeURIComponent(id)}/execute`, { method: "POST", body: JSON.stringify({ plan, confirmationToken }) });
+}
+
+export async function listProxyGroups(): Promise<ProxyGroup[]> {
+  return request<ProxyGroup[]>("/api/v1/proxy-groups");
+}
+
+export async function createProxyGroup(group: Omit<ProxyGroup, "id"> & { id?: string }): Promise<ProxyGroup> {
+  return request<ProxyGroup>("/api/v1/proxy-groups", { method: "POST", body: JSON.stringify(group) });
+}
+
+export async function updateProxyGroup(group: ProxyGroup): Promise<ProxyGroup> {
+  return request<ProxyGroup>(`/api/v1/proxy-groups/${encodeURIComponent(group.id)}`, { method: "PUT", body: JSON.stringify(group) });
+}
+
+export async function deleteProxyGroup(id: string): Promise<void> {
+  await request<void>(`/api/v1/proxy-groups/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function getMihomoDraft(): Promise<MihomoDraft> {
+  return request<MihomoDraft>("/api/v1/mihomo/draft");
+}
+
+export async function saveMihomoDraft(draft: MihomoDraft): Promise<MihomoDraft> {
+  return request<MihomoDraft>("/api/v1/mihomo/draft", { method: "PUT", body: JSON.stringify(draft) });
+}
+
+export async function previewMihomoConfig(draft: MihomoDraft): Promise<{ preview: MihomoPreview; confirmationToken: string; expiresInSeconds: number }> {
+  return request("/api/v1/mihomo/config/preview", { method: "POST", body: JSON.stringify(draft) });
+}
+
+export async function applyMihomoConfig(draft: MihomoDraft, digest: string, confirmationToken: string, label = ""): Promise<{ status: string; snapshotId?: string; job?: Job; rolledBack?: boolean }> {
+  return request("/api/v1/mihomo/config/apply", { method: "POST", body: JSON.stringify({ draft, digest, confirmationToken, label }) });
+}
+
+export async function listMihomoSnapshots(): Promise<MihomoSnapshot[]> {
+  return request<MihomoSnapshot[]>("/api/v1/mihomo/snapshots");
+}
+
+export async function planMihomoRestore(id: string): Promise<{ plan: { action: string; snapshotId: string }; confirmationToken: string; expiresInSeconds: number }> {
+  return request(`/api/v1/mihomo/snapshots/${encodeURIComponent(id)}/restore/plan`, { method: "POST" });
+}
+
+export async function restoreMihomoSnapshot(id: string, confirmationToken: string, label = ""): Promise<{ status: string; snapshotId?: string; job?: Job; rolledBack?: boolean }> {
+  return request(`/api/v1/mihomo/snapshots/${encodeURIComponent(id)}/restore`, { method: "POST", body: JSON.stringify({ confirmationToken, label }) });
+}
+
+export async function getJob(id: string): Promise<Job> {
+  return request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}`);
+}
+
+export async function retryJob(id: string): Promise<Job> {
+  return request<Job>(`/api/v1/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" });
+}
+
+export async function waitForJob(id: string, options: { timeoutMs?: number; intervalMs?: number } = {}): Promise<Job> {
+  const timeoutMs = options.timeoutMs ?? 120_000;
+  const intervalMs = options.intervalMs ?? 600;
+  const started = Date.now();
+  for (;;) {
+    const job = await getJob(id);
+    if (["SUCCEEDED", "FAILED", "ROLLED_BACK"].includes(job.status)) return job;
+    if (Date.now() - started >= timeoutMs) throw new Error("任务等待超时，请在任务中心查看最终状态");
+    await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+  }
+}
+
+export async function listSubscriptions(): Promise<Subscription[]> {
+  return request<Subscription[]>("/api/v1/subscriptions");
+}
+
+export async function createSubscription(input: Omit<Subscription, "id" | "lastDigest" | "lastSuccessAt" | "lastAttemptAt" | "lastError">): Promise<Subscription> {
+  return request<Subscription>("/api/v1/subscriptions", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function planSubscriptionDelete(id: string): Promise<{ plan: SubscriptionDeletePlan; confirmationToken: string; expiresInSeconds: number; warnings: string[] }> {
+  return request(`/api/v1/subscriptions/${encodeURIComponent(id)}/delete/plan`, { method: "POST" });
+}
+
+export async function deleteSubscription(id: string, confirmationToken: string): Promise<{ status: string; subscriptionId: string; nodeCount: number }> {
+  return request(`/api/v1/subscriptions/${encodeURIComponent(id)}/delete`, { method: "POST", body: JSON.stringify({ confirmationToken }) });
+}
+
+export async function previewSubscription(id: string): Promise<{ digest: string; nodeCount: number; nodes: Array<{ id: string; name: string; type: string; server: string; port: number; hasCredential: boolean }>; plan: SubscriptionUpdatePlan; confirmationToken: string; expiresInSeconds: number }> {
+  return request(`/api/v1/subscriptions/${encodeURIComponent(id)}/preview`, { method: "POST" });
+}
+
+export async function updateSubscription(id: string, plan: SubscriptionUpdatePlan, confirmationToken: string): Promise<{ status: string; digest?: string; nodeCount?: number; job?: Job }> {
+  return request(`/api/v1/subscriptions/${encodeURIComponent(id)}/update`, { method: "POST", body: JSON.stringify({ plan, confirmationToken }) });
+}
+
+export async function listAlerts(): Promise<Alert[]> {
+  return request<Alert[]>("/api/v1/alerts");
+}
+
+export async function acknowledgeAlert(id: string): Promise<void> {
+  await request(`/api/v1/alerts/${encodeURIComponent(id)}/acknowledge`, { method: "POST" });
+}
+
+export async function listBackups(): Promise<BackupManifest[]> {
+  return request<BackupManifest[]>("/api/v1/backups");
+}
+
+export async function createBackup(label = ""): Promise<{ manifest?: BackupManifest; job?: Job }> {
+  const response = await request<BackupManifest | { job: Job }>("/api/v1/backups", { method: "POST", body: JSON.stringify({ label }) });
+  return "id" in response ? { manifest: response } : response;
+}
+
+export async function planBackupRestore(id: string): Promise<{ plan: { action: string; backupId: string; digest: string; fileCount: number; mihomo: boolean }; confirmationToken: string; expiresInSeconds: number; warnings: string[] }> {
+  return request(`/api/v1/backups/${encodeURIComponent(id)}/restore/plan`, { method: "POST" });
+}
+
+export async function restoreBackup(id: string, confirmationToken: string): Promise<{ status: string; backupId: string; job?: Job }> {
+  return request(`/api/v1/backups/${encodeURIComponent(id)}/restore`, { method: "POST", body: JSON.stringify({ confirmationToken }) });
 }
