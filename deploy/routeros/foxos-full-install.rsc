@@ -1,15 +1,33 @@
 # FoxOS 全栈安装脚本（RouterOS x86_64 / architecture-name=x86）
-# 目标拓扑：RouterOS 10.0.0.1、Mihomo 10.0.0.2、MosDNS 10.0.0.3、FoxOS 10.0.0.4:8090。
+# 目标拓扑只从已导入的 site-config.rsc 读取。
 # 只管理带 foxos: 所有权标识的资源，不修改 DNS、DHCP、默认路由、NAT、Mangle 或现有防火墙。
 # 执行前必须先运行 preflight.rsc 和 foxos-plan.rsc，完成 RouterOS export/backup，并由操作者明确确认计划。
 # 目标 RouterOS/container package 版本为 7.21+，x86_64 CPU 的 architecture-name 是 x86。
 
-:local managementBridge "bridge-lan"
-:local storageRoot "disk1"
-:local routerAddress "10.0.0.1"
-:local mihomoAddress "10.0.0.2/24"
-:local mosdnsAddress "10.0.0.3/24"
-:local foxosAddress "10.0.0.4/24"
+:global FoxOSSiteManifestVersion
+:global FoxOSSiteManagementBridge
+:global FoxOSSiteStorageRoot
+:global FoxOSSiteNetwork
+:global FoxOSSitePrefixLength
+:global FoxOSSiteRouterAddress
+:global FoxOSSiteMihomoAddress
+:global FoxOSSiteMosDNSAddress
+:global FoxOSSiteFoxOSAddress
+:global FoxOSSitePublicHostname
+:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:local managementBridge $FoxOSSiteManagementBridge
+:local storageRoot $FoxOSSiteStorageRoot
+:local siteNetwork $FoxOSSiteNetwork
+:local prefixLength $FoxOSSitePrefixLength
+:local routerAddress $FoxOSSiteRouterAddress
+:local routerCIDR ($routerAddress . "/" . $prefixLength)
+:local mihomoIP $FoxOSSiteMihomoAddress
+:local mihomoAddress ($mihomoIP . "/" . $prefixLength)
+:local mosdnsIP $FoxOSSiteMosDNSAddress
+:local mosdnsAddress ($mosdnsIP . "/" . $prefixLength)
+:local foxosIP $FoxOSSiteFoxOSAddress
+:local foxosAddress ($foxosIP . "/" . $prefixLength)
+:local publicHostname $FoxOSSitePublicHostname
 :local architecture [/system/resource get architecture-name]
 :local routerVersion [/system/resource get version]
 :local routerVersionBase $routerVersion
@@ -18,9 +36,9 @@
 
 :put "=== FoxOS exact change plan (write phase) ==="
 :put "Create or reuse only: foxos-rest, foxos-service, foxos-env, foxos-* mounts, foxos:* veth/bridge ports/containers."
-:put "Create or reuse addresses: 10.0.0.2/24, 10.0.0.3/24, 10.0.0.4/24 on bridge-lan."
+:put ("Create or reuse addresses: " . $mihomoAddress . ", " . $mosdnsAddress . ", " . $foxosAddress . " on " . $managementBridge . ".")
 :put "No DNS, DHCP, default route, NAT, Mangle, or existing firewall changes."
-:put "Rollback: stop FoxOS containers, restore RouterOS backup, and keep disk1/foxos-data plus old image tar files."
+:put ("Rollback: stop FoxOS containers, restore RouterOS backup, and keep " . $storageRoot . "/foxos-data plus old image tar files.")
 
 :if ($architecture != "x86") do={
   :error ("此 amd64 安装包仅支持 architecture-name=x86，当前为 " . $architecture)
@@ -43,7 +61,7 @@
 }
 :local diskFree [/disk get $diskID free]
 :if ($diskFree < 536870912) do={
-  :error ("disk1 可用空间不足 512 MiB: " . $diskFree)
+  :error ($storageRoot . " 可用空间不足 512 MiB: " . $diskFree)
 }
 :local packageID [/system/package find where name="container"]
 :if ([:len $packageID] != 1) do={
@@ -59,12 +77,12 @@
 :if ($deviceMode != true && $deviceMode != "yes") do={
   :error "device-mode container=yes 未启用"
 }
-:local routerManagementIP [/ip/address find where address~"10.0.0.1/"]
+:local routerManagementIP [/ip/address find where address~($routerAddress . "/")]
 :if ([:len $routerManagementIP] != 1) do={
-  :error "未找到唯一 RouterOS 管理地址 10.0.0.1/24"
+  :error ("未找到唯一 RouterOS 管理地址 " . $routerCIDR)
 }
-:if ([/ip/address get $routerManagementIP address] != "10.0.0.1/24" || [/ip/address get $routerManagementIP interface] != $managementBridge) do={
-  :error "RouterOS 管理地址必须是 bridge-lan 上的 10.0.0.1/24"
+:if ([/ip/address get $routerManagementIP address] != $routerCIDR || [/ip/address get $routerManagementIP interface] != $managementBridge) do={
+  :error ("RouterOS 管理地址必须是 " . $managementBridge . " 上的 " . $routerCIDR)
 }
 :local wwwService [/ip/service find where name="www"]
 :if ([:len $wwwService] != 1) do={ :error "未找到唯一 RouterOS www/REST 服务" }
@@ -72,11 +90,11 @@
 :if ([/ip/service get $wwwService disabled] = true || [/ip/service get $wwwService port] != 80) do={
   :error "FoxOS 需要已启用且端口为 80 的 RouterOS www/REST 服务"
 }
-:if ([:typeof [:find $wwwAddresses "10.0.0.0/24"]] = "nil" && [:typeof [:find $wwwAddresses "10.0.0.4/32"]] = "nil") do={
-  :error "www/REST 必须限制为 10.0.0.0/24 或 10.0.0.4/32"
+:if ([:typeof [:find $wwwAddresses $siteNetwork]] = "nil" && [:typeof [:find $wwwAddresses ($foxosIP . "/32")]] = "nil") do={
+  :error ("www/REST 必须限制为 " . $siteNetwork . " 或 " . $foxosIP . "/32")
 }
 
-:local requiredFiles {"mihomo_amd64.tar";"mosdns-amd64.tar";"foxos-amd64.tar";"preflight.rsc";"foxos-plan.rsc";"foxos-start-all.rsc";"SHA256SUMS"}
+:local requiredFiles {"mihomo_amd64.tar";"mosdns-amd64.tar";"foxos-amd64.tar";"site-config.rsc";"preflight.rsc";"foxos-plan.rsc";"foxos-start-all.rsc";"SHA256SUMS"}
 :foreach fileName in=$requiredFiles do={
   :local fileID [/file find where name=($storageRoot . "/" . $fileName)]
   :if ([:len $fileID] != 1) do={
@@ -150,7 +168,7 @@
   :if ([:len $foxosConfirmationKey] < 32) do={ :error "现有确认密钥不足 32 字符，拒绝自动覆盖" }
 }
 
-:local fixedEnvDefinitions {"FOXOS_ROUTEROS_URL|http://10.0.0.1";"FOXOS_ROUTEROS_USERNAME|foxos-service";"FOXOS_MIHOMO_URL|http://10.0.0.2:9090";"FOXOS_MIHOMO_PROXY_URL|http://10.0.0.2:7890";"FOXOS_MIHOMO_BASE_CONFIG|/data/mihomo/base.yaml";"FOXOS_MIHOMO_LOCAL_CONFIG|/data/mihomo/config.yaml";"FOXOS_MIHOMO_RUNTIME_CONFIG|/root/.config/mihomo/config.yaml";"FOXOS_MIHOMO_BACKUP_DIR|/backups/mihomo";"FOXOS_MIHOMO_VALIDATOR_BINARY|/usr/local/bin/mihomo";"FOXOS_MOSDNS_URL|http://10.0.0.3:53";"FOXOS_BACKUP_DIR|/backups/foxos"}
+:local fixedEnvDefinitions {("FOXOS_ROUTEROS_URL|http://" . $routerAddress);"FOXOS_ROUTEROS_USERNAME|foxos-service";("FOXOS_MIHOMO_URL|http://" . $mihomoIP . ":9090");("FOXOS_MIHOMO_PROXY_URL|http://" . $mihomoIP . ":7890");"FOXOS_MIHOMO_BASE_CONFIG|/data/mihomo/base.yaml";"FOXOS_MIHOMO_LOCAL_CONFIG|/data/mihomo/config.yaml";"FOXOS_MIHOMO_RUNTIME_CONFIG|/root/.config/mihomo/config.yaml";"FOXOS_MIHOMO_BACKUP_DIR|/backups/mihomo";"FOXOS_MIHOMO_VALIDATOR_BINARY|/usr/local/bin/mihomo";("FOXOS_MOSDNS_URL|http://" . $mosdnsIP . ":53");"FOXOS_BACKUP_DIR|/backups/foxos";("FOXOS_SITE_MANAGEMENT_BRIDGE|" . $managementBridge);("FOXOS_SITE_STORAGE_ROOT|" . $storageRoot);("FOXOS_SITE_NETWORK|" . $siteNetwork);("FOXOS_SITE_ROUTER_ADDRESS|" . $routerAddress);("FOXOS_SITE_MIHOMO_ADDRESS|" . $mihomoIP);("FOXOS_SITE_MOSDNS_ADDRESS|" . $mosdnsIP);("FOXOS_SITE_FOXOS_ADDRESS|" . $foxosIP);("FOXOS_SITE_PUBLIC_HOSTNAME|" . $publicHostname);"FOXOS_HTTPS_ENABLED|true"}
 :foreach definition in=$fixedEnvDefinitions do={
   :local separator [:find $definition "|"]
   :local envKey [:pick $definition 0 $separator]
@@ -165,7 +183,7 @@
     }
   }
 }
-:if ([:len [/container/envs find where list="foxos-env"]] != 16) do={
+:if ([:len [/container/envs find where list="foxos-env"]] != 25) do={
   :error "foxos-env 包含安全基线之外的键，拒绝继续"
 }
 
@@ -233,11 +251,11 @@
 }
 :local serviceUser [/user find where name="foxos-service"]
 :if ([:len $serviceUser] = 0) do={
-  /user add name=foxos-service group=foxos-rest address=10.0.0.4/32 password=$foxosRouterPassword comment="foxos:service"
+  /user add name=foxos-service group=foxos-rest address=($foxosIP . "/32") password=$foxosRouterPassword comment="foxos:service"
 } else={
   :if ([:len $serviceUser] != 1) do={ :error "foxos-service 用户不唯一" }
   :if ([/user get $serviceUser comment] != "foxos:service") do={ :error "同名 RouterOS 用户不是 FoxOS 创建，拒绝覆盖" }
-  /user set $serviceUser group=foxos-rest address=10.0.0.4/32 password=$foxosRouterPassword
+  /user set $serviceUser group=foxos-rest address=($foxosIP . "/32") password=$foxosRouterPassword
 }
 
 :local vethDefinitions {"veth-mihomo|" . $mihomoAddress . "|foxos:mihomo";"veth-mosdns|" . $mosdnsAddress . "|foxos:mosdns";"veth-foxos|" . $foxosAddress . "|foxos:admin"}
@@ -316,5 +334,5 @@
 }
 
 :put "FoxOS 全栈资源已创建或复用，镜像导入为异步操作。"
-:put "等待 Mihomo、MosDNS、FoxOS 三个容器均为 status=stopped，再执行 /import file-name=disk1/foxos-start-all.rsc。"
+:put ("等待 Mihomo、MosDNS、FoxOS 三个容器均为 status=stopped，再执行 /import file-name=" . $storageRoot . "/foxos-start-all.rsc。")
 :put "安装完成后凭据只从 env list 读取一次并保存到离线密码库。"

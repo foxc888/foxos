@@ -1,7 +1,10 @@
 # FoxOS container rollback with automatic SQLite compatibility restoration.
 # It switches only precisely owned FoxOS container slots.
 
-:local foxosURL "http://10.0.0.4:8090"
+:global FoxOSSiteManifestVersion
+:global FoxOSSiteFoxOSAddress
+:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:local foxosURL ("https://" . $FoxOSSiteFoxOSAddress)
 :local active [/container find where comment="foxos:active"]
 :local rollback [/container find where comment="foxos:rollback"]
 :if ([:len $active] != 1) do={ :error "找不到唯一 foxos:active 容器" }
@@ -31,19 +34,19 @@
     :local pageOK false
     :local readOnlyOK false
     :onerror liveError in={
-      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/live") output=user as-value]
+      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/live") check-certificate=yes-without-crl output=user as-value]
       :if (($result->"status") = "finished" && [:typeof [:find ($result->"data") "\"status\":\"ok\""]] != "nil") do={ :set liveOK true }
     } do={}
     :onerror readyError in={
-      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/ready") output=user as-value]
+      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/ready") check-certificate=yes-without-crl output=user as-value]
       :if (($result->"status") = "finished" && [:typeof [:find ($result->"data") "\"status\":\"ready\""]] != "nil") do={ :set readyOK true }
     } do={}
     :onerror pageError in={
-      :local result [/tool/fetch url=($foxosURL . "/") output=user as-value]
+      :local result [/tool/fetch url=($foxosURL . "/") check-certificate=yes-without-crl output=user as-value]
       :if (($result->"status") = "finished" && [:typeof [:find ($result->"data") "id=\"root\""]] != "nil") do={ :set pageOK true }
     } do={}
     :onerror readOnlyError in={
-      :local result [/tool/fetch url=($foxosURL . "/api/v1/audit-events?limit=1") http-header-field=$authHeader output=user as-value]
+      :local result [/tool/fetch url=($foxosURL . "/api/v1/audit-events?limit=1") check-certificate=yes-without-crl http-header-field=$authHeader output=user as-value]
       :if (($result->"status") = "finished") do={ :set readOnlyOK true }
     } do={}
     :if ($liveOK && $readyOK && $pageOK && $readOnlyOK) do={
@@ -63,7 +66,7 @@
   :for attempt from=1 to=18 do={
     :delay 5s
     :onerror activeHealthError in={
-      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/ready") output=user as-value]
+      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/ready") check-certificate=yes-without-crl output=user as-value]
       :if (($result->"status") = "finished" && [:typeof [:find ($result->"data") "\"status\":\"ready\""]] != "nil") do={ :set activeRecovered true }
     } do={}
     :if ($activeRecovered) do={ :break }

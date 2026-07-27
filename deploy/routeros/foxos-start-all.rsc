@@ -1,6 +1,14 @@
 # 在 full-install 完成镜像解压后执行。
 # RouterOS 官方要求首次启动前等待容器 status=stopped。
 
+:global FoxOSSiteManifestVersion
+:global FoxOSSiteStorageRoot
+:global FoxOSSitePublicHostname
+:global FoxOSSiteFoxOSAddress
+:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:local storageRoot $FoxOSSiteStorageRoot
+:local publicHostname $FoxOSSitePublicHostname
+:local foxosAddress $FoxOSSiteFoxOSAddress
 :local expected 0
 :local ready 0
 
@@ -40,7 +48,8 @@
 }
 
 /container/print
-:put "FoxOS 已提交启动，请访问 http://10.0.0.4:8090"
+:put ("FoxOS 容器已进入 running；这不等于应用 ready。导入 " . $storageRoot . "/foxos-data/tls/foxos-local-ca.pem 后运行 foxos-verify.rsc。")
+:put ("CA 受信任后访问 https://" . $publicHostname . "；IP 备用入口为 https://" . $foxosAddress . "。")
 :put "若状态不是 running，请执行 /log/print where topics~\"container\""
 
 :foreach requiredKey in={"FOXOS_ROUTEROS_PASSWORD";"FOXOS_MIHOMO_SECRET";"FOXOS_API_TOKEN";"FOXOS_CONFIRMATION_KEY"} do={

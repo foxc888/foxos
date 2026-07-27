@@ -3,10 +3,26 @@
 # RouterOS 的 x86_64 CPU 在 architecture-name 中返回 x86。
 
 :local requiredArchitecture "x86"
-:local managementBridge "bridge-lan"
-:local storageRoot "disk1"
+:global FoxOSSiteManifestVersion
+:global FoxOSSiteManagementBridge
+:global FoxOSSiteStorageRoot
+:global FoxOSSiteNetwork
+:global FoxOSSitePrefixLength
+:global FoxOSSiteRouterAddress
+:global FoxOSSiteMihomoAddress
+:global FoxOSSiteMosDNSAddress
+:global FoxOSSiteFoxOSAddress
+:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:local managementBridge $FoxOSSiteManagementBridge
+:local storageRoot $FoxOSSiteStorageRoot
+:local siteNetwork $FoxOSSiteNetwork
+:local prefixLength $FoxOSSitePrefixLength
 :local minimumFreeBytes 536870912
-:local routerAddress "10.0.0.1"
+:local routerAddress $FoxOSSiteRouterAddress
+:local routerCIDR ($routerAddress . "/" . $prefixLength)
+:local mihomoAddress $FoxOSSiteMihomoAddress
+:local mosdnsAddress $FoxOSSiteMosDNSAddress
+:local foxosAddress $FoxOSSiteFoxOSAddress
 :local failed false
 
 :put "=== FoxOS read-only preflight ==="
@@ -65,7 +81,7 @@
 :local bridge [/interface/bridge find where name=$managementBridge]
 :put ("management bridge " . $managementBridge . ": " . [:len $bridge])
 :if ([:len $bridge] != 1) do={
-  :put "ERROR bridge-lan is missing or ambiguous"
+	  :put ("ERROR management bridge is missing or ambiguous: " . $managementBridge)
   :set failed true
 }
 
@@ -77,7 +93,7 @@
   :local diskFree [/disk get $diskID free]
   :put ("storage " . $storageRoot . " free bytes: " . $diskFree)
   :if ($diskFree < $minimumFreeBytes) do={
-    :put "ERROR disk1 free space is below 512 MiB after upload"
+	    :put ("ERROR " . $storageRoot . " free space is below 512 MiB after upload")
     :set failed true
   }
 }
@@ -85,11 +101,11 @@
 :local routerIP [/ip/address find where address~($routerAddress . "/")]
 :put ("RouterOS management address " . $routerAddress . ": " . [:len $routerIP])
 :if ([:len $routerIP] != 1) do={
-  :put "ERROR RouterOS management address 10.0.0.1/24 is missing or ambiguous"
+	  :put ("ERROR RouterOS management address is missing or ambiguous: " . $routerCIDR)
   :set failed true
 } else={
-  :if ([/ip/address get $routerIP address] != "10.0.0.1/24" || [/ip/address get $routerIP interface] != $managementBridge) do={
-    :put "ERROR RouterOS management address must be exactly 10.0.0.1/24 on bridge-lan"
+	  :if ([/ip/address get $routerIP address] != $routerCIDR || [/ip/address get $routerIP interface] != $managementBridge) do={
+	    :put ("ERROR RouterOS management address must be exactly " . $routerCIDR . " on " . $managementBridge)
     :set failed true
   }
 }
@@ -107,14 +123,14 @@
     :put "ERROR FoxOS full bundle expects enabled RouterOS www/REST on port 80"
     :set failed true
   }
-  :if ([:typeof [:find $wwwAddresses "10.0.0.0/24"]] = "nil" && [:typeof [:find $wwwAddresses "10.0.0.4/32"]] = "nil") do={
-    :put "ERROR www/REST must be restricted to 10.0.0.0/24 or 10.0.0.4/32"
+	  :if ([:typeof [:find $wwwAddresses $siteNetwork]] = "nil" && [:typeof [:find $wwwAddresses ($foxosAddress . "/32")]] = "nil") do={
+	    :put ("ERROR www/REST must be restricted to " . $siteNetwork . " or " . $foxosAddress . "/32")
     :set failed true
   }
 }
 
 :put "=== reserved management addresses ==="
-:local reservedDefinitions {"10.0.0.2|10.0.0.2/24|veth-mihomo|foxos:mihomo";"10.0.0.3|10.0.0.3/24|veth-mosdns|foxos:mosdns";"10.0.0.4|10.0.0.4/24|veth-foxos|foxos:admin"}
+:local reservedDefinitions {($mihomoAddress . "|" . $mihomoAddress . "/" . $prefixLength . "|veth-mihomo|foxos:mihomo");($mosdnsAddress . "|" . $mosdnsAddress . "/" . $prefixLength . "|veth-mosdns|foxos:mosdns");($foxosAddress . "|" . $foxosAddress . "/" . $prefixLength . "|veth-foxos|foxos:admin")}
 :foreach definition in=$reservedDefinitions do={
   :local p1 [:find $definition "|"]
   :local p2 [:find $definition "|" ($p1 + 1)]
@@ -158,8 +174,8 @@
   :put ($address . " occupancy: ip=" . [:len $configuredIP] . " lease=" . [:len $lease] . " arp=" . [:len $arp] . " ping=" . $replies . " owned=" . $owned)
 }
 
-:put "=== required files under disk1/ ==="
-:local requiredFiles {"foxos-amd64.tar|1048576";"mihomo_amd64.tar|52428800";"mosdns-amd64.tar|5242880";"preflight.rsc|100";"foxos-plan.rsc|100";"foxos-full-install.rsc|1000";"foxos-start-all.rsc|100";"SHA256SUMS|100";"RELEASE-MANIFEST.txt|100"}
+:put ("=== required files under " . $storageRoot . "/ ===")
+:local requiredFiles {"foxos-amd64.tar|1048576";"mihomo_amd64.tar|52428800";"mosdns-amd64.tar|5242880";"site-config.rsc|100";"preflight.rsc|100";"foxos-plan.rsc|100";"foxos-full-install.rsc|1000";"foxos-start-all.rsc|100";"SHA256SUMS|100";"RELEASE-MANIFEST.txt|100"}
 :foreach definition in=$requiredFiles do={
   :local separator [:find $definition "|"]
   :local fileName [:pick $definition 0 $separator]
@@ -202,4 +218,4 @@
 :if ($failed) do={
   :error "FoxOS preflight failed. No RouterOS configuration was changed. Fix every ERROR and run it again."
 }
-:put "PRECHECK PASSED: no RouterOS configuration was changed. Review disk1/foxos-plan.rsc before installation."
+:put ("PRECHECK PASSED: no RouterOS configuration was changed. Review " . $storageRoot . "/foxos-plan.rsc before installation.")

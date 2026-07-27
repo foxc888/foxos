@@ -2,7 +2,10 @@
 # This script does not change DNS, DHCP, routes, NAT, Mangle, or firewall rules.
 
 :local architecture [/system/resource get architecture-name]
-:local storageRoot "disk1"
+:global FoxOSSiteManifestVersion
+:global FoxOSSiteStorageRoot
+:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:local storageRoot $FoxOSSiteStorageRoot
 :local imageFile ""
 :if ($architecture = "x86") do={ :set imageFile "foxos-amd64.tar" }
 :if ($architecture = "arm64") do={ :set imageFile "foxos-arm64.tar" }
@@ -25,7 +28,7 @@
   :if ([:len [/container/mounts find where name=$mountName]] != 1) do={ :error ("升级所需挂载缺失: " . $mountName) }
 }
 
-:put "升级阶段 1：active 容器保持运行，仅导入 disk1 中的新镜像到 foxos:pending。"
-:put "新 root-dir: disk1/containers/foxos-next；回滚仍使用当前 active root-dir。"
+:put ("升级阶段 1：active 容器保持运行，仅导入 " . $storageRoot . " 中的新镜像到 foxos:pending。")
+:put ("新 root-dir: " . $storageRoot . "/containers/foxos-next；回滚仍使用当前 active root-dir。")
 /container/add name=foxos-next file=$imagePath interface=veth-foxos root-dir=($storageRoot . "/containers/foxos-next") envlist=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=yes start-on-boot=no comment="foxos:pending"
-:put "镜像导入已排队，当前 FoxOS 未停止。等待 foxos:pending status=stopped 后执行 disk1/upgrade-promote.rsc。"
+:put ("镜像导入已排队，当前 FoxOS 未停止。等待 foxos:pending status=stopped 后执行 " . $storageRoot . "/upgrade-promote.rsc。")

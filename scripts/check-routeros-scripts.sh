@@ -44,8 +44,11 @@ while IFS= read -r -d '' script; do
   fi
 done < <(find "$rsc_root" -maxdepth 1 -type f -name '*.rsc' -print0)
 
-if rg -n -g '*.rsc' '^[[:space:]]*/ip/(dns|route|firewall|dhcp-server/network)(/|[[:space:]])[^#]*(add|set|remove|enable|disable|reset|move)' "$rsc_root"; then
+if rg -n -g '*.rsc' -g '!foxos-dns-apply.rsc' '^[[:space:]]*/ip/(dns|route|firewall|dhcp-server/network)(/|[[:space:]])[^#]*(add|set|remove|enable|disable|reset|move)' "$rsc_root"; then
   report "deployment scripts contain a forbidden DNS/DHCP route/firewall write"
+fi
+if [[ "$(rg -n '^[[:space:]]*/ip/dns/static add name=\$hostname type=A address=\$address ttl=5m comment="foxos:dns:admin"$' "$rsc_root/foxos-dns-apply.rsc" | wc -l | tr -d ' ')" != 1 ]]; then
+  report "the confirmed DNS script must contain exactly one bounded owned-record write"
 fi
 if rg -n -g '*.rsc' '^[[:space:]]*/system/device-mode/update' "$rsc_root"; then
   report "deployment scripts must not change device-mode"
@@ -63,17 +66,41 @@ if rg -n -g '*.rsc' 'envlists([=]|\])' "$rsc_root"; then
   report "RouterOS Container uses the singular envlist property"
 fi
 for endpoint in \
-  'FOXOS_MIHOMO_PROXY_URL|http://10.0.0.2:7890' \
-  'FOXOS_MOSDNS_URL|http://10.0.0.3:53'; do
+  'FOXOS_MIHOMO_PROXY_URL|http://' \
+  'FOXOS_MOSDNS_URL|http://' \
+  'FOXOS_SITE_PUBLIC_HOSTNAME|' \
+  'FOXOS_HTTPS_ENABLED|true'; do
   if ! rg -Fq "$endpoint" "$rsc_root/foxos-full-install.rsc"; then
     report "missing FoxOS runtime endpoint: $endpoint"
   fi
 done
-if ! rg -Fq '!= 16' "$rsc_root/foxos-full-install.rsc"; then
-  report "FoxOS env allowlist does not enforce the 16-key runtime baseline"
+if ! rg -Fq '!= 25' "$rsc_root/foxos-full-install.rsc"; then
+  report "FoxOS env allowlist does not enforce the 25-key HTTPS/site runtime baseline"
 fi
-if ! rg -Fq 'address] != "10.0.0.1/24"' "$rsc_root/preflight.rsc"; then
+if ! rg -Fq 'address] != $routerCIDR' "$rsc_root/preflight.rsc"; then
   report "preflight does not require the exact RouterOS management prefix"
+fi
+
+while IFS= read -r -d '' script; do
+  [[ "$(basename "$script")" == "site-config.rsc" ]] && continue
+  if ! rg -Fq 'FoxOSSiteManifestVersion' "$script"; then
+    report "script does not require the imported site manifest: $(basename "$script")"
+  fi
+done < <(find "$rsc_root" -maxdepth 1 -type f -name '*.rsc' -print0)
+
+if rg -n -g '*.rsc' -g '!site-config.rsc' '10\.0\.0\.[1-4]|bridge-lan|disk1' "$rsc_root"; then
+  report "site topology is duplicated outside site-config.rsc"
+fi
+for script in upgrade-promote.rsc rollback.rsc foxos-verify.rsc; do
+  if rg -n '/tool/fetch' "$rsc_root/$script" | rg -v 'check-certificate=yes-without-crl'; then
+    report "$script contains a fetch that can bypass local CA verification"
+  fi
+done
+if rg -n -g '*.rsc' 'http://[^[:space:]"$]+/api/|http://[^[:space:]"$]+:8090' "$rsc_root"; then
+  report "FoxOS API access over ordinary LAN HTTP remains in a RouterOS script"
+fi
+if rg -n '^[[:space:]]*(while .*tun0|ip (rule|route))' "$repo_root/mihomo/config/start.sh"; then
+  report "Mihomo startup still invents an unverified transparent data plane"
 fi
 
 for invariant in \

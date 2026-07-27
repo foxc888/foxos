@@ -1,7 +1,10 @@
 # FoxOS two-phase upgrade, phase 2: checkpoint, verify pending, then promote.
 # Run only after phase 1 shows foxos:pending status=stopped.
 
-:local foxosURL "http://10.0.0.4:8090"
+:global FoxOSSiteManifestVersion
+:global FoxOSSiteFoxOSAddress
+:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:local foxosURL ("https://" . $FoxOSSiteFoxOSAddress)
 :local active [/container find where comment="foxos:active"]
 :local pending [/container find where comment="foxos:pending"]
 :local rollback [/container find where comment="foxos:rollback"]
@@ -24,7 +27,7 @@
 :put "升级阶段 2：先由当前版本创建 SQLite 兼容回滚点；检查点失败时不会停止 active。"
 :local checkpointOK false
 :onerror checkpointError in={
-  :local checkpointResult [/tool/fetch url=($foxosURL . "/api/v1/system/upgrade/checkpoint") http-method=post http-header-field=$jsonHeaders http-data=$operationBody output=user as-value]
+  :local checkpointResult [/tool/fetch url=($foxosURL . "/api/v1/system/upgrade/checkpoint") check-certificate=yes-without-crl http-method=post http-header-field=$jsonHeaders http-data=$operationBody output=user as-value]
   :if (($checkpointResult->"status") = "finished" && [:typeof [:find ($checkpointResult->"data") ("\"operationId\":\"" . $operationID . "\"")]] != "nil" && [:typeof [:find ($checkpointResult->"data") "\"status\":\"checkpoint_ready\""]] != "nil") do={
     :set checkpointOK true
   }
@@ -51,19 +54,19 @@
     :local pageOK false
     :local readOnlyOK false
     :onerror liveError in={
-      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/live") output=user as-value]
+      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/live") check-certificate=yes-without-crl output=user as-value]
       :if (($result->"status") = "finished" && [:typeof [:find ($result->"data") "\"status\":\"ok\""]] != "nil") do={ :set liveOK true }
     } do={}
     :onerror readyError in={
-      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/ready") output=user as-value]
+      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/ready") check-certificate=yes-without-crl output=user as-value]
       :if (($result->"status") = "finished" && [:typeof [:find ($result->"data") "\"status\":\"ready\""]] != "nil") do={ :set readyOK true }
     } do={}
     :onerror pageError in={
-      :local result [/tool/fetch url=($foxosURL . "/") output=user as-value]
+      :local result [/tool/fetch url=($foxosURL . "/") check-certificate=yes-without-crl output=user as-value]
       :if (($result->"status") = "finished" && [:typeof [:find ($result->"data") "id=\"root\""]] != "nil") do={ :set pageOK true }
     } do={}
     :onerror readOnlyError in={
-      :local result [/tool/fetch url=($foxosURL . "/api/v1/audit-events?limit=1") http-header-field=$authHeader output=user as-value]
+      :local result [/tool/fetch url=($foxosURL . "/api/v1/audit-events?limit=1") check-certificate=yes-without-crl http-header-field=$authHeader output=user as-value]
       :if (($result->"status") = "finished") do={ :set readOnlyOK true }
     } do={}
     :if ($liveOK && $readyOK && $pageOK && $readOnlyOK) do={
@@ -84,7 +87,7 @@
   :for attempt from=1 to=18 do={
     :delay 5s
     :onerror oldHealthError in={
-      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/ready") output=user as-value]
+      :local result [/tool/fetch url=($foxosURL . "/api/v1/health/ready") check-certificate=yes-without-crl output=user as-value]
       :if (($result->"status") = "finished" && [:typeof [:find ($result->"data") "\"status\":\"ready\""]] != "nil") do={ :set oldRecovered true }
     } do={}
     :if ($oldRecovered) do={ :break }
@@ -110,7 +113,7 @@
 
 :local promotedRecorded false
 :onerror promotedError in={
-  :local promotedResult [/tool/fetch url=($foxosURL . "/api/v1/system/upgrade/promoted") http-method=post http-header-field=$jsonHeaders http-data=$operationBody output=user as-value]
+  :local promotedResult [/tool/fetch url=($foxosURL . "/api/v1/system/upgrade/promoted") check-certificate=yes-without-crl http-method=post http-header-field=$jsonHeaders http-data=$operationBody output=user as-value]
   :if (($promotedResult->"status") = "finished" && [:typeof [:find ($promotedResult->"data") "\"status\":\"promoted\""]] != "nil") do={ :set promotedRecorded true }
 } do={ :put ("记录升级完成状态失败: " . $promotedError) }
 :if ($promotedRecorded = false) do={

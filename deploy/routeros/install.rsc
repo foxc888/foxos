@@ -5,10 +5,18 @@
 
 :local architecture [/system/resource get architecture-name]
 :local imageFile ""
-:local managementBridge "bridge-lan"
-:local foxosAddress "10.0.0.4/24"
-:local foxosGateway "10.0.0.1"
-:local storageRoot "disk1"
+:global FoxOSSiteManifestVersion
+:global FoxOSSiteManagementBridge
+:global FoxOSSiteStorageRoot
+:global FoxOSSitePrefixLength
+:global FoxOSSiteRouterAddress
+:global FoxOSSiteFoxOSAddress
+:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:local managementBridge $FoxOSSiteManagementBridge
+:local foxosIP $FoxOSSiteFoxOSAddress
+:local foxosAddress ($foxosIP . "/" . $FoxOSSitePrefixLength)
+:local foxosGateway $FoxOSSiteRouterAddress
+:local storageRoot $FoxOSSiteStorageRoot
 :local containerRoot ($storageRoot . "/containers/foxos")
 :local existingContainer [/container find where comment="foxos:active"]
 
@@ -35,11 +43,11 @@
 :if ([:len [/disk find where slot=$storageRoot]] != 1) do={
   :error ("持久化磁盘不存在: " . $storageRoot)
 }
-:if ([:len [/ip/address find where address~"10.0.0.4/"]] > 0) do={
-  :error "10.0.0.4 已被 RouterOS 地址占用"
+:if ([:len [/ip/address find where address~($foxosIP . "/")]] > 0) do={
+  :error ($foxosIP . " 已被 RouterOS 地址占用")
 }
-:if ([:len [/ip/dhcp-server/lease find where address="10.0.0.4"]] > 0) do={
-  :error "10.0.0.4 已被 DHCP Lease 占用"
+:if ([:len [/ip/dhcp-server/lease find where address=$foxosIP]] > 0) do={
+  :error ($foxosIP . " 已被 DHCP Lease 占用")
 }
 
 :local existingName [/container find where name="foxos-active"]
@@ -61,8 +69,8 @@
     }
   }
 } else={
-  :if ([:len [/ip/arp find where address="10.0.0.4"]] > 0 || [/ping address="10.0.0.4" count=2 interval=200ms] > 0) do={
-    :error "10.0.0.4 已出现在 ARP 或可达，拒绝创建"
+  :if ([:len [/ip/arp find where address=$foxosIP]] > 0 || [/ping address=$foxosIP count=2 interval=200ms] > 0) do={
+    :error ($foxosIP . " 已出现在 ARP 或可达，拒绝创建")
   }
   /interface/veth add name=veth-foxos address=$foxosAddress gateway=$foxosGateway comment="foxos:admin"
 }

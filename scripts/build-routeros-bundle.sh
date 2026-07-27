@@ -47,10 +47,14 @@ done
 cp -a -- "$repo_root/mihomo/config" "$stage_root/mihomo-config"
 cp -a -- "$repo_root/mosdns-config" "$stage_root/mosdns-config"
 cp -- "$repo_root/deploy/routeros/foxos-env.example.rsc" "$stage_root/foxos-env.example.rsc"
+cp -- "$repo_root/deploy/routeros/site-config.rsc" "$stage_root/site-config.rsc"
 cp -- "$repo_root/deploy/routeros/preflight.rsc" "$stage_root/preflight.rsc"
 cp -- "$repo_root/deploy/routeros/foxos-plan.rsc" "$stage_root/foxos-plan.rsc"
 cp -- "$repo_root/deploy/routeros/foxos-full-install.rsc" "$stage_root/foxos-full-install.rsc"
 cp -- "$repo_root/deploy/routeros/foxos-start-all.rsc" "$stage_root/foxos-start-all.rsc"
+cp -- "$repo_root/deploy/routeros/foxos-verify.rsc" "$stage_root/foxos-verify.rsc"
+cp -- "$repo_root/deploy/routeros/foxos-dns-plan.rsc" "$stage_root/foxos-dns-plan.rsc"
+cp -- "$repo_root/deploy/routeros/foxos-dns-apply.rsc" "$stage_root/foxos-dns-apply.rsc"
 cp -- "$repo_root/deploy/routeros/install.rsc" "$stage_root/install.rsc"
 cp -- "$repo_root/deploy/routeros/upgrade.rsc" "$stage_root/upgrade.rsc"
 cp -- "$repo_root/deploy/routeros/upgrade-promote.rsc" "$stage_root/upgrade-promote.rsc"
@@ -77,7 +81,7 @@ printf '%s\n' \
   "FoxOS full RouterOS bundle" \
   "bundle: $bundle_name" \
   "architecture-name: x86 (x86_64 CPU / linux-amd64 image)" \
-  "upload-root: disk1/" \
+  "upload-root: configured by site-config.rsc (default disk1/)" \
   "credentials: generated on first RouterOS install" \
   "image-format: single-layer uncompressed Docker archive for RouterOS file import" \
   "integrity: verify SHA256SUMS before upload" \
