@@ -14,6 +14,8 @@
 
 同一 push/PR 还会触发独立的 `FoxOS CodeQL` workflow，分别分析 Go 与 JavaScript/TypeScript；不能用 Core CI 绿色替代 CodeQL 结论。
 
+最终 FoxOS 镜像中的 `/usr/local/bin/mihomo` 是配置发布校验器。构建固定官方 `v1.19.29` 源码归档的 SHA-256，使用 Go 1.26.5，并将上游仍固定在已知 High 版本的 `golang.org/x/crypto`、`golang.org/x/net`、`golang.org/x/oauth2` 最小提升到已修复版本，版本标识为 `v1.19.29-foxos1`。CI 对该产物执行有效配置、无效配置和最终镜像 Trivy 门禁；这不等同于已经验证 RouterOS 上独立 Mihomo 容器的数据平面。
+
 成功后提供：
 
 ```text

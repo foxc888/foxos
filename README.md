@@ -228,7 +228,7 @@ RouterOS 升级使用 pending/active/rollback 槽位。promote 前由旧版本�
 - Playwright：桌面、平板、390px 移动端，覆盖深链接、浏览器前进后退、键盘、焦点锁定、失败降级、危险确认、发布与回滚。
 - 独立 `FoxOS CodeQL` workflow 分析 Go 与 TypeScript；Core CI 运行 Trivy、RouterOS 脚本静态检查、敏感材料和生成物检查。
 - Linux network namespace：非 root 80/443、CA/HTTPS、跳转、回程、管理路径和 fail-closed 出口 readiness。
-- amd64 FoxOS 镜像与全量 RouterOS 包构建、校验和 Artifact 上传。
+- amd64 FoxOS 镜像与全量 RouterOS 包构建、校验和 Artifact 上传。镜像内的 Mihomo 校验器从 SHA-256 固定的官方 `v1.19.29` 源码构建为 `v1.19.29-foxos1`，使用 Go 1.26.5，并把上游仍固定在已知 High 版本的 `x/crypto`、`x/net`、`x/oauth2` 提升到已修复版本；Trivy 扫描最终镜像，不把这三个第三方依赖加入忽略清单。
 
 本地完整命令：
 
