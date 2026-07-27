@@ -209,7 +209,22 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install --yes ripgrep
       - uses: docker/setup-buildx-action@v4
       - name: Build FoxOS amd64 image
-        run: docker buildx build --platform linux/amd64 --build-arg FOXOS_VERSION="${GITHUB_SHA}" --output type=docker,dest=foxos-amd64.tar .
+        run: docker buildx build --platform linux/amd64 --tag "foxos-ci:${GITHUB_SHA}" --build-arg FOXOS_VERSION="${GITHUB_SHA}" --output type=docker,dest=foxos-amd64.tar .
+      - name: Verify bundled Mihomo semantic validator
+        run: |
+          docker load --input foxos-amd64.tar
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}/mihomo/config:/config:ro" \
+            --entrypoint /usr/local/bin/mihomo \
+            "foxos-ci:${GITHUB_SHA}" -t -d /tmp/mihomo -f /config/config.yaml
+          printf '%s\n' 'proxies: [' > "${RUNNER_TEMP}/invalid-mihomo.yaml"
+          if docker run --rm \
+            --volume "${RUNNER_TEMP}/invalid-mihomo.yaml:/tmp/invalid.yaml:ro" \
+            --entrypoint /usr/local/bin/mihomo \
+            "foxos-ci:${GITHUB_SHA}" -t -d /tmp/mihomo -f /tmp/invalid.yaml; then
+            printf 'invalid Mihomo configuration unexpectedly passed semantic validation\n' >&2
+            exit 1
+          fi
       - name: Scan FoxOS image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
