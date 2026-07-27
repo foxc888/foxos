@@ -28,7 +28,7 @@ FoxOS 通过 RouterOS REST API 读取和执行受限操作，通过 Mihomo Contr
 1. 读取并校验可信 base YAML，再从 SQLite 读取草稿、节点、组和设备策略。
 2. 结构化合并 FoxOS 管理字段，保留 Controller、secret、bind、UI、TUN、DNS 和日志等 base 运行字段。
 3. 验证引用、组环、链式 hop、管理地址和协议字段；首次 mixed port 默认为 7890。
-4. 生成临时 YAML、digest 与脱敏 Diff。
+4. 生成临时 YAML、由确认密钥保护的 keyed digest 与脱敏 Diff。
 5. 用户确认绑定草稿/digest 的计划。
 6. 持久任务再次生成并比较 digest，并调用真实 Mihomo 二进制做配置语义校验。
 7. 保存快照，原子替换配置，Controller 热重载并检查健康。

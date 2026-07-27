@@ -2,6 +2,7 @@ package mihomo
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -20,7 +21,10 @@ import (
 var (
 	ErrMihomoUnavailable     = errors.New("Mihomo runtime is not configured")
 	ErrMihomoSnapshotCorrupt = errors.New("Mihomo snapshot integrity check failed")
+	ErrMihomoDigestKey       = errors.New("Mihomo digest key must contain at least 32 bytes")
 )
+
+const digestDomain = "foxos:mihomo-config:v1\x00"
 
 type ConfigStore interface {
 	Nodes(context.Context) ([]domain.Node, error)
@@ -37,6 +41,7 @@ type Service struct {
 	Store              ConfigStore
 	Applier            *Applier
 	BaseConfig         []byte
+	DigestKey          []byte
 	ProtectedAddresses []string
 	Now                func() time.Time
 }
@@ -78,7 +83,7 @@ func (s *Service) Preview(ctx context.Context, draft domain.MihomoDraft) (Previe
 	if err != nil {
 		return Preview{}, err
 	}
-	digest, err := digest(body)
+	digest, err := s.digest(body)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -147,7 +152,7 @@ func (s *Service) ApplyPreview(ctx context.Context, draft domain.MihomoDraft, ex
 	if err != nil {
 		return ApplyResult{}, domain.MihomoSnapshot{}, err
 	}
-	digest, err := digest(body)
+	digest, err := s.digest(body)
 	if err != nil {
 		return ApplyResult{}, domain.MihomoSnapshot{}, err
 	}
@@ -177,12 +182,11 @@ func (s *Service) Restore(ctx context.Context, id, label string) (ApplyResult, d
 	if err != nil {
 		return ApplyResult{}, domain.MihomoSnapshot{}, err
 	}
-	expected, err := hex.DecodeString(snapshot.Digest)
-	if err != nil || len(expected) != sha256.Size {
-		return ApplyResult{}, snapshot, ErrMihomoSnapshotCorrupt
+	actual, err := s.digest(snapshot.Body)
+	if err != nil {
+		return ApplyResult{}, snapshot, err
 	}
-	actual := sha256.Sum256(snapshot.Body)
-	if subtle.ConstantTimeCompare(actual[:], expected) != 1 {
+	if !matchingDigest(actual, snapshot.Digest) {
 		return ApplyResult{}, snapshot, ErrMihomoSnapshotCorrupt
 	}
 	result, err := s.Applier.Apply(ctx, snapshot.Body)
@@ -192,7 +196,7 @@ func (s *Service) Restore(ctx context.Context, id, label string) (ApplyResult, d
 	if label != "" {
 		snapshot.Label = label
 	}
-	snapshot.Digest = hex.EncodeToString(actual[:])
+	snapshot.Digest = actual
 	snapshot.ID, err = snapshotID(snapshot.Digest)
 	if err != nil {
 		return result, snapshot, err
@@ -218,8 +222,11 @@ func (s *Service) ReconcileApplied(ctx context.Context, expectedDigest, label st
 	if err != nil {
 		return domain.MihomoSnapshot{}, false, err
 	}
-	actual, _ := digest(body)
-	if !validDigest(expectedDigest) || !strings.EqualFold(actual, expectedDigest) {
+	actual, err := s.digest(body)
+	if err != nil {
+		return domain.MihomoSnapshot{}, false, err
+	}
+	if !matchingDigest(actual, expectedDigest) {
 		return domain.MihomoSnapshot{}, false, nil
 	}
 	if err := s.Applier.Runtime.Healthy(ctx); err != nil {
@@ -244,8 +251,11 @@ func (s *Service) ReconcileRestore(ctx context.Context, id string) (domain.Mihom
 	if err != nil {
 		return domain.MihomoSnapshot{}, false, err
 	}
-	actual := sha256.Sum256(snapshot.Body)
-	if !strings.EqualFold(hex.EncodeToString(actual[:]), snapshot.Digest) {
+	actual, err := s.digest(snapshot.Body)
+	if err != nil {
+		return domain.MihomoSnapshot{}, false, err
+	}
+	if !matchingDigest(actual, snapshot.Digest) {
 		return domain.MihomoSnapshot{}, false, ErrMihomoSnapshotCorrupt
 	}
 	return s.ReconcileApplied(ctx, snapshot.Digest, snapshot.Label)
@@ -306,13 +316,28 @@ func ValidateYAML(body []byte) error {
 	return nil
 }
 
-func digest(body []byte) (string, error) {
-	return domainDigest(body)
+func (s *Service) digest(body []byte) (string, error) {
+	if s == nil {
+		return "", ErrMihomoDigestKey
+	}
+	return domainDigest(s.DigestKey, body)
 }
 
-func domainDigest(body []byte) (string, error) {
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
+func domainDigest(key, body []byte) (string, error) {
+	if len(key) < 32 {
+		return "", ErrMihomoDigestKey
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(digestDomain))
+	_, _ = mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+func matchingDigest(actual, expected string) bool {
+	if !validDigest(actual) || !validDigest(expected) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(actual), []byte(strings.ToLower(expected))) == 1
 }
 
 func redactYAML(body []byte) ([]byte, bool) {

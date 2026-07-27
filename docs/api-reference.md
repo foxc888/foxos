@@ -115,14 +115,14 @@ DHCP 范围首尾计入容量；扩容请求提交目标容量和完整拟议范
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET / PUT | `/api/v1/mihomo/draft` | 读取、保存草稿 |
-| POST | `/api/v1/mihomo/config/preview` | 生成 YAML、脱敏 Diff、digest 和确认令牌 |
+| POST | `/api/v1/mihomo/config/preview` | 生成 YAML、脱敏 Diff、keyed digest 和确认令牌 |
 | POST | `/api/v1/mihomo/config/validate` | 校验提交的 YAML |
 | POST | `/api/v1/mihomo/config/apply` | 提交发布任务 |
 | GET | `/api/v1/mihomo/snapshots` | 最近 100 个发布快照 |
 | POST | `/api/v1/mihomo/snapshots/{id}/restore/plan` | 生成恢复计划 |
 | POST | `/api/v1/mihomo/snapshots/{id}/restore` | 提交恢复任务 |
 
-preview 以可信 base YAML 为基线，结构化合并 FoxOS 管理字段并保留 Controller、secret、bind、UI、TUN、DNS 和日志；首次 mixed port 默认 7890。digest 与草稿共同绑定确认令牌。apply 再次生成并比较 digest，调用真实 Mihomo 二进制校验，然后快照、原子替换、热重载和健康检查。失败时通过仍可访问的 Controller 恢复旧文件；回滚失败单独分类。
+preview 以可信 base YAML 为基线，结构化合并 FoxOS 管理字段并保留 Controller、secret、bind、UI、TUN、DNS 和日志；首次 mixed port 默认 7890。配置 digest 使用确认密钥保护的领域化 HMAC-SHA256，与草稿共同绑定确认令牌，不暴露密码或 UUID 的裸摘要。apply 再次生成并比较 digest，调用真实 Mihomo 二进制校验，然后快照、原子替换、热重载和健康检查。失败时通过仍可访问的 Controller 恢复旧文件；回滚失败单独分类。
 
 草稿规则会与 SQLite 中的节点、代理组和设备策略一起生成。保存节点或组本身不会改变运行配置，必须单独 preview/apply。
 

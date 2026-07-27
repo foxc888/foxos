@@ -2,6 +2,7 @@ package mihomo
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/foxc888/foxos/internal/domain"
 )
+
+const testDigestKey = "0123456789abcdef0123456789abcdef"
 
 type configMemoryStore struct {
 	nodes     []domain.Node
@@ -64,13 +67,21 @@ func TestServicePreviewRedactsSecrets(t *testing.T) {
 	t.Parallel()
 	const credential = "00000000-0000-0000-0000-000000000001"
 	store := &configMemoryStore{nodes: []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: credential}}}
-	service := &Service{Store: store}
+	service := &Service{Store: store, DigestKey: []byte(testDigestKey)}
 	preview, err := service.Preview(context.Background(), domain.MihomoDraft{Mode: "rule", Rules: []string{"MATCH,DIRECT"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(preview.YAML, credential) || strings.Contains(preview.Diff, credential) || !preview.HasSecret || len(preview.Digest) != 64 {
 		t.Fatalf("preview=%+v", preview)
+	}
+}
+
+func TestServicePreviewRejectsMissingDigestKey(t *testing.T) {
+	t.Parallel()
+	service := &Service{Store: &configMemoryStore{}}
+	if _, err := service.Preview(context.Background(), domain.MihomoDraft{Mode: "rule"}); !errors.Is(err, ErrMihomoDigestKey) {
+		t.Fatalf("Preview() error = %v", err)
 	}
 }
 
@@ -130,7 +141,7 @@ func TestServiceApplyPersistsDeterministicSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	store := &configMemoryStore{nodes: []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}}}
 	runtime := &fakeRuntime{}
-	service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(dir, "config.yaml"), BackupDir: filepath.Join(dir, "backups"), Runtime: runtime}, Now: func() time.Time { return time.Unix(123, 0) }}
+	service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(dir, "config.yaml"), BackupDir: filepath.Join(dir, "backups"), Runtime: runtime}, DigestKey: []byte(testDigestKey), Now: func() time.Time { return time.Unix(123, 0) }}
 	draft := domain.MihomoDraft{Mode: "rule", Rules: []string{"MATCH,DIRECT"}}
 	preview, err := service.Preview(context.Background(), draft)
 	if err != nil {
@@ -147,6 +158,10 @@ func TestServiceApplyPersistsDeterministicSnapshot(t *testing.T) {
 	if first.ID != second.ID || len(store.snapshots) != 1 {
 		t.Fatalf("first=%s second=%s snapshots=%d", first.ID, second.ID, len(store.snapshots))
 	}
+	_, restored, err := service.Restore(context.Background(), first.ID, "restored")
+	if err != nil || restored.Digest != first.Digest || restored.Label != "restored" {
+		t.Fatalf("restored=%+v err=%v", restored, err)
+	}
 	body, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
 	if err != nil || !strings.Contains(string(body), "credential") {
 		t.Fatalf("body=%q err=%v", body, err)
@@ -157,7 +172,7 @@ func TestServiceApplyRejectsChangedDigest(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	store := &configMemoryStore{nodes: []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}}}
-	service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(dir, "config.yaml"), BackupDir: filepath.Join(dir, "backups"), Runtime: &fakeRuntime{}}}
+	service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(dir, "config.yaml"), BackupDir: filepath.Join(dir, "backups"), Runtime: &fakeRuntime{}}, DigestKey: []byte(testDigestKey)}
 	_, _, err := service.ApplyPreview(context.Background(), domain.MihomoDraft{Mode: "rule"}, "wrong", "")
 	if err == nil || errors.Is(err, ErrApplyFailed) {
 		t.Fatalf("err=%v", err)
@@ -167,7 +182,11 @@ func TestServiceApplyRejectsChangedDigest(t *testing.T) {
 func TestServiceRestoreRejectsCorruptSnapshotBeforeApply(t *testing.T) {
 	t.Parallel()
 	body := []byte("mode: rule\n")
-	validDigest, err := digest(body)
+	validDigest, err := domainDigest([]byte(testDigestKey), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKeyDigest, err := domainDigest([]byte("abcdef0123456789abcdef0123456789"), body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +196,7 @@ func TestServiceRestoreRejectsCorruptSnapshotBeforeApply(t *testing.T) {
 		body   []byte
 	}{
 		{name: "body changed", digest: validDigest, body: []byte("mode: global\n")},
+		{name: "key changed", digest: otherKeyDigest, body: body},
 		{name: "invalid digest", digest: "not-a-sha256", body: body},
 	}
 	for _, test := range tests {
@@ -187,7 +207,7 @@ func TestServiceRestoreRejectsCorruptSnapshotBeforeApply(t *testing.T) {
 			store := &configMemoryStore{snapshots: map[string]domain.MihomoSnapshot{
 				"snapshot": {ID: "snapshot", Digest: test.digest, Body: test.body},
 			}}
-			service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: filepath.Join(root, "backups"), Runtime: runtime}}
+			service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: filepath.Join(root, "backups"), Runtime: runtime}, DigestKey: []byte(testDigestKey)}
 			if _, _, err := service.Restore(context.Background(), "snapshot", ""); !errors.Is(err, ErrMihomoSnapshotCorrupt) {
 				t.Fatalf("Restore() error = %v", err)
 			}
@@ -198,5 +218,28 @@ func TestServiceRestoreRejectsCorruptSnapshotBeforeApply(t *testing.T) {
 				t.Fatalf("config write occurred before integrity rejection: %v", err)
 			}
 		})
+	}
+}
+
+func TestDomainDigestRequiresAKeyAndSeparatesKeyDomains(t *testing.T) {
+	t.Parallel()
+	body := []byte("password: low-entropy-credential\n")
+	first, err := domainDigest([]byte(testDigestKey), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := domainDigest([]byte(testDigestKey), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := domainDigest([]byte("abcdef0123456789abcdef0123456789"), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != repeated || first == second || len(first) != sha256.Size*2 {
+		t.Fatalf("unexpected keyed digest behavior: first=%q repeated=%q second=%q", first, repeated, second)
+	}
+	if _, err := domainDigest([]byte("short"), body); !errors.Is(err, ErrMihomoDigestKey) {
+		t.Fatalf("short key error = %v", err)
 	}
 }

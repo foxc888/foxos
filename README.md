@@ -95,7 +95,7 @@ go run ./cmd/server -listen :8090 -static web/dist -database data/foxos.db
 | 变量 | 全量包值 | 说明 |
 |---|---|---|
 | `FOXOS_API_TOKEN` | 首次安装随机生成 | Web/API Bearer Token |
-| `FOXOS_CONFIRMATION_KEY` | 首次安装随机生成 | 高风险计划签名密钥 |
+| `FOXOS_CONFIRMATION_KEY` | 首次安装随机生成 | 高风险计划签名与 Mihomo 配置/快照 keyed digest |
 | `FOXOS_SITE_*` | 来自 `site-config.rsc` | 管理桥、存储、网段、服务地址和 public hostname，必须全设或全不设 |
 | `FOXOS_ROUTEROS_URL` | 从站点 RouterOS 地址生成 | RouterOS REST 根地址 |
 | `FOXOS_ROUTEROS_USERNAME` | `foxos-service` | 专用服务用户 |

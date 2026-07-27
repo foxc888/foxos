@@ -401,7 +401,7 @@ function handleGridRowKeyDown(event: React.KeyboardEvent<HTMLTableRowElement>, s
   }
   const rows = Array.from(event.currentTarget.closest("tbody")?.querySelectorAll<HTMLTableRowElement>("tr[data-grid-row]") ?? []);
   const currentIndex = rows.indexOf(event.currentTarget);
-  let nextIndex = currentIndex;
+  let nextIndex: number;
   if (event.key === "ArrowDown") nextIndex = Math.min(rows.length - 1, currentIndex + 1);
   else if (event.key === "ArrowUp") nextIndex = Math.max(0, currentIndex - 1);
   else if (event.key === "Home") nextIndex = 0;
@@ -565,7 +565,7 @@ function App() {
     try {
       return await refresh;
     } finally {
-      if (refreshInFlight.current === refresh) refreshInFlight.current = null;
+      refreshInFlight.current = null;
     }
   }, [notify]);
 

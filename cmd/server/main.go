@@ -143,7 +143,7 @@ func main() {
 			},
 		}
 		mihomoApplier = &mihomo.Applier{ConfigPath: runtimeConfig.Mihomo.LocalConfigPath, BackupDir: runtimeConfig.Mihomo.BackupDir, Runtime: validatedRuntime}
-		mihomoService = &mihomo.Service{Store: store, Applier: mihomoApplier, BaseConfig: baseConfig, ProtectedAddresses: runtimeConfig.Site.ProtectedAddresses()}
+		mihomoService = &mihomo.Service{Store: store, Applier: mihomoApplier, BaseConfig: baseConfig, DigestKey: []byte(runtimeConfig.ConfirmationKey), ProtectedAddresses: runtimeConfig.Site.ProtectedAddresses()}
 	}
 	if runtimeConfig.Mihomo.ProxyURL != "" {
 		mihomoExitProbe, err = mihomo.NewExitProbe(runtimeConfig.Mihomo.ProxyURL)
@@ -495,7 +495,7 @@ func registerEgressJobs(manager *task.Manager, policies api.DevicePolicyStore, p
 			}
 			return map[string]any{"auditId": auditID, "errorClass": "egress_request_invalid"}, domain.JobFailed, err
 		}
-		changes := make([]map[string]string, 0, len(plan.Operations)+1)
+		changes := make([]map[string]string, 0, routeros.MaxEgressOperations+1)
 		for _, operation := range plan.Operations {
 			changes = append(changes, map[string]string{"method": operation.Method, "path": operation.Path, "summary": operation.Summary})
 		}

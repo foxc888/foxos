@@ -2,6 +2,8 @@
 
 FoxOS 管理备份覆盖 SQLite 数据和可选 Mihomo 配置。RouterOS binary backup/export 仍由部署操作者在设备上单独完成，不能被 FoxOS 文件备份替代。
 
+备份 manifest 对文件使用 SHA-256 完整性校验；Mihomo 发布快照的对外 digest 则使用 `FOXOS_CONFIRMATION_KEY` 保护的领域化 HMAC-SHA256。轮换确认密钥或从使用裸 SHA-256 digest 的早期 Alpha 升级后，旧发布快照会失败关闭，不能直接恢复；先保留原配置文件，在维护窗口重新预览并发布以生成 keyed 快照。普通 SQLite/Mihomo 文件备份仍按 manifest 流程验证和恢复。
+
 ## 创建与保留
 
 `POST /api/v1/backups` 提交持久任务。备份服务：
