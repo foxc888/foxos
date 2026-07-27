@@ -15,9 +15,11 @@
 
 ## 发布资产
 
-Core CI 每个提交生成 `foxos-full-amd64-<sha>.tar.gz` 与外部 `.sha256`。包内包含三张 RouterOS 本地导入镜像、完整 Mihomo/MosDNS 配置、两阶段安装、升级、回滚、只读预检、计划、说明和内部 `SHA256SUMS`。
+Core CI 每个提交生成 `foxos-full-amd64-<sha>.tar.gz` 与外部 `.sha256`。包内包含三张 RouterOS 本地导入镜像、组件 provenance lock、完整 Mihomo/MosDNS 配置、两阶段安装、升级、回滚、只读预检、计划、说明和内部 `SHA256SUMS`。
 
 镜像已经转换为 RouterOS 兼容的单层、未压缩 Docker v1 tar。不能把 GitHub ZIP、外层 `.tar.gz` 或 OCI layout 直接交给 `/container/add file=`。
+
+FoxOS、Mihomo、MosDNS 三张 amd64 输入镜像在 workflow 内从固定源码构建并分别通过运行契约与 Trivy 后才组包；仓库不携带预制运行时 tar。工作站除校验两层 checksum 外，还应审核 `provenance/*.lock.json` 与目标提交的 Dockerfile。
 
 ## 安装顺序
 

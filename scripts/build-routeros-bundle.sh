@@ -2,13 +2,15 @@
 set -Eeuo pipefail
 
 # Assemble a secret-free RouterOS package from already-built image archives.
-# Docker is deliberately not required here; the caller supplies the FoxOS image
-# produced by the container build job.
+# Docker is deliberately not required here; the caller supplies the exact three
+# archives produced and scanned by the container build job.
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 output_root=${1:-"$repo_root/dist"}
 release_id=${2:-"dev"}
-foxos_image=${FOXOS_IMAGE:-"$repo_root/foxos-amd64.tar"}
+foxos_image=${FOXOS_IMAGE:-}
+mihomo_image=${MIHOMO_IMAGE:-}
+mosdns_image=${MOSDNS_IMAGE:-}
 bundle_name="foxos-full-amd64-${release_id}"
 stage_root="$output_root/$bundle_name"
 archive="$output_root/${bundle_name}.tar.gz"
@@ -20,6 +22,9 @@ die() {
 }
 
 [[ "$release_id" =~ ^[A-Za-z0-9._-]+$ ]] || die "release id contains unsupported characters: $release_id"
+[[ -n "$foxos_image" ]] || die "FOXOS_IMAGE must name the scanned FoxOS Docker archive"
+[[ -n "$mihomo_image" ]] || die "MIHOMO_IMAGE must name the scanned Mihomo Docker archive"
+[[ -n "$mosdns_image" ]] || die "MOSDNS_IMAGE must name the scanned MosDNS Docker archive"
 command -v rg >/dev/null 2>&1 || die "ripgrep (rg) is required"
 command -v go >/dev/null 2>&1 || die "Go is required to prepare RouterOS-compatible image archives"
 
@@ -32,20 +37,25 @@ mkdir -p -- "$stage_root"
 
 required_files=(
   "$foxos_image"
-  "$repo_root/mihomo/install/mihomo_amd64.tar"
-  "$repo_root/mihomo/install/mosdns-v0.6.4-2ac30e8-amd64.tar"
+  "$mihomo_image"
+  "$mosdns_image"
   "$repo_root/mihomo/config/config.yaml"
   "$repo_root/mosdns-config/config_custom.yaml"
+  "$repo_root/mihomo/install/mihomo-container.lock.json"
+  "$repo_root/mihomo/install/mosdns-container.lock.json"
 )
 for source in "${required_files[@]}"; do
   [[ -s "$source" ]] || die "missing or empty input: $source"
 done
 
 "$tool_root/routeros-image" -input "$foxos_image" -output "$stage_root/foxos-amd64.tar" -architecture amd64
-"$tool_root/routeros-image" -input "$repo_root/mihomo/install/mihomo_amd64.tar" -output "$stage_root/mihomo_amd64.tar" -architecture amd64
-"$tool_root/routeros-image" -input "$repo_root/mihomo/install/mosdns-v0.6.4-2ac30e8-amd64.tar" -output "$stage_root/mosdns-amd64.tar" -architecture amd64
+"$tool_root/routeros-image" -input "$mihomo_image" -output "$stage_root/mihomo_amd64.tar" -architecture amd64
+"$tool_root/routeros-image" -input "$mosdns_image" -output "$stage_root/mosdns-amd64.tar" -architecture amd64
 cp -a -- "$repo_root/mihomo/config" "$stage_root/mihomo-config"
 cp -a -- "$repo_root/mosdns-config" "$stage_root/mosdns-config"
+mkdir -p -- "$stage_root/provenance"
+cp -- "$repo_root/mihomo/install/mihomo-container.lock.json" "$stage_root/provenance/mihomo-container.lock.json"
+cp -- "$repo_root/mihomo/install/mosdns-container.lock.json" "$stage_root/provenance/mosdns-container.lock.json"
 cp -- "$repo_root/deploy/routeros/foxos-env.example.rsc" "$stage_root/foxos-env.example.rsc"
 cp -- "$repo_root/deploy/routeros/site-config.rsc" "$stage_root/site-config.rsc"
 cp -- "$repo_root/deploy/routeros/preflight.rsc" "$stage_root/preflight.rsc"
@@ -85,6 +95,9 @@ printf '%s\n' \
   "upload-root: configured by site-config.rsc (default disk1/)" \
   "credentials: generated on first RouterOS install" \
   "image-format: single-layer uncompressed Docker archive for RouterOS file import" \
+  "image-inputs: explicit FoxOS, Mihomo, and MosDNS archives built by the caller" \
+  "component-provenance: provenance/*.lock.json" \
+  "release-gate: Core CI and Release workflows scan all three input images with Trivy" \
   "integrity: verify SHA256SUMS before upload" \
   "routeros-validation: static checks only; physical-device acceptance is pending" \
   > "$stage_root/RELEASE-MANIFEST.txt"

@@ -10,11 +10,13 @@
 - TypeScript、Vitest、npm audit、生产构建和三视口 Playwright。
 - actionlint、Shell、RouterOS 静态检查和敏感材料检查。
 - Linux namespace 中的非 root 80/443、CA/HTTPS、跳转、管理路径、回程和 fail-closed egress readiness。
-- Linux amd64 Docker 构建、镜像内真实 Mihomo 有效/无效配置语义门禁、Trivy 和完整 RouterOS bundle。
+- Linux amd64 FoxOS/Mihomo/MosDNS 三镜像构建、真实 Mihomo 有效/无效配置语义、MosDNS 挂载启动契约、逐镜像 Trivy 和完整 RouterOS bundle。
 
 同一 push/PR 还会触发独立的 `FoxOS CodeQL` workflow，分别分析 Go 与 JavaScript/TypeScript；不能用 Core CI 绿色替代 CodeQL 结论。
 
-最终 FoxOS 镜像中的 `/usr/local/bin/mihomo` 是配置发布校验器。构建固定官方 `v1.19.29` 源码归档的 SHA-256，使用 Go 1.26.5，并将上游仍固定在已知 High 版本的 `golang.org/x/crypto`、`golang.org/x/net`、`golang.org/x/oauth2` 最小提升到已修复版本，版本标识为 `v1.19.29-foxos1`。CI 对该产物执行有效配置、无效配置和最终镜像 Trivy 门禁；这不等同于已经验证 RouterOS 上独立 Mihomo 容器的数据平面。
+最终 FoxOS 镜像中的 `/usr/local/bin/mihomo` 是配置发布校验器，独立 `mihomo-runtime` 使用同一个二进制。构建固定官方 `v1.19.29` 源码归档的 SHA-256，使用 Go 1.26.5，并将上游仍固定在已知 High 版本的 `golang.org/x/crypto`、`golang.org/x/net`、`golang.org/x/oauth2` 最小提升到已修复版本，版本标识为 `v1.19.29-foxos1`。CI 会在 FoxOS 镜像和独立运行时中分别执行语义契约，并扫描两张最终镜像；这仍不等同于 RouterOS 客户端透明数据平面验收。
+
+`mosdns-runtime` 从 SHA-256 固定的 `jasonxtt/mosdns` 提交 `2ac30e867a7b40ee0ef70ef85b7dcf7ce56d48d0` 重建 `v0.6.4-foxos1`，把 `golang.org/x/crypto` 与 `golang.org/x/net` 提升到已修复版本。CI 验证版本、入口、`MOSDNS_AUTO_INIT=0`、不存在外部初始化 URL，并用包内配置启动后回读进程仍在运行。Mihomo 与 MosDNS 运行时都是 scratch，只复制静态二进制、CA、时区数据和 mode 1777 的空 `/tmp`；预制第三方 tar 不再跟踪或作为组包回退输入。
 
 成功后提供：
 
@@ -29,7 +31,7 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 
 | 级别 | 已证明 | 未证明 |
 |---|---|---|
-| 自动测试 | 结构化配置、回滚、恢复、DHCP 计算、UI、静态脚本 | RouterOS 命令运行和物理设备行为 |
+| 自动测试 | 结构化配置、回滚、恢复、DHCP 计算、UI、静态脚本、三镜像构建/契约/扫描 | RouterOS 命令运行和物理设备行为 |
 | Linux namespace | FoxOS 非 root HTTPS 管理面、CA/SAN、路由回程、管理 LAN 路径 | RouterOS Container、FastTrack、Mihomo 透明入口 |
 | 实体待验收 | 无 | 首装/升级、Lease 写入、真实客户端出口、binary restore |
 
@@ -38,12 +40,15 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 组包器把三张输入镜像转换成指定 amd64 的单层、未压缩 Docker v1 tar，并复制：
 
 - `mihomo-config/`、`mosdns-config/`。
+- `provenance/` 中两份组件来源锁，记录源码 SHA-256、固定提交、构建器和依赖提升。
 - 唯一拓扑来源 `site-config.rsc`。
 - 只读 preflight/plan、两阶段安装、HTTPS verify、受控 DNS plan/apply。
 - pending/promote 升级和 rollback 脚本。
 - `QUICK-INSTALL.md`、`RELEASE-MANIFEST.txt`、`SHA256SUMS`。
 
 组包拒绝填充的 Mihomo Secret、私钥、节点链接、凭据 URL 和常见敏感字段。MosDNS 9099 API 必须绑定容器 loopback，未使用的第三方管理 UI 不允许进入包。外层另生成 `.sha256`。
+
+组包脚本要求调用方显式提供 `FOXOS_IMAGE`、`MIHOMO_IMAGE`、`MOSDNS_IMAGE`，不会读取仓库中的历史二进制。Core CI 与 Release workflow 只在三张输入镜像完成各自 Trivy 门禁后调用组包器。
 
 `site-config.rsc` 定义管理桥、存储、网段、四个服务地址和 `home.arpa` hostname。默认值只是示例。所有 RouterOS 脚本要求先 import 同一份清单；安装器把完整 `FOXOS_SITE_*` 环境交给后端，前端再从 `GET /api/v1/site` 读取，不维护第二份拓扑。
 

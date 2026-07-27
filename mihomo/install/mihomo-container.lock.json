@@ -1,0 +1,15 @@
+{
+  "image": "foxos/mihomo:v1.19.29-foxos1",
+  "upstreamRepository": "https://github.com/MetaCubeX/mihomo",
+  "upstreamVersion": "v1.19.29",
+  "sourceArchive": "https://github.com/MetaCubeX/mihomo/archive/refs/tags/v1.19.29.tar.gz",
+  "sourceArchiveSha256": "1db1cd49c233b67701b596fbd8a963f418ebeca4cb497f38a0e7cd706ea4c630",
+  "builder": "golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2",
+  "dependencyOverrides": {
+    "golang.org/x/crypto": "v0.52.0",
+    "golang.org/x/net": "v0.55.0",
+    "golang.org/x/oauth2": "v0.27.0"
+  },
+  "runtimeBase": "scratch",
+  "runtimeConfigSource": "packaged-mount-only"
+}

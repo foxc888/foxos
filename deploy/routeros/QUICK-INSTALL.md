@@ -75,7 +75,7 @@ cd foxos-full-amd64-<commit>
 sha256sum --check SHA256SUMS
 ```
 
-macOS 使用 `shasum -a 256 -c`。三个镜像 tar 是 RouterOS 所需的单层、未压缩 Docker v1 archive，不要继续解压或转换。RouterOS preflight 只检查文件存在性和最小大小，密码学 checksum 必须在上传前由工作站验证。
+macOS 使用 `shasum -a 256 -c`。三个镜像 tar 是 RouterOS 所需的单层、未压缩 Docker v1 archive，不要继续解压或转换。它们由 workflow 从固定来源构建并逐张扫描；同时审核 `provenance/*.lock.json`。RouterOS preflight 只检查文件存在性和最小大小，密码学 checksum 必须在上传前由工作站验证。
 
 ## 3. 上传并保存回滚点
 
@@ -86,6 +86,8 @@ disk1/site-config.rsc
 disk1/foxos-amd64.tar
 disk1/mihomo_amd64.tar
 disk1/mosdns-amd64.tar
+disk1/provenance/mihomo-container.lock.json
+disk1/provenance/mosdns-container.lock.json
 disk1/mihomo-config/
 disk1/mosdns-config/
 disk1/preflight.rsc

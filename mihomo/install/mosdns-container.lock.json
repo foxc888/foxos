@@ -1,12 +1,16 @@
 {
-  "image": "foxos/mosdns-t:v0.6.4-2ac30e8",
+  "image": "foxos/mosdns:v0.6.4-foxos1",
+  "upstreamRepository": "https://github.com/jasonxtt/mosdns",
   "upstreamVersion": "v0.6.4",
-  "upstreamRevision": "2ac30e8",
-  "architecture": "linux/amd64",
-  "imageId": "sha256:3a286d5ed3da02465a8307d4f0d7027799bcd3128852c359dd9f1e2631382fcb",
-  "imageDigest": "sha256:3a286d5ed3da02465a8307d4f0d7027799bcd3128852c359dd9f1e2631382fcb",
-  "sourceArchive": "mosdns-t-v0.6.4-2ac30e8-amd64.tar",
-  "sourceArchiveSha256": "dfcb131671a1c755f0cb59cf794246fdda7e815f5f036010d237f28ebc6ea25e",
+  "upstreamRevision": "2ac30e867a7b40ee0ef70ef85b7dcf7ce56d48d0",
+  "sourceArchive": "https://github.com/jasonxtt/mosdns/archive/2ac30e867a7b40ee0ef70ef85b7dcf7ce56d48d0.tar.gz",
+  "sourceArchiveSha256": "a2f63da93ae917e7c5d319cb99cc88a68b437c8eb2e40447a61b935767e3e37c",
+  "builder": "golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2",
+  "dependencyOverrides": {
+    "golang.org/x/crypto": "v0.52.0",
+    "golang.org/x/net": "v0.55.0"
+  },
+  "runtimeBase": "scratch",
   "runtimeConfigSource": "packaged-mount-only",
   "runtimeAutoInit": false
 }

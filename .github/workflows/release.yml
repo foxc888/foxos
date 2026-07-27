@@ -52,7 +52,7 @@ jobs:
     name: Build RouterOS image (${{ matrix.platform }})
     needs: quality
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -70,12 +70,45 @@ jobs:
       - name: Install bundle tools
         run: sudo apt-get update -qq && sudo apt-get install --yes ripgrep
       - uses: docker/setup-buildx-action@v4
-      - name: Build RouterOS image archive
-        run: docker buildx build --platform "${{ matrix.platform }}" --build-arg FOXOS_VERSION="${GITHUB_REF_NAME}" --output "type=docker,dest=${{ matrix.name }}" .
+      - name: Build FoxOS image archive
+        run: docker buildx build --platform "${{ matrix.platform }}" --target foxos-runtime --build-arg FOXOS_VERSION="${GITHUB_REF_NAME}" --output "type=docker,dest=${{ matrix.name }}" .
+      - name: Build amd64 Mihomo and MosDNS image archives
+        if: matrix.platform == 'linux/amd64'
+        run: |
+          docker buildx build --platform linux/amd64 --target mihomo-runtime --tag "foxos-mihomo-release:${GITHUB_SHA}" --output type=docker,dest=mihomo-amd64.tar .
+          docker buildx build --platform linux/amd64 --target mosdns-runtime --tag "foxos-mosdns-release:${GITHUB_SHA}" --output type=docker,dest=mosdns-amd64.tar .
+      - name: Scan FoxOS release image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          input: ${{ matrix.name }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Scan Mihomo release image
+        if: matrix.platform == 'linux/amd64'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          input: mihomo-amd64.tar
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Scan MosDNS release image
+        if: matrix.platform == 'linux/amd64'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          input: mosdns-amd64.tar
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
       - name: Assemble amd64 full-stack bundle
         if: matrix.platform == 'linux/amd64'
         env:
           FOXOS_IMAGE: ${{ github.workspace }}/foxos-amd64.tar
+          MIHOMO_IMAGE: ${{ github.workspace }}/mihomo-amd64.tar
+          MOSDNS_IMAGE: ${{ github.workspace }}/mosdns-amd64.tar
         run: |
           release_id="${GITHUB_REF_NAME//[^A-Za-z0-9._-]/-}"
           scripts/build-routeros-bundle.sh dist "$release_id"

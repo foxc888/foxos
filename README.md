@@ -150,8 +150,10 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 
 - FoxOS、Mihomo、MosDNS 三个单层、未压缩 Docker v1 tar，供 RouterOS 本地 `file=` 导入。
 - `mihomo-config/`、`mosdns-config/`、安装/启动/升级/回滚脚本。
-- `preflight.rsc`、`foxos-plan.rsc`、`QUICK-INSTALL.md`、`RELEASE-MANIFEST.txt`、`SHA256SUMS`。
+- `preflight.rsc`、`foxos-plan.rsc`、`QUICK-INSTALL.md`、`RELEASE-MANIFEST.txt`、组件 `provenance/` 和 `SHA256SUMS`。
 - 首次安装随机凭据；仓库和包内不预置真实 Token、密码或节点链接。
+
+三张 amd64 镜像都由同一次 CI 从固定来源构建并分别扫描，再把这些精确输入交给组包器；仓库不跟踪或隐式回退到预制 Mihomo/MosDNS tar。包内 provenance lock 记录上游版本、提交、源码归档 SHA-256、构建器和安全依赖提升。
 
 目标要求 RouterOS 7.21+、同版本 x86 `container` package、`container=yes`、站点清单指定的现有管理桥和存储，上传完成后仍至少有 512 MiB 可用空间。安装器不会创建管理桥、磁盘、RouterOS 管理地址或 REST 服务。
 
@@ -223,12 +225,12 @@ RouterOS 升级使用 pending/active/rollback 槽位。promote 前由旧版本�
 分支 push/PR 门禁执行：
 
 - Go 1.24：module compatibility、module verify、gofmt、vet、全量测试、覆盖率和 race。
-- Go 1.25 最新补丁：发布二进制与镜像构建、golangci-lint、gosec、govulncheck；Trivy 阻止带 HIGH/CRITICAL 已知漏洞的镜像发布。
+- Go 1.25 最新补丁：发布二进制与 FoxOS 镜像构建、golangci-lint、gosec、govulncheck；Trivy 分别阻止三张交付镜像中有修复版本的 HIGH/CRITICAL 漏洞。
 - Web：npm clean install、TypeScript、Vitest、npm audit、production build。
 - Playwright：桌面、平板、390px 移动端，覆盖深链接、浏览器前进后退、键盘、焦点锁定、失败降级、危险确认、发布与回滚。
 - 独立 `FoxOS CodeQL` workflow 分析 Go 与 TypeScript；Core CI 运行 Trivy、RouterOS 脚本静态检查、敏感材料和生成物检查。
 - Linux network namespace：非 root 80/443、CA/HTTPS、跳转、回程、管理路径和 fail-closed 出口 readiness。
-- amd64 FoxOS 镜像与全量 RouterOS 包构建、校验和 Artifact 上传。镜像内的 Mihomo 校验器从 SHA-256 固定的官方 `v1.19.29` 源码构建为 `v1.19.29-foxos1`，使用 Go 1.26.5，并把上游仍固定在已知 High 版本的 `x/crypto`、`x/net`、`x/oauth2` 提升到已修复版本；Trivy 扫描最终镜像，不把这三个第三方依赖加入忽略清单。
+- amd64 FoxOS、Mihomo、MosDNS 三镜像与全量 RouterOS 包构建、运行契约、校验和及 Artifact 上传。Mihomo 校验器和独立运行时共用 SHA-256 固定的官方 `v1.19.29` 源码与加固二进制；MosDNS 固定 `jasonxtt/mosdns` 的 `2ac30e867a7b...`。两者使用 Go 1.26.5，把命中的 `x/crypto`、`x/net`（Mihomo 另含 `x/oauth2`）提升到已修复版本，并以仅含静态二进制、CA、时区数据和空 `/tmp` 的 scratch 运行时交付。
 
 本地完整命令：
 

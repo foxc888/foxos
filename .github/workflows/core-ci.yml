@@ -174,6 +174,7 @@ jobs:
       - name: Whitespace and generated-file check
         run: |
           git diff --check
+          test -z "$(git ls-files 'mihomo/install/*.tar')"
           test ! -d node_modules
           test ! -d web/node_modules
           test ! -d web/playwright-report
@@ -208,11 +209,18 @@ jobs:
       - name: Install bundle tools
         run: sudo apt-get update -qq && sudo apt-get install --yes ripgrep
       - uses: docker/setup-buildx-action@v4
-      - name: Build FoxOS amd64 image
-        run: docker buildx build --platform linux/amd64 --tag "foxos-ci:${GITHUB_SHA}" --build-arg FOXOS_VERSION="${GITHUB_SHA}" --output type=docker,dest=foxos-amd64.tar .
-      - name: Verify bundled Mihomo semantic validator
+      - name: Build amd64 release images
         run: |
+          docker buildx build --platform linux/amd64 --target foxos-runtime --tag "foxos-ci:${GITHUB_SHA}" --build-arg FOXOS_VERSION="${GITHUB_SHA}" --output type=docker,dest=foxos-amd64.tar .
+          docker buildx build --platform linux/amd64 --target mihomo-runtime --tag "foxos-mihomo-ci:${GITHUB_SHA}" --output type=docker,dest=mihomo-amd64.tar .
+          docker buildx build --platform linux/amd64 --target mosdns-runtime --tag "foxos-mosdns-ci:${GITHUB_SHA}" --output type=docker,dest=mosdns-amd64.tar .
+      - name: Verify runtime image contracts
+        run: |
+          set -Eeuo pipefail
           docker load --input foxos-amd64.tar
+          docker load --input mihomo-amd64.tar
+          docker load --input mosdns-amd64.tar
+
           docker run --rm \
             --volume "${GITHUB_WORKSPACE}/mihomo/config:/config:ro" \
             --entrypoint /usr/local/bin/mihomo \
@@ -225,6 +233,25 @@ jobs:
             printf 'invalid Mihomo configuration unexpectedly passed semantic validation\n' >&2
             exit 1
           fi
+
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}/mihomo/config:/config:ro" \
+            "foxos-mihomo-ci:${GITHUB_SHA}" -t -d /tmp/mihomo -f /config/config.yaml
+          docker run --rm "foxos-mihomo-ci:${GITHUB_SHA}" -v | grep -F 'v1.19.29-foxos1'
+
+          docker run --rm --entrypoint /usr/bin/mosdns "foxos-mosdns-ci:${GITHUB_SHA}" version | grep -Fx 'v0.6.4-foxos1'
+          docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "foxos-mosdns-ci:${GITHUB_SHA}" | grep -Fx 'MOSDNS_AUTO_INIT=0'
+          if docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "foxos-mosdns-ci:${GITHUB_SHA}" | grep -q '^MOSDNS_CONFIG_INIT_URL='; then
+            printf 'MosDNS runtime still contains an external auto-initialization URL\n' >&2
+            exit 1
+          fi
+          cp -a mosdns-config "${RUNNER_TEMP}/mosdns-config"
+          mosdns_id=$(docker run --detach --rm \
+            --volume "${RUNNER_TEMP}/mosdns-config:/cus/mosdns" \
+            "foxos-mosdns-ci:${GITHUB_SHA}")
+          sleep 2
+          docker container inspect --format '{{.State.Running}}' "$mosdns_id" | grep -Fx true
+          docker stop --time 5 "$mosdns_id"
       - name: Scan FoxOS image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -233,9 +260,27 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+      - name: Scan Mihomo runtime image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          input: mihomo-amd64.tar
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Scan MosDNS runtime image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          input: mosdns-amd64.tar
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
       - name: Assemble and validate full bundle
         env:
           FOXOS_IMAGE: ${{ github.workspace }}/foxos-amd64.tar
+          MIHOMO_IMAGE: ${{ github.workspace }}/mihomo-amd64.tar
+          MOSDNS_IMAGE: ${{ github.workspace }}/mosdns-amd64.tar
         run: |
           scripts/build-routeros-bundle.sh dist "${GITHUB_SHA}"
           test -s "dist/foxos-full-amd64-${GITHUB_SHA}.tar.gz"

@@ -175,7 +175,7 @@
 }
 
 :put ("=== required files under " . $storageRoot . "/ ===")
-:local requiredFiles {"foxos-amd64.tar|1048576";"mihomo_amd64.tar|52428800";"mosdns-amd64.tar|5242880";"site-config.rsc|100";"preflight.rsc|100";"foxos-plan.rsc|100";"foxos-full-install.rsc|1000";"foxos-start-all.rsc|100";"SHA256SUMS|100";"RELEASE-MANIFEST.txt|100"}
+:local requiredFiles {"foxos-amd64.tar|1048576";"mihomo_amd64.tar|20971520";"mosdns-amd64.tar|5242880";"provenance/mihomo-container.lock.json|100";"provenance/mosdns-container.lock.json|100";"site-config.rsc|100";"preflight.rsc|100";"foxos-plan.rsc|100";"foxos-full-install.rsc|1000";"foxos-start-all.rsc|100";"SHA256SUMS|100";"RELEASE-MANIFEST.txt|100"}
 :foreach definition in=$requiredFiles do={
   :local separator [:find $definition "|"]
   :local fileName [:pick $definition 0 $separator]
