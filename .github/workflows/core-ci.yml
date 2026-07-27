@@ -81,11 +81,11 @@ jobs:
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
       - name: govulncheck
-        run: "$(go env GOPATH)/bin/govulncheck ./..."
+        run: '"$(go env GOPATH)/bin/govulncheck" ./...'
       - name: Install gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
       - name: gosec
-        run: "$(go env GOPATH)/bin/gosec -fmt sarif -out gosec.sarif ./..."
+        run: '"$(go env GOPATH)/bin/gosec" -fmt sarif -out gosec.sarif ./...'
       - name: Upload gosec report
         if: always()
         uses: actions/upload-artifact@v7
