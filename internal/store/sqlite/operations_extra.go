@@ -36,6 +36,24 @@ func (s *Store) Subscription(ctx context.Context, id string) (domain.Subscriptio
 	return s.scanSubscription(s.db.QueryRowContext(ctx, `SELECT id,name,url,enabled,interval_seconds,last_digest,last_success_at,last_attempt_at,last_error,created_at,updated_at FROM subscriptions WHERE id=?`, id))
 }
 
+func (s *Store) SetSubscriptionEnabled(ctx context.Context, id string, enabled bool) (domain.Subscription, error) {
+	if strings.TrimSpace(id) == "" {
+		return domain.Subscription{}, ErrNotFound
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET enabled=?,updated_at=? WHERE id=?`, boolInt(enabled), time.Now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return domain.Subscription{}, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return domain.Subscription{}, err
+	}
+	if count != 1 {
+		return domain.Subscription{}, ErrNotFound
+	}
+	return s.Subscription(ctx, id)
+}
+
 func (s *Store) Subscriptions(ctx context.Context) ([]domain.Subscription, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,url,enabled,interval_seconds,last_digest,last_success_at,last_attempt_at,last_error,created_at,updated_at FROM subscriptions ORDER BY name COLLATE NOCASE`)
 	if err != nil {

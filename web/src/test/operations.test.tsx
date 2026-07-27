@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import { saveApiToken } from "../api";
-import { MihomoOperations } from "../components/OperationsPanels";
+import { MihomoOperations, SubscriptionOperations } from "../components/OperationsPanels";
 import { server } from "./setup";
 
 describe("Mihomo operations panel", () => {
@@ -27,5 +27,25 @@ describe("Mihomo operations panel", () => {
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
     await waitFor(() => expect(publishCalls).toBe(1));
+  });
+});
+
+describe("Subscription operations panel", () => {
+  beforeEach(() => saveApiToken("s".repeat(40)));
+
+  it("toggles only enabled state and uses the server readback", async () => {
+    let body: unknown;
+    server.use(
+      http.get("/api/v1/subscriptions", () => HttpResponse.json([{ id: "source-a", name: "Primary", url: "https://example.invalid/redacted", enabled: true, interval: 3600 }])),
+      http.patch("/api/v1/subscriptions/source-a/enabled", async ({ request }) => {
+        body = await request.json();
+        return HttpResponse.json({ id: "source-a", name: "Primary", url: "https://example.invalid/redacted", enabled: false, interval: 3600 });
+      }),
+    );
+    render(<SubscriptionOperations notify={() => undefined} />);
+    const toggle = await screen.findByRole("checkbox", { name: "停用订阅 Primary" });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(body).toEqual({ enabled: false }));
+    expect(await screen.findByRole("checkbox", { name: "启用订阅 Primary" })).not.toBeChecked();
   });
 });

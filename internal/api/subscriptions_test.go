@@ -85,6 +85,40 @@ func TestSubscriptionPreviewSignsPlanAndUpdateQueuesJob(t *testing.T) {
 	}
 }
 
+func TestSubscriptionEnabledPatchPreservesSecretURLAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	const apiToken = "01234567890123456789012345678901"
+	store, err := storepkg.Open(filepath.Join(t.TempDir(), "foxos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	item := domain.Subscription{ID: "source-toggle", Name: "Private", URL: "https://user:secret@example.com/source?token=fixture", Enabled: true, Interval: 3600}
+	if err := store.SaveSubscription(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := New(&memoryNodes{nodes: map[string]domain.Node{}}, apiToken)
+	audit := &fakeAudit{}
+	mux := http.NewServeMux()
+	app.RegisterSubscriptions(mux, store, store, nil, nil, nil, nil, audit)
+	for attempt := 0; attempt < 2; attempt++ {
+		request := httptest.NewRequest(http.MethodPatch, "/api/v1/subscriptions/source-toggle/enabled", strings.NewReader(`{"enabled":false}`))
+		request.Header.Set("Authorization", "Bearer "+apiToken)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"enabled":false`) || strings.Contains(response.Body.String(), "secret") || strings.Contains(response.Body.String(), "fixture") {
+			t.Fatalf("attempt=%d status=%d body=%s", attempt, response.Code, response.Body.String())
+		}
+	}
+	stored, err := store.Subscription(context.Background(), item.ID)
+	if err != nil || stored.Enabled || stored.URL != item.URL {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+	if len(audit.events) != 2 || audit.events[0].Outcome != domain.AuditStarted || audit.events[1].Outcome != domain.AuditSucceeded {
+		t.Fatalf("audit=%+v", audit.events)
+	}
+}
+
 func TestSubscriptionDeleteRequiresSignedCurrentImpact(t *testing.T) {
 	const apiToken = "01234567890123456789012345678901"
 	store, err := storepkg.Open(filepath.Join(t.TempDir(), "foxos.db"))

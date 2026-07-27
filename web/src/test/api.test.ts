@@ -1,6 +1,6 @@
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, applyMihomoConfig, deleteProxyGroup, getApiToken, loadLiveSnapshot, planDeviceEgress, previewMihomoConfig, saveApiToken, type DevicePolicy, type EgressPlan, type MihomoDraft } from "../api";
+import { ApiError, applyMihomoConfig, commandRouterContainer, deleteProxyGroup, getApiToken, loadLiveSnapshot, planDeviceEgress, previewMihomoConfig, saveApiToken, type DevicePolicy, type EgressPlan, type MihomoDraft } from "../api";
 import { server } from "./setup";
 
 const token = "a".repeat(40);
@@ -19,6 +19,9 @@ function okHandlers() {
     http.get("/api/v1/device-policies", () => HttpResponse.json([])),
     http.get("/api/v1/proxy-groups", () => HttpResponse.json([])),
     http.get("/api/v1/audit-events", () => HttpResponse.json([])),
+    http.get("/api/v1/egress/capabilities", () => HttpResponse.json({ routerosConfigured: true, routerosOnline: true, modes: [] })),
+    http.get("/api/v1/routeros/dhcp/address-plan", () => HttpResponse.json({ configured: true, plan: { stateDigest: "d".repeat(64), ready: true, servers: [] } })),
+    http.get("/api/v1/jobs", () => HttpResponse.json([])),
   ];
 }
 
@@ -78,6 +81,9 @@ describe("FoxOS browser API", () => {
       http.get("/api/v1/device-policies", ({ request }) => { record(request); return HttpResponse.json([]); }),
       http.get("/api/v1/proxy-groups", ({ request }) => { record(request); return HttpResponse.json([]); }),
       http.get("/api/v1/audit-events", ({ request }) => { record(request); return HttpResponse.json([]); }),
+      http.get("/api/v1/egress/capabilities", ({ request }) => { record(request); return HttpResponse.json({ routerosConfigured: true, routerosOnline: true, modes: [] }); }),
+      http.get("/api/v1/routeros/dhcp/address-plan", ({ request }) => { record(request); return HttpResponse.json({ configured: true, plan: { stateDigest: "d".repeat(64), ready: true, servers: [] } }); }),
+      http.get("/api/v1/jobs", ({ request }) => { record(request); return HttpResponse.json([]); }),
     );
     await loadLiveSnapshot();
     expect(new Set(requested)).toEqual(new Set([
@@ -93,6 +99,9 @@ describe("FoxOS browser API", () => {
       "/api/v1/device-policies",
       "/api/v1/proxy-groups",
       "/api/v1/audit-events",
+      "/api/v1/egress/capabilities",
+      "/api/v1/routeros/dhcp/address-plan",
+      "/api/v1/jobs",
     ]));
   });
 
@@ -135,6 +144,19 @@ describe("FoxOS browser API", () => {
     const result = await planDeviceEgress(policy.id, policy);
     expect(result.plan.operations).toEqual([]);
     expect(result.plan.requiresConfirmation).toBe(true);
+  });
+
+  it("submits an owned RouterOS container command with the caller idempotency key", async () => {
+    let body: unknown;
+    server.use(http.post("/api/v1/routeros/containers/:id/commands/:command", async ({ params, request }) => {
+      expect(params).toEqual({ id: "*c1", command: "restart" });
+      body = await request.json();
+      return HttpResponse.json({ status: "QUEUED", job: { id: "job-container", kind: "routeros.container-command", status: "QUEUED", progress: 0, attempts: 0, createdAt: "2026-07-27T00:00:00Z", updatedAt: "2026-07-27T00:00:00Z" } }, { status: 202 });
+    }));
+
+    const result = await commandRouterContainer("*c1", "foxos:active", "restart", "container-restart-0123456789");
+    expect(result.job.kind).toBe("routeros.container-command");
+    expect(body).toEqual({ owner: "foxos:active", idempotencyKey: "container-restart-0123456789" });
   });
 
   it("keeps structured references on deletion conflicts", async () => {

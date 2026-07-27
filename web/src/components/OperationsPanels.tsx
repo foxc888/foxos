@@ -31,6 +31,7 @@ import {
   previewSubscription,
   restoreBackup,
   restoreMihomoSnapshot,
+  setSubscriptionEnabled,
   saveMihomoDraft,
   updateSubscription,
   waitForJob,
@@ -162,7 +163,7 @@ export function MihomoOperations({ notify }: { notify: Notice }) {
     }
   };
   return (
-    <section className="panel operations-panel">
+    <section className="panel operations-panel" id="mihomo-publish">
       <div className="panel-heading"><div><h2>Mihomo 配置发布</h2><p>草稿、脱敏 Diff、快照和任务状态</p></div><OperationBadge tone={loading ? "warning" : "ok"}>{loading ? "加载中" : "SQLite 草稿"}</OperationBadge></div>
       <div className="operation-form-grid">
         <label className="field"><span>运行模式</span><select value={draft.mode} onChange={(event) => setDraft((value) => ({ ...value, mode: event.target.value }))}><option value="rule">rule</option><option value="global">global</option><option value="direct">direct</option></select></label>
@@ -266,11 +267,24 @@ export function SubscriptionOperations({ notify }: { notify: Notice }) {
       notify(errorMessage(error, "订阅删除失败"), "warning");
     } finally { setBusy(false); }
   };
+  const toggleEnabled = async (item: Subscription) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const stored = await setSubscriptionEnabled(item.id, !item.enabled);
+      setItems((current) => current.map((candidate) => candidate.id === stored.id ? stored : candidate));
+      notify(`${stored.name} 已${stored.enabled ? "启用" : "停用"}并完成服务端回读`);
+    } catch (error) {
+      notify(errorMessage(error, "订阅启停失败"), "warning");
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <section className="panel operations-panel">
       <div className="panel-heading"><div><h2>订阅源</h2><p>受限抓取、预览、去重前的人工确认</p></div><Upload aria-hidden="true" className="green-text" size={20} /></div>
       <form className="operation-inline-form" onSubmit={add}><label className="field"><span>名称</span><input required value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field operation-grow"><span>HTTPS URL</span><input required inputMode="url" placeholder="https://…" value={url} onChange={(event) => setURL(event.target.value)} /></label><button className="button primary" disabled={busy} type="submit">添加</button></form>
-      <div className="subscription-list">{items.length ? items.map((item) => <div className="subscription-row" key={item.id}><div><strong>{item.name}</strong><small>{item.url}</small><small>{item.lastError ? "最近失败：" + item.lastError : item.lastSuccessAt ? "最近成功：" + item.lastSuccessAt : "尚未成功更新"}</small></div><div className="row-actions"><button className="button secondary compact" disabled={busy} onClick={() => void inspect(item)} type="button"><Eye size={14} />预览</button><button className="button primary compact" disabled={busy} onClick={() => void prepareUpdate(item)} type="button"><RefreshCw size={14} />更新</button><button aria-label={"删除订阅 " + item.name} className="icon-button danger-icon" disabled={busy} onClick={() => void prepareDelete(item)} title="删除订阅" type="button"><Trash2 size={15} /></button></div></div>) : <div className="operation-empty">暂无订阅源</div>}</div>
+      <div className="subscription-list">{items.length ? items.map((item) => <div className="subscription-row" key={item.id}><div><strong>{item.name}</strong><small>{item.url}</small><small>{item.lastError ? "最近失败：" + item.lastError : item.lastSuccessAt ? "最近成功：" + item.lastSuccessAt : "尚未成功更新"}</small></div><div className="row-actions"><label className="toggle-control"><input aria-label={`${item.enabled ? "停用" : "启用"}订阅 ${item.name}`} checked={item.enabled} disabled={busy} onChange={() => void toggleEnabled(item)} type="checkbox" /><span>{item.enabled ? "已启用" : "已停用"}</span></label><button className="button secondary compact" disabled={busy} onClick={() => void inspect(item)} type="button"><Eye size={14} />预览</button><button className="button primary compact" disabled={busy || !item.enabled} onClick={() => void prepareUpdate(item)} type="button"><RefreshCw size={14} />更新</button><button aria-label={"删除订阅 " + item.name} className="icon-button danger-icon" disabled={busy} onClick={() => void prepareDelete(item)} title="删除订阅" type="button"><Trash2 size={15} /></button></div></div>) : <div className="operation-empty">暂无订阅源</div>}</div>
       {selected && preview ? <div className="operation-callout" role="status"><strong>{selected.name} 预览</strong><span>{preview.nodeCount} 个节点 · {preview.digest.slice(0, 16)}…</span></div> : null}
       {confirm ? <ConfirmDialog busy={busy} confirmLabel={confirm.action === "update" ? "确认更新订阅" : "确认删除订阅"} description={confirm.action === "update" ? "任务会重新抓取并核对预览摘要，再原子替换该来源的节点。" : "订阅定义和未被引用的来源节点将作为一个事务删除。"} impacts={["订阅：" + confirm.item.name, "地址：" + confirm.item.url, confirm.action === "update" && confirm.plan ? `新增 ${confirm.plan.addCount}，更新 ${confirm.plan.updateCount}，移除 ${confirm.plan.removeCount}` : `删除范围：${confirm.nodeCount} 个来源节点`]} onCancel={() => !busy && setConfirm(null)} onConfirm={() => void (confirm.action === "update" ? update() : remove())} title={confirm.action === "update" ? "确认更新订阅" : "确认删除订阅"} warnings={confirm.warnings} /> : null}
     </section>

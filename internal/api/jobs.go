@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/foxc888/foxos/internal/domain"
@@ -12,6 +13,10 @@ import (
 type JobManager interface {
 	Job(context.Context, string) (domain.Job, error)
 	Retry(context.Context, string) (domain.Job, error)
+}
+
+type jobListReader interface {
+	Jobs(context.Context, int) ([]domain.Job, error)
 }
 
 type jobOutput struct {
@@ -34,6 +39,32 @@ type jobOutput struct {
 func (s *Server) RegisterJobs(mux *http.ServeMux, manager JobManager) {
 	if manager == nil {
 		return
+	}
+	if reader, ok := manager.(jobListReader); ok {
+		mux.Handle("GET /api/v1/jobs", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			limit := 50
+			if value := r.URL.Query().Get("limit"); value != "" {
+				parsed, err := strconv.Atoi(value)
+				if err != nil || parsed < 1 || parsed > 100 {
+					problemCode(w, http.StatusBadRequest, "invalid_limit")
+					return
+				}
+				limit = parsed
+			}
+			jobs, err := reader.Jobs(r.Context(), limit)
+			if err != nil {
+				problemCode(w, http.StatusInternalServerError, "jobs_read_failed")
+				return
+			}
+			output := make([]jobOutput, 0, len(jobs))
+			for _, job := range jobs {
+				item := renderJob(job)
+				item.IdempotencyKey = ""
+				item.Request = nil
+				output = append(output, item)
+			}
+			writeJSON(w, http.StatusOK, output)
+		})))
 	}
 	mux.Handle("GET /api/v1/jobs/{id}", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		job, err := manager.Job(r.Context(), r.PathValue("id"))

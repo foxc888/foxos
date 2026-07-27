@@ -130,6 +130,7 @@ export type RouterContainer = {
   status: string;
   "root-dir": string;
   interface: string;
+  "start-on-boot": string;
 };
 
 export type DHCPRange = {
@@ -211,6 +212,21 @@ export type AuditEvent = {
 
 export type EgressType = "direct" | "mihomo-node" | "proxy-chain" | "l2tp" | "blocked";
 
+export type EgressCapability = {
+  mode: EgressType;
+  available: boolean;
+  experimental: boolean;
+  missing: string[];
+  evidence?: string[];
+};
+
+export type EgressCapabilities = {
+  routerosConfigured: boolean;
+  routerosOnline?: boolean;
+  modes: EgressCapability[];
+  error?: string;
+};
+
 export type DevicePolicy = {
   id: string;
   name: string;
@@ -250,7 +266,12 @@ export type LiveSnapshot = {
   policies: LoadResult<DevicePolicy[]>;
   groups: LoadResult<ProxyGroup[]>;
   audit: LoadResult<AuditEvent[]>;
+  capabilities: LoadResult<EgressCapabilities>;
+  dhcpAddressPlan: LoadResult<DHCPAddressPlan>;
+  jobs: LoadResult<Job[]>;
 };
+
+export type LiveResourceName = keyof LiveSnapshot;
 
 export type NodeProbe = {
   reachable: boolean;
@@ -471,26 +492,57 @@ async function settle<T>(promise: Promise<T>): Promise<LoadResult<T>> {
   }
 }
 
+const liveResourceNames: LiveResourceName[] = ["routeros", "mihomo", "mosdns", "nodes", "l2tp", "routes", "dhcpServers", "containers", "deviceInventory", "policies", "groups", "audit", "capabilities", "dhcpAddressPlan", "jobs"];
+
+const liveLoaders: Record<LiveResourceName, () => Promise<unknown>> = {
+  routeros: () => request<RouterOverview>("/api/v1/routeros/overview"),
+  mihomo: () => request<MihomoOverview>("/api/v1/mihomo/overview"),
+  mosdns: () => request<MosDNSOverview>("/api/v1/mosdns/overview"),
+  nodes: () => request<ApiNode[]>("/api/v1/nodes"),
+  l2tp: () => request<L2TPClient[]>("/api/v1/routeros/l2tp"),
+  routes: () => request<RouterRoute[]>("/api/v1/routeros/routes"),
+  dhcpServers: () => request<RouterDHCPServer[]>("/api/v1/routeros/dhcp-servers"),
+  containers: () => request<RouterContainer[]>("/api/v1/routeros/containers"),
+  deviceInventory: () => request<DeviceInventory>("/api/v1/devices"),
+  policies: () => request<DevicePolicy[]>("/api/v1/device-policies"),
+  groups: () => request<ProxyGroup[]>("/api/v1/proxy-groups"),
+  audit: () => request<AuditEvent[]>("/api/v1/audit-events?limit=100"),
+  capabilities: () => request<EgressCapabilities>("/api/v1/egress/capabilities"),
+  dhcpAddressPlan: () => request<{ configured: boolean; plan: DHCPAddressPlan }>("/api/v1/routeros/dhcp/address-plan").then((result) => result.plan),
+  jobs: () => request<Job[]>("/api/v1/jobs?limit=50"),
+};
+
+export async function loadLiveResources(names: LiveResourceName[]): Promise<Partial<LiveSnapshot>> {
+  const unique = [...new Set(names)];
+  const entries = await Promise.all(unique.map(async (name) => [name, await settle(liveLoaders[name]())] as const));
+  return Object.fromEntries(entries) as Partial<LiveSnapshot>;
+}
+
 export async function loadLiveSnapshot(): Promise<LiveSnapshot> {
-  const [routeros, mihomo, mosdns, nodes, l2tp, routes, dhcpServers, containers, deviceInventory, policies, groups, audit] = await Promise.all([
-    settle(request<RouterOverview>("/api/v1/routeros/overview")),
-    settle(request<MihomoOverview>("/api/v1/mihomo/overview")),
-    settle(request<MosDNSOverview>("/api/v1/mosdns/overview")),
-    settle(request<ApiNode[]>("/api/v1/nodes")),
-    settle(request<L2TPClient[]>("/api/v1/routeros/l2tp")),
-    settle(request<RouterRoute[]>("/api/v1/routeros/routes")),
-    settle(request<RouterDHCPServer[]>("/api/v1/routeros/dhcp-servers")),
-    settle(request<RouterContainer[]>("/api/v1/routeros/containers")),
-    settle(request<DeviceInventory>("/api/v1/devices")),
-    settle(request<DevicePolicy[]>("/api/v1/device-policies")),
-    settle(request<ProxyGroup[]>("/api/v1/proxy-groups")),
-    settle(request<AuditEvent[]>("/api/v1/audit-events?limit=100")),
-  ]);
-  return { routeros, mihomo, mosdns, nodes, l2tp, routes, dhcpServers, containers, deviceInventory, policies, groups, audit };
+  return await loadLiveResources(liveResourceNames) as LiveSnapshot;
 }
 
 export async function getDHCPAddressPlan(): Promise<{ configured: boolean; plan: DHCPAddressPlan }> {
   return request<{ configured: boolean; plan: DHCPAddressPlan }>("/api/v1/routeros/dhcp/address-plan");
+}
+
+export async function getEgressCapabilities(): Promise<EgressCapabilities> {
+  return request<EgressCapabilities>("/api/v1/egress/capabilities");
+}
+
+export async function listJobs(limit = 50): Promise<Job[]> {
+  return request<Job[]>(`/api/v1/jobs?limit=${Math.max(1, Math.min(100, Math.trunc(limit)))}`);
+}
+
+export async function getRouterContainers(): Promise<RouterContainer[]> {
+  return request<RouterContainer[]>("/api/v1/routeros/containers");
+}
+
+export async function commandRouterContainer(id: string, owner: string, command: "start" | "stop" | "restart", idempotencyKey: string): Promise<{ status: string; job: Job }> {
+  return request<{ status: string; job: Job }>(`/api/v1/routeros/containers/${encodeURIComponent(id)}/commands/${command}`, {
+    method: "POST",
+    body: JSON.stringify({ owner, idempotencyKey }),
+  });
 }
 
 export async function previewDHCPExpansion(input: { serverName: string; proposedRanges: string; requestedCapacity: number }): Promise<{ plan: DHCPExpansionPlan; confirmationToken: string; expiresInSeconds: number }> {
@@ -659,6 +711,10 @@ export async function listSubscriptions(): Promise<Subscription[]> {
 
 export async function createSubscription(input: Omit<Subscription, "id" | "lastDigest" | "lastSuccessAt" | "lastAttemptAt" | "lastError">): Promise<Subscription> {
   return request<Subscription>("/api/v1/subscriptions", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function setSubscriptionEnabled(id: string, enabled: boolean): Promise<Subscription> {
+  return request<Subscription>(`/api/v1/subscriptions/${encodeURIComponent(id)}/enabled`, { method: "PATCH", body: JSON.stringify({ enabled }) });
 }
 
 export async function planSubscriptionDelete(id: string): Promise<{ plan: SubscriptionDeletePlan; confirmationToken: string; expiresInSeconds: number; warnings: string[] }> {

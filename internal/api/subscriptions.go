@@ -53,6 +53,10 @@ type subscriptionDeleteStore interface {
 	DeleteSubscriptionWithNodes(context.Context, string) error
 }
 
+type subscriptionEnabledStore interface {
+	SetSubscriptionEnabled(context.Context, string, bool) (domain.Subscription, error)
+}
+
 type subscriptionDeletePlan struct {
 	Action         string   `json:"action"`
 	SubscriptionID string   `json:"subscriptionId"`
@@ -139,6 +143,55 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 		stored, err := store.Subscription(r.Context(), input.ID)
 		if err != nil {
 			problemCode(w, http.StatusInternalServerError, "subscription_state_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, renderSubscription(stored))
+	})))
+	mux.Handle("PATCH /api/v1/subscriptions/{id}/enabled", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enabler, ok := store.(subscriptionEnabledStore)
+		if !ok || audit == nil {
+			problemCode(w, http.StatusServiceUnavailable, "subscription_settings_unavailable")
+			return
+		}
+		var input struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := decode(r, &input); err != nil {
+			problem(w, http.StatusBadRequest, "invalid_json", err)
+			return
+		}
+		item, err := store.Subscription(r.Context(), r.PathValue("id"))
+		if err != nil {
+			problemCode(w, http.StatusNotFound, "subscription_not_found")
+			return
+		}
+		if item.Enabled == input.Enabled {
+			writeJSON(w, http.StatusOK, renderSubscription(item))
+			return
+		}
+		event := domain.AuditEvent{ID: randomID(), Action: "subscription.enabled", TargetID: item.ID, Outcome: domain.AuditStarted, Details: requestAuditDetails(r, map[string]any{"before": item.Enabled, "after": input.Enabled})}
+		if err := audit.SaveAudit(r.Context(), event); err != nil {
+			problemCode(w, http.StatusInternalServerError, "audit_start_failed")
+			return
+		}
+		stored, err := enabler.SetSubscriptionEnabled(r.Context(), item.ID, input.Enabled)
+		if err != nil {
+			event.Outcome = domain.AuditFailed
+			event.Details["errorClass"] = "subscription_settings_failed"
+			_ = audit.SaveAudit(r.Context(), event)
+			problem(w, http.StatusConflict, "subscription_settings_failed", err)
+			return
+		}
+		if stored.Enabled != input.Enabled {
+			event.Outcome = domain.AuditFailed
+			event.Details["errorClass"] = "subscription_settings_readback_failed"
+			_ = audit.SaveAudit(r.Context(), event)
+			problemCode(w, http.StatusConflict, "subscription_settings_readback_failed")
+			return
+		}
+		event.Outcome = domain.AuditSucceeded
+		if err := audit.SaveAudit(r.Context(), event); err != nil {
+			problemCode(w, http.StatusInternalServerError, "audit_finalize_failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, renderSubscription(stored))
@@ -320,5 +373,7 @@ func displaySubscriptionURL(raw string) string {
 	if parsed.RawQuery != "" {
 		parsed.RawQuery = "redacted"
 	}
+	parsed.User = nil
+	parsed.Fragment = ""
 	return parsed.String()
 }

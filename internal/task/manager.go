@@ -192,6 +192,13 @@ func (m *Manager) Job(ctx context.Context, id string) (domain.Job, error) {
 	return m.store.Job(ctx, id)
 }
 
+func (m *Manager) Jobs(ctx context.Context, limit int) ([]domain.Job, error) {
+	if m == nil {
+		return nil, errors.New("job manager is unavailable")
+	}
+	return m.store.Jobs(ctx, limit)
+}
+
 func (m *Manager) Retry(ctx context.Context, id string) (domain.Job, error) {
 	job, err := m.store.Job(ctx, id)
 	if err != nil {

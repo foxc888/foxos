@@ -29,7 +29,7 @@ function appHandlers({ mihomoStatus = 200, dynamic = true }: { mihomoStatus?: nu
     http.get("/api/v1/routeros/routes", () => HttpResponse.json([{ ".id": "*r1", "dst-address": "0.0.0.0/0", gateway: "wan-gateway", distance: "1", active: "true", disabled: "false" }])),
     http.get("/api/v1/routeros/dhcp-servers", () => HttpResponse.json([{ ".id": "*d1", name: "dhcp-lan", interface: "bridge-lan", "address-pool": "lan-pool", running: "true", disabled: "false" }])),
     http.get("/api/v1/routeros/dhcp/address-plan", () => HttpResponse.json({ configured: true, plan: { stateDigest: "d".repeat(64), ready: true, servers: [{ serverName: "dhcp-lan", interface: "bridge-lan", running: true, poolNames: ["lan-pool"], network: "10.0.0.0/24", gateway: "10.0.0.1", ranges: [{ start: "10.0.0.100", end: "10.0.0.200", capacity: 101 }], configuredCapacity: 101, excludedWithinPool: 0, dynamicCapacity: 101, dynamicOccupied: 2, remaining: 99, utilizationPercent: 1.98, reservationSpaceCapacity: 153, reservationUsed: 0, reservationRemaining: 153, risk: "normal", conflicts: [], ready: true }] } })),
-    http.get("/api/v1/routeros/containers", () => HttpResponse.json([{ ".id": "*c1", name: "foxos", comment: "foxos:container:foxos", status: "running", "root-dir": "disk1/foxos", interface: "veth-foxos" }])),
+    http.get("/api/v1/routeros/containers", () => HttpResponse.json([{ ".id": "*c1", name: "foxos", comment: "foxos:active", status: "running", "root-dir": "disk1/foxos", interface: "veth-foxos", "start-on-boot": "true" }])),
     http.get("/api/v1/devices", () => HttpResponse.json({ sourceAvailable: true, observedAt: "2026-07-27T00:00:00Z", devices: [
       { macAddress: "AA:BB:CC:DD:EE:FF", alias: "", tags: [], vendor: "Framework", hostName: "test-laptop", ipAddress: "10.0.0.20", interface: "bridge-lan", dhcpServer: "dhcp-lan", online: true, lastKnownOnline: true, status: "online", firstSeen: "2026-07-26T00:00:00Z", lastSeen: "2026-07-27T00:00:00Z", updatedAt: "2026-07-27T00:00:00Z" },
       { macAddress: "AA:BB:CC:DD:EE:00", alias: "", tags: [], vendor: "", hostName: "test-phone", ipAddress: "10.0.0.21", interface: "bridge-lan", dhcpServer: "dhcp-lan", online: true, lastKnownOnline: true, status: "online", firstSeen: "2026-07-26T00:00:00Z", lastSeen: "2026-07-27T00:00:00Z", updatedAt: "2026-07-27T00:00:00Z" },
@@ -38,6 +38,13 @@ function appHandlers({ mihomoStatus = 200, dynamic = true }: { mihomoStatus?: nu
     http.get("/api/v1/device-policies", () => HttpResponse.json([])),
     http.get("/api/v1/proxy-groups", () => HttpResponse.json([])),
     http.get("/api/v1/audit-events", () => HttpResponse.json([])),
+    http.get("/api/v1/egress/capabilities", () => HttpResponse.json({ routerosConfigured: true, routerosOnline: true, modes: [{ mode: "direct", available: true, experimental: false, missing: [] }, { mode: "blocked", available: true, experimental: false, missing: [] }, { mode: "mihomo-node", available: false, experimental: true, missing: ["transparent_ingress_unverified"] }, { mode: "proxy-chain", available: false, experimental: true, missing: ["transparent_ingress_unverified"] }, { mode: "l2tp", available: false, experimental: true, missing: ["per_policy_l2tp_fib_table_missing"] }] })),
+    http.get("/api/v1/jobs", () => HttpResponse.json([])),
+    http.get("/api/v1/mihomo/draft", () => HttpResponse.json({ id: "active", mode: "rule", mixedPort: 7890, allowLan: false, rules: ["MATCH,DIRECT"], revision: 1 })),
+    http.get("/api/v1/mihomo/snapshots", () => HttpResponse.json([])),
+    http.get("/api/v1/subscriptions", () => HttpResponse.json([])),
+    http.get("/api/v1/alerts", () => HttpResponse.json([])),
+    http.get("/api/v1/backups", () => HttpResponse.json([])),
   ];
 }
 
@@ -57,19 +64,18 @@ describe("App", () => {
     expect(mihomoCard).not.toBeNull();
     await waitFor(() => expect(within(routerCard!).getByText("在线")).toBeInTheDocument());
     expect(within(mihomoCard!).getByText("不可用")).toBeInTheDocument();
-    expect(await screen.findByText("test-laptop")).toBeInTheDocument();
-    expect(await screen.findByText("Node A")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 2, name: "地址容量" })).toBeInTheDocument();
+    expect(screen.getByText("dhcp-lan")).toBeInTheDocument();
   });
 
   it("marks a successfully loaded non-service resource as live", async () => {
     server.use(...appHandlers());
     render(<App />);
 
-    const heading = await screen.findByRole("heading", { level: 2, name: "RouterOS 设备" });
+    const heading = await screen.findByRole("heading", { level: 2, name: "地址容量" });
     const panel = heading.closest<HTMLElement>("section");
     expect(panel).not.toBeNull();
     await waitFor(() => expect(within(panel!).getByText("实时")).toBeInTheDocument());
-    expect(within(panel!).getByRole("img", { name: "正常" })).toBeInTheDocument();
   });
 
   it("initialises from a deep link and responds to history navigation", async () => {
@@ -80,8 +86,40 @@ describe("App", () => {
 
     window.history.pushState(null, "", "#routeros");
     fireEvent.popState(window);
-    expect(await screen.findByRole("heading", { level: 1, name: "RouterOS" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: "网络与地址" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
+  });
+
+  it("waits for a container command and reads RouterOS state back", async () => {
+    let status = "running";
+    let commandCalls = 0;
+    server.use(...appHandlers());
+    server.use(
+      http.get("/api/v1/routeros/containers", () => HttpResponse.json([{ ".id": "*c1", name: "foxos", comment: "foxos:active", status, "root-dir": "disk1/foxos", interface: "veth-foxos", "start-on-boot": "true" }])),
+      http.post("/api/v1/routeros/containers/:id/commands/:command", async ({ params, request }) => {
+        commandCalls += 1;
+        expect(params).toEqual({ id: "*c1", command: "stop" });
+        const body = await request.json() as { owner: string; idempotencyKey: string };
+        expect(body.owner).toBe("foxos:active");
+        expect(body.idempotencyKey).toMatch(/^container-stop-/);
+        return HttpResponse.json({ status: "QUEUED", job: { id: "job-container-stop", kind: "routeros.container-command", status: "QUEUED", progress: 0, attempts: 0, createdAt: "2026-07-27T00:00:00Z", updatedAt: "2026-07-27T00:00:00Z" } }, { status: 202 });
+      }),
+      http.get("/api/v1/jobs/job-container-stop", () => {
+        status = "stopped";
+        return HttpResponse.json({ id: "job-container-stop", kind: "routeros.container-command", status: "SUCCEEDED", progress: 100, attempts: 1, result: { status: "stopped" }, createdAt: "2026-07-27T00:00:00Z", updatedAt: "2026-07-27T00:00:01Z" });
+      }),
+    );
+    window.history.replaceState(null, "", "#network");
+    render(<App />);
+
+    const stop = await screen.findByRole("button", { name: "停止" });
+    expect(stop).toBeEnabled();
+    fireEvent.click(stop);
+    fireEvent.click(stop);
+    expect(await screen.findByText(/已停止，RouterOS 状态已回读/)).toBeInTheDocument();
+    expect(commandCalls).toBe(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: "启动" })).toBeEnabled());
+    expect(screen.getByText("已启用")).toBeInTheDocument();
   });
 
   it("does not present a running RouterOS L2TP session as a TCP probe", async () => {
@@ -218,7 +256,9 @@ describe("App", () => {
     await waitFor(() => expect(nodePicker).toBeEnabled());
     fireEvent.change(nodePicker, { target: { value: "node-a" } });
     fireEvent.change(nodePicker, { target: { value: "node-b" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "名称" }), { target: { value: "工作出口链" } });
+    const chainPanel = screen.getByRole("heading", { name: "链式代理组" }).closest<HTMLElement>("section");
+    expect(chainPanel).not.toBeNull();
+    fireEvent.change(within(chainPanel!).getByRole("textbox", { name: "名称" }), { target: { value: "工作出口链" } });
     fireEvent.click(screen.getByRole("button", { name: "保存组" }));
     await waitFor(() => expect(savedBody).toMatchObject({ name: "工作出口链", type: "chain", nodeIds: ["node-a", "node-b"] }));
     expect(publishCalls).toBe(0);

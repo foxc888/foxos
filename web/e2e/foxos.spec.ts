@@ -10,9 +10,11 @@ type MockOptions = {
 };
 
 type MockCalls = {
+  containerCommands: unknown[];
   deviceMetadata: unknown[];
   egressExecutions: unknown[];
   mihomoApply: number;
+  resourceReads: Record<string, number>;
 };
 
 const observedAt = "2026-07-27T00:00:00Z";
@@ -36,12 +38,15 @@ async function json(route: Route, body: unknown, status = 200) {
 
 async function mockApi(page: Page, options: MockOptions = {}) {
   let jobReads = 0;
+  let containerStatus = "running";
+  let containerCommand = "";
   let storedPolicy: Record<string, unknown> | undefined;
-  const calls: MockCalls = { deviceMetadata: [], egressExecutions: [], mihomoApply: 0 };
+  const calls: MockCalls = { containerCommands: [], deviceMetadata: [], egressExecutions: [], mihomoApply: 0, resourceReads: {} };
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (request.method() === "GET") calls.resourceReads[path] = (calls.resourceReads[path] ?? 0) + 1;
 
     if (path === "/api/v1/routeros/overview" && options.routerosFailure) {
       await json(route, { configured: true, online: false, error: "routeros_unavailable" }, 503);
@@ -107,7 +112,18 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       return;
     }
     if (path === "/api/v1/routeros/containers") {
-      await json(route, [{ ".id": "*c1", name: "foxos", comment: "foxos:container:foxos", status: "running", "root-dir": "disk1/foxos", interface: "veth-foxos" }]);
+      await json(route, [{ ".id": "*c1", name: "foxos", comment: "foxos:active", status: containerStatus, "root-dir": "disk1/foxos", interface: "veth-foxos", "start-on-boot": "true" }]);
+      return;
+    }
+    if (path.startsWith("/api/v1/routeros/containers/") && path.includes("/commands/") && request.method() === "POST") {
+      containerCommand = path.split("/").at(-1) ?? "";
+      calls.containerCommands.push(request.postDataJSON());
+      await json(route, { status: "QUEUED", job: { id: "job-container-command", kind: "routeros.container-command", status: "QUEUED", progress: 0, attempts: 0, createdAt: observedAt, updatedAt: observedAt } }, 202);
+      return;
+    }
+    if (path === "/api/v1/jobs/job-container-command") {
+      containerStatus = containerCommand === "stop" ? "stopped" : "running";
+      await json(route, { id: "job-container-command", kind: "routeros.container-command", status: "SUCCEEDED", progress: 100, attempts: 1, result: { status: containerStatus }, createdAt: observedAt, updatedAt: "2026-07-27T00:00:01Z" });
       return;
     }
     if (path === "/api/v1/devices" && request.method() === "GET") {
@@ -143,6 +159,14 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       return;
     }
     if (path === "/api/v1/audit-events") {
+      await json(route, []);
+      return;
+    }
+    if (path === "/api/v1/egress/capabilities") {
+      await json(route, { routerosConfigured: true, routerosOnline: true, modes: [{ mode: "direct", available: true, experimental: false, missing: [] }, { mode: "blocked", available: true, experimental: false, missing: [] }, { mode: "mihomo-node", available: false, experimental: true, missing: ["transparent_ingress_unverified"] }, { mode: "proxy-chain", available: false, experimental: true, missing: ["transparent_ingress_unverified"] }, { mode: "l2tp", available: false, experimental: true, missing: ["per_policy_l2tp_fib_table_missing"] }] });
+      return;
+    }
+    if (path === "/api/v1/jobs" && request.method() === "GET") {
       await json(route, []);
       return;
     }
@@ -290,6 +314,35 @@ async function expectNoA11yViolations(page: Page) {
   expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
 }
 
+async function expectLayoutIntegrity(page: Page, view: string, mobile: boolean) {
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  const violations = await page.evaluate(({ isMobile }) => {
+    const selector = "main, .topbar, .page-content, h1, h2, .panel, .summary-card, .button, .container-command, .data-mode, input, select, textarea";
+    const elements = Array.from(document.querySelectorAll<HTMLElement>(selector));
+    const messages: string[] = [];
+    for (const element of elements) {
+      const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden" || !element.getClientRects().length || element.closest('[aria-hidden="true"]')) continue;
+      const rect = element.getBoundingClientRect();
+      const label = element.getAttribute("aria-label") || element.textContent?.trim().slice(0, 48) || element.tagName.toLowerCase();
+      const intentionallyScrollable = Boolean(element.closest(".table-wrap, .chain-builder-row"));
+      if (!intentionallyScrollable && (rect.left < -1 || rect.right > window.innerWidth + 1)) {
+        messages.push(`${label}: horizontal bounds ${rect.left.toFixed(1)}..${rect.right.toFixed(1)} / ${window.innerWidth}`);
+      }
+      if (element.matches("h1, h2, .button, .container-command, .data-mode") && (element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1)) {
+        messages.push(`${label}: clipped ${element.clientWidth}x${element.clientHeight} < ${element.scrollWidth}x${element.scrollHeight}`);
+      }
+      if (isMobile && element.matches("button:not(.sidebar-scrim):not(.skip-link), input, select")) {
+        const target = element.matches("input, select") ? element.closest("label") ?? element : element;
+        const targetHeight = target.getBoundingClientRect().height;
+        if (targetHeight < 43.5) messages.push(`${label}: touch target height ${targetHeight.toFixed(1)}`);
+      }
+    }
+    return messages;
+  }, { isMobile: mobile });
+  expect(violations, `${view}:\n${violations.join("\n")}`).toEqual([]);
+}
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("foxos.apiToken", "e2e-token-".padEnd(40, "x"));
@@ -305,15 +358,71 @@ test("renders independently verifiable service state without horizontal overflow
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.width + 1);
 });
 
+test("captures the documented 1440 by 900 overview", async ({ page }, testInfo) => {
+  test.skip(!process.env.UPDATE_DOC_SCREENSHOTS || testInfo.project.name !== "desktop", "documentation screenshot generation is opt-in and desktop-only");
+  await mockApi(page);
+  await page.goto("/#overview");
+  await expect(page.getByRole("heading", { level: 1, name: "总览" })).toBeVisible();
+  await expect(page.locator(".data-mode")).toContainText("15 / 15");
+  expect(page.viewportSize()).toEqual({ width: 1440, height: 900 });
+  await page.screenshot({ path: "../docs/screenshots/overview-desktop.jpg", type: "jpeg", quality: 90, fullPage: false });
+});
+
 test("keeps all core views inside the viewport", async ({ page }, testInfo) => {
   await mockApi(page);
-  for (const view of ["overview", "proxies", "devices", "operations"]) {
+  for (const view of ["overview", "network", "devices", "proxies", "operations", "settings"]) {
     await page.goto(`/#${view}`);
     await expect(page.getByRole("main")).toBeVisible();
     const dimensions = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
     if (testInfo.project.name === "mobile") expect(dimensions.width).toBe(390);
     expect(dimensions.scrollWidth, `${view} root overflow`).toBeLessThanOrEqual(dimensions.width + 1);
+    await expectLayoutIntegrity(page, view, testInfo.project.name === "mobile");
   }
+});
+
+test("pauses resource polling while hidden and refreshes on visibility and command", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "one browser project is sufficient for timer semantics");
+  await page.clock.install({ time: new Date("2026-07-27T00:00:00Z") });
+  const calls = await mockApi(page);
+  await page.goto("/#overview");
+  await expect(page.getByRole("heading", { level: 1, name: "总览" })).toBeVisible();
+  await page.waitForLoadState("networkidle");
+  const initialReads = calls.resourceReads["/api/v1/routeros/overview"] ?? 0;
+  expect(initialReads).toBeGreaterThan(0);
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.fastForward(45_000);
+  expect(calls.resourceReads["/api/v1/routeros/overview"]).toBe(initialReads);
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: false });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.fastForward(300);
+  await expect.poll(() => calls.resourceReads["/api/v1/routeros/overview"] ?? 0).toBe(initialReads + 1);
+
+  await page.getByRole("button", { name: "刷新全部状态" }).click();
+  await expect.poll(() => calls.resourceReads["/api/v1/routeros/overview"] ?? 0).toBe(initialReads + 2);
+});
+
+test("backs off page polling after a resource failure", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "one browser project is sufficient for timer semantics");
+  await page.clock.install({ time: new Date("2026-07-27T00:00:00Z") });
+  const calls = await mockApi(page, { routerosFailure: true });
+  await page.goto("/#overview");
+  await page.waitForLoadState("networkidle");
+  const initialReads = calls.resourceReads["/api/v1/routeros/overview"] ?? 0;
+  expect(initialReads).toBeGreaterThan(0);
+
+  await page.clock.fastForward(15_100);
+  await expect.poll(() => calls.resourceReads["/api/v1/routeros/overview"] ?? 0).toBe(initialReads + 1);
+  await page.clock.fastForward(29_500);
+  expect(calls.resourceReads["/api/v1/routeros/overview"]).toBe(initialReads + 1);
+  await page.clock.fastForward(600);
+  await expect.poll(() => calls.resourceReads["/api/v1/routeros/overview"] ?? 0).toBe(initialReads + 2);
 });
 
 test("keeps a failed RouterOS resource unavailable while other data remains visible", async ({ page }) => {
@@ -321,28 +430,44 @@ test("keeps a failed RouterOS resource unavailable while other data remains visi
   await page.goto("/#overview");
   const service = page.locator(".service-summary").filter({ hasText: "RouterOS" });
   await expect(service).toContainText("不可用");
-  await expect(page.getByText("测试节点")).toBeVisible();
+  await expect(page.locator(".service-summary").filter({ hasText: "Mihomo" })).toContainText("在线");
   await expect(page.getByText("全部已验证")).toHaveCount(0);
 });
 
 test("degrades a failed route resource without hiding DHCP and container state", async ({ page }) => {
   await mockApi(page, { routesFailure: true });
-  await page.goto("/#routeros");
+  await page.goto("/#network");
   await expect(page.getByText("路由数据不可用")).toBeVisible();
-  await expect(page.getByText("dhcp-lan")).toBeVisible();
+  await expect(page.getByText("dhcp-lan", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("foxos", { exact: true })).toBeVisible();
+});
+
+test("runs an owned container command once and confirms RouterOS readback", async ({ page }) => {
+  const calls = await mockApi(page);
+  await page.goto("/#network");
+  const container = page.getByRole("region", { name: "foxos" });
+  await expect(container).toContainText("当前运行状态运行中");
+  await expect(container).toContainText("开机自动启动已启用");
+  const stop = container.getByRole("button", { name: "停止" });
+  await stop.click();
+  await stop.click({ force: true });
+  await expect.poll(() => calls.containerCommands.length).toBe(1);
+  expect(calls.containerCommands[0]).toMatchObject({ owner: "foxos:active" });
+  await expect(page.getByRole("status")).toContainText("已停止，RouterOS 状态已回读");
+  await expect(container).toContainText("当前运行状态已停止");
+  await expect(container.getByRole("button", { name: "启动" })).toBeEnabled();
 });
 
 test("supports hash deep links and browser back navigation", async ({ page }, testInfo) => {
   await mockApi(page);
   await page.goto("/#proxies");
-  await expect(page.getByRole("heading", { name: "代理节点" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "代理与订阅" })).toBeVisible();
   if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "打开导航" }).click();
-  await page.getByRole("button", { name: "RouterOS" }).click();
-  await expect(page).toHaveURL(/#routeros$/);
+  await page.getByRole("button", { name: "网络与地址" }).click();
+  await expect(page).toHaveURL(/#network$/);
   await page.goBack();
   await expect(page).toHaveURL(/#proxies$/);
-  await expect(page.getByRole("heading", { name: "代理节点" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "代理与订阅" })).toBeVisible();
   await expect(page.getByRole("main")).toBeFocused();
 });
 
@@ -357,7 +482,7 @@ test("selects grid rows with arrow keys", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#devices");
   const grid = page.getByRole("grid", { name: "RouterOS 设备" });
-  await expect(grid.getByRole("columnheader")).toHaveCount(6);
+  await expect(grid.getByRole("columnheader")).toHaveCount(7);
   const rows = grid.getByRole("row").filter({ has: page.getByRole("gridcell") });
   await expect(rows).toHaveCount(2);
   await rows.first().focus();
@@ -460,7 +585,7 @@ test("traps focus in a dangerous-operation dialog and restores it on Escape", as
 
 test("shows the persisted rollback result after Mihomo publish", async ({ page }) => {
   await mockApi(page, { mihomoRollback: true });
-  await page.goto("/#operations");
+  await page.goto("/#proxies");
   await expect(page.getByRole("heading", { name: "Mihomo 配置发布" })).toBeVisible();
   await page.getByRole("button", { name: "生成预览" }).click();
   await expect(page.getByText("预览摘要")).toBeVisible();
@@ -473,7 +598,7 @@ test("shows the persisted rollback result after Mihomo publish", async ({ page }
 
 test("reports Mihomo publish success only after the persisted job succeeds", async ({ page }) => {
   const calls = await mockApi(page);
-  await page.goto("/#operations");
+  await page.goto("/#proxies");
   await page.getByRole("button", { name: "生成预览" }).click();
   await page.getByRole("button", { name: "确认发布" }).click();
   const dialog = page.getByRole("dialog", { name: "确认发布 Mihomo 配置" });
@@ -485,7 +610,7 @@ test("reports Mihomo publish success only after the persisted job succeeds", asy
 
 test("shows snapshot restore impact before accepting the confirmation", async ({ page }) => {
   await mockApi(page);
-  await page.goto("/#operations");
+  await page.goto("/#proxies");
   const snapshot = page.locator(".snapshot-row").filter({ hasText: "发布前快照" });
   await snapshot.getByRole("button", { name: "恢复" }).click();
   const dialog = page.getByRole("dialog", { name: "确认恢复 Mihomo 快照" });
@@ -496,7 +621,7 @@ test("shows snapshot restore impact before accepting the confirmation", async ({
 
 test("meets the automated accessibility baseline on critical views", async ({ page }) => {
   await mockApi(page);
-  for (const view of ["overview", "proxies", "devices", "operations"]) {
+  for (const view of ["overview", "network", "devices", "proxies", "operations", "settings"]) {
     await page.goto(`/#${view}`);
     await expect(page.getByRole("main")).toBeVisible();
     await expectNoA11yViolations(page);
