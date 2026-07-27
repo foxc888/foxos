@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -216,7 +217,7 @@ func loadLeaf(certificatePath, keyPath string) (*x509.Certificate, *ecdsa.Privat
 }
 
 func loadCertificate(path string) ([]byte, *x509.Certificate, error) {
-	body, err := os.ReadFile(path)
+	body, err := readTLSMaterial(path)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -232,7 +233,7 @@ func loadCertificate(path string) ([]byte, *x509.Certificate, error) {
 }
 
 func loadPrivateKey(path string) (*ecdsa.PrivateKey, error) {
-	body, err := os.ReadFile(path)
+	body, err := readTLSMaterial(path)
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +250,36 @@ func loadPrivateKey(path string) (*ecdsa.PrivateKey, error) {
 		return nil, errors.New("FoxOS TLS key must be ECDSA")
 	}
 	return ecdsaKey, nil
+}
+
+func readTLSMaterial(path string) ([]byte, error) {
+	const limit = 1 << 20
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	name := filepath.Base(path)
+	info, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > limit {
+		return nil, errors.New("TLS material is not a bounded regular file")
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 || len(body) > limit {
+		return nil, errors.New("TLS material size changed while reading")
+	}
+	return body, nil
 }
 
 func validateLeaf(leaf *x509.Certificate, key *ecdsa.PrivateKey, ca *x509.Certificate, hostname string, address net.IP, now time.Time) error {
@@ -278,15 +309,15 @@ func writePEM(path string, mode os.FileMode, blockType string, der []byte, repla
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	if err := temporary.Chmod(mode); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := pem.Encode(temporary, &pem.Block{Type: blockType, Bytes: der}); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -58,14 +59,34 @@ func SecureProxy(target *url.URL, proxyToken string) http.Handler {
 }
 
 func RedirectToHTTPS(hostname string) http.Handler {
+	validHostname := validHomeArpaHostname(hostname)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		target := "https://" + hostname + r.URL.EscapedPath()
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
-		}
 		w.Header().Set("Cache-Control", "no-store")
-		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		if !validHostname {
+			http.Error(w, "HTTPS redirect is unavailable", http.StatusInternalServerError)
+			return
+		}
+		target := (&url.URL{Scheme: "https", Host: hostname, Path: r.URL.Path, RawPath: r.URL.RawPath, ForceQuery: r.URL.ForceQuery, RawQuery: r.URL.RawQuery}).String()
+		w.Header().Set("Location", target)
+		w.WriteHeader(http.StatusPermanentRedirect)
 	})
+}
+
+func validHomeArpaHostname(value string) bool {
+	if value == "" || len(value) > 253 || value != strings.ToLower(value) || !strings.HasSuffix(value, ".home.arpa") {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func Serve(config ServerConfig) error {

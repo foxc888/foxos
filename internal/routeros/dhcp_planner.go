@@ -299,9 +299,15 @@ func analyzeDHCPServer(server DHCPServer, state BindingState) (DHCPServerCapacit
 }
 
 func validateDHCPPlanningBounds(state BindingState) error {
-	resources := len(state.Leases) + len(state.Pools) + len(state.Networks) + len(state.Addresses) + len(state.ARP) + len(state.DHCPServers)
-	if resources > maxDHCPPlanningResources || len(state.DHCPServers) > maxDHCPPlanningServers || len(state.Pools) > maxDHCPPlanningRanges {
+	if len(state.DHCPServers) > maxDHCPPlanningServers || len(state.Pools) > maxDHCPPlanningRanges {
 		return fmt.Errorf("%w: RouterOS state exceeds the planning boundary", ErrDHCPPlan)
+	}
+	resources := 0
+	for _, size := range []int{len(state.Leases), len(state.Pools), len(state.Networks), len(state.Addresses), len(state.ARP), len(state.DHCPServers)} {
+		if size > maxDHCPPlanningResources-resources {
+			return fmt.Errorf("%w: RouterOS state exceeds the planning boundary", ErrDHCPPlan)
+		}
+		resources += size
 	}
 	return nil
 }
@@ -461,7 +467,10 @@ func intervalCapacity(ranges []ipRange) int {
 	for _, candidate := range ranges {
 		capacity += uint64(candidate.last) - uint64(candidate.first) + 1
 	}
-	return min(int(capacity), maxDHCPPlanningHosts)
+	if capacity >= uint64(maxDHCPPlanningHosts) {
+		return maxDHCPPlanningHosts
+	}
+	return int(capacity)
 }
 
 func rangeContains(ranges []ipRange, number uint32) bool {
@@ -479,7 +488,27 @@ func rangesContainAll(outer, inner []ipRange) bool {
 }
 
 func renderDHCPRange(candidate ipRange) DHCPRange {
-	return DHCPRange{Start: ipv4String(candidate.first), End: ipv4String(candidate.last), Capacity: int(uint64(candidate.last)-uint64(candidate.first)) + 1}
+	capacity, _ := boundedPlanningCount(uint64(candidate.first), uint64(candidate.last))
+	return DHCPRange{Start: ipv4String(candidate.first), End: ipv4String(candidate.last), Capacity: capacity}
+}
+
+func boundedPlanningCount(first, last uint64) (int, bool) {
+	if last < first {
+		return 0, false
+	}
+	span := last - first
+	if span >= uint64(maxDHCPPlanningHosts) {
+		return 0, false
+	}
+	return int(span) + 1, true
+}
+
+func boundedIPv4Range(first, last uint64) (ipRange, bool) {
+	maxIPv4 := uint64(^uint32(0))
+	if first > maxIPv4 || last > maxIPv4 || last < first {
+		return ipRange{}, false
+	}
+	return ipRange{first: uint32(first), last: uint32(last)}, true
 }
 
 func formatPlanningRanges(ranges []ipRange) string {
@@ -691,12 +720,19 @@ func suggestExpansionRanges(before DHCPServerCapacity, requested int) []DHCPRang
 	for _, item := range blocked {
 		if cursor < uint64(item.first) && needed > 0 {
 			end := uint64(item.first) - 1
-			available := int(end-cursor) + 1
+			available, ok := boundedPlanningCount(cursor, end)
+			if !ok {
+				return []DHCPRange{}
+			}
 			if available > needed {
 				end = cursor + uint64(needed) - 1
 				available = needed
 			}
-			suggestions = append(suggestions, renderDHCPRange(ipRange{first: uint32(cursor), last: uint32(end)}))
+			candidate, ok := boundedIPv4Range(cursor, end)
+			if !ok {
+				return []DHCPRange{}
+			}
+			suggestions = append(suggestions, renderDHCPRange(candidate))
 			needed -= available
 		}
 		if uint64(item.last)+1 > cursor {
@@ -705,11 +741,18 @@ func suggestExpansionRanges(before DHCPServerCapacity, requested int) []DHCPRang
 	}
 	if cursor <= uint64(last) && needed > 0 {
 		end := uint64(last)
-		available := int(end-cursor) + 1
+		available, ok := boundedPlanningCount(cursor, end)
+		if !ok {
+			return []DHCPRange{}
+		}
 		if available > needed {
 			end = cursor + uint64(needed) - 1
 		}
-		suggestions = append(suggestions, renderDHCPRange(ipRange{first: uint32(cursor), last: uint32(end)}))
+		candidate, ok := boundedIPv4Range(cursor, end)
+		if !ok {
+			return []DHCPRange{}
+		}
+		suggestions = append(suggestions, renderDHCPRange(candidate))
 	}
 	return suggestions
 }

@@ -336,23 +336,6 @@ func (c *Client) EgressState(ctx context.Context) (EgressState, error) {
 	return state, nil
 }
 
-func requireManglePrerequisites(state EgressState, policy domain.DevicePolicy) error {
-	if err := requireAnchor(state.MangleRules, "prerouting", "foxos:anchor:mangle", egressMangleChain); err != nil {
-		return err
-	}
-	if hasActiveFastTrack(state.FilterRules) {
-		return fmt.Errorf("%w: active FastTrack can bypass policy routing", ErrEgressPrerequisite)
-	}
-	if !hasFibTable(state.RoutingTables, mihomoTable) {
-		return fmt.Errorf("%w: routing table %s with fib=yes is required", ErrEgressPrerequisite, mihomoTable)
-	}
-	if !hasMihomoGateway(state.Routes, state.MihomoAddress) {
-		return fmt.Errorf("%w: active foxos Mihomo transparent gateway route is required", ErrEgressPrerequisite)
-	}
-	_ = policy
-	return nil
-}
-
 func requireL2TPPrerequisites(state EgressState, policy domain.DevicePolicy) error {
 	if err := requireManglePrerequisitesWithoutMihomo(state); err != nil {
 		return err
@@ -417,19 +400,6 @@ func hasActiveFastTrack(rules []map[string]string) bool {
 func hasFibTable(tables []map[string]string, name string) bool {
 	for _, table := range tables {
 		if table["name"] == name && !disabled(table) && (strings.EqualFold(table["fib"], "true") || strings.EqualFold(table["fib"], "yes")) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasMihomoGateway(routes []map[string]string, addresses ...string) bool {
-	mihomoAddress := site.Default().MihomoAddress
-	if len(addresses) > 0 && net.ParseIP(addresses[0]) != nil {
-		mihomoAddress = addresses[0]
-	}
-	for _, route := range routes {
-		if route["dst-address"] == "0.0.0.0/0" && route["routing-table"] == mihomoTable && !disabled(route) && (route["gateway"] == mihomoAddress || route["gateway"] == mihomoAddress+"@main") && route["comment"] == "foxos:prerequisite:mihomo-transparent" {
 			return true
 		}
 	}

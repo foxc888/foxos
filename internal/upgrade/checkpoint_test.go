@@ -164,3 +164,18 @@ func TestRecoverDatabaseLeavesCompatibleDatabaseUntouched(t *testing.T) {
 		t.Fatal("compatible database was unexpectedly restored")
 	}
 }
+
+func TestReadCheckpointRejectsSymlink(t *testing.T) {
+	t.Parallel()
+	target := filepath.Join(t.TempDir(), "checkpoint.json")
+	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "upgrade.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := readCheckpoint(link); err == nil {
+		t.Fatal("expected symlinked upgrade checkpoint rejection")
+	}
+}

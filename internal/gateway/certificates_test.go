@@ -58,3 +58,17 @@ func TestEnsureCertificatesRejectsPartialOrMismatchedMaterial(t *testing.T) {
 		t.Fatal("expected partial material rejection")
 	}
 }
+
+func TestEnsureCertificatesRejectsSymlinkedMaterial(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(t.TempDir(), "outside.pem")
+	if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(directory, caCertificateName)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := EnsureCertificates(directory, "foxos.home.arpa", "10.0.0.4", time.Now()); err == nil {
+		t.Fatal("expected symlinked TLS material rejection")
+	}
+}

@@ -520,7 +520,12 @@ func writeDurableFile(path string, body []byte, mode os.FileMode) error {
 }
 
 func syncDirectory(path string) error {
-	directory, err := os.Open(path)
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	directory, err := root.Open(".")
 	if err != nil {
 		return err
 	}

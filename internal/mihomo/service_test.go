@@ -86,6 +86,21 @@ func TestServiceDraftUsesReachableMixedPortOnFirstRun(t *testing.T) {
 	}
 }
 
+func TestReadCurrentConfigRejectsSymlink(t *testing.T) {
+	t.Parallel()
+	target := filepath.Join(t.TempDir(), "target.yaml")
+	if err := os.WriteFile(target, []byte("mode: rule\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := readCurrentConfig(link); err == nil {
+		t.Fatal("expected symlinked Mihomo configuration rejection")
+	}
+}
+
 func TestRedactYAML(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

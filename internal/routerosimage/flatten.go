@@ -243,7 +243,7 @@ func unpackDockerArchive(inputPath, outputRoot string) (*os.Root, map[string]str
 			return nil, nil, fmt.Errorf("duplicate docker archive entry %q", name)
 		}
 		relativeName := filepath.FromSlash(name)
-		if err := root.MkdirAll(filepath.Dir(relativeName), 0o700); err != nil {
+		if err := mkdirAllInRoot(root, filepath.Dir(relativeName), 0o700); err != nil {
 			return nil, nil, err
 		}
 		output, err := root.OpenFile(relativeName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -262,6 +262,31 @@ func unpackDockerArchive(inputPath, outputRoot string) (*os.Root, map[string]str
 	}
 	succeeded = true
 	return root, files, nil
+}
+
+func mkdirAllInRoot(root *os.Root, name string, mode os.FileMode) error {
+	name = filepath.Clean(name)
+	if name == "." {
+		return nil
+	}
+	current := "."
+	for _, component := range strings.Split(name, string(filepath.Separator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		if err := root.Mkdir(current, mode); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		info, err := root.Stat(current)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("archive path component %q is not a directory", current)
+		}
+	}
+	return nil
 }
 
 func readLayer(archiveRoot *os.Root, layerName, dataRoot string, sequence int) ([]stagedEntry, []whiteout, int, error) {

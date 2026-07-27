@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -251,7 +252,20 @@ func (s *Service) ReconcileRestore(ctx context.Context, id string) (domain.Mihom
 }
 
 func readCurrentConfig(path string) ([]byte, error) {
-	file, err := os.Open(path)
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	name := filepath.Base(path)
+	entry, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !entry.Mode().IsRegular() || entry.Mode()&os.ModeSymlink != 0 || entry.Size() <= 0 || entry.Size() > 16<<20 {
+		return nil, errors.New("invalid live Mihomo configuration")
+	}
+	file, err := root.Open(name)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +274,14 @@ func readCurrentConfig(path string) ([]byte, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 16<<20 {
 		return nil, errors.New("invalid live Mihomo configuration")
 	}
-	return io.ReadAll(io.LimitReader(file, 16<<20+1))
+	body, err := io.ReadAll(io.LimitReader(file, 16<<20+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 || len(body) > 16<<20 {
+		return nil, errors.New("live Mihomo configuration size changed while reading")
+	}
+	return body, nil
 }
 
 func validDigest(value string) bool {

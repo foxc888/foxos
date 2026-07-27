@@ -48,7 +48,9 @@ func (v CommandValidator) Validate(ctx context.Context, body []byte) error {
 		}
 	}
 	if removeDir {
-		defer os.RemoveAll(dataDir)
+		defer func() {
+			_ = os.RemoveAll(dataDir)
+		}()
 	}
 	temp, err := os.CreateTemp(dataDir, ".foxos-validate-*.yaml")
 	if err != nil {

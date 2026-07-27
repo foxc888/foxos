@@ -287,7 +287,20 @@ func databaseSchemaVersion(path string) (int, error) {
 }
 
 func replaceDatabase(destination, source string) error {
-	input, err := os.Open(source)
+	sourceRoot, err := os.OpenRoot(filepath.Dir(source))
+	if err != nil {
+		return err
+	}
+	defer sourceRoot.Close()
+	sourceName := filepath.Base(source)
+	sourceInfo, err := sourceRoot.Lstat(sourceName)
+	if err != nil {
+		return err
+	}
+	if !sourceInfo.Mode().IsRegular() || sourceInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("upgrade rollback source is not a regular file")
+	}
+	input, err := sourceRoot.Open(sourceName)
 	if err != nil {
 		return err
 	}
@@ -334,9 +347,31 @@ func replaceDatabase(destination, source string) error {
 }
 
 func readCheckpoint(path string) (Checkpoint, error) {
-	body, err := os.ReadFile(path)
+	const maxCheckpointBytes = 1 << 20
+	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
 		return Checkpoint{}, err
+	}
+	defer root.Close()
+	name := filepath.Base(path)
+	info, err := root.Lstat(name)
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maxCheckpointBytes {
+		return Checkpoint{}, errors.New("upgrade checkpoint is not a bounded regular file")
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, maxCheckpointBytes+1))
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	if len(body) == 0 || len(body) > maxCheckpointBytes {
+		return Checkpoint{}, errors.New("upgrade checkpoint size changed while reading")
 	}
 	var checkpoint Checkpoint
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
@@ -388,7 +423,20 @@ func writeCheckpoint(path string, checkpoint Checkpoint) error {
 }
 
 func fileSHA256(path string) (string, error) {
-	file, err := os.Open(path)
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	name := filepath.Base(path)
+	info, err := root.Lstat(name)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("upgrade snapshot is not a regular file")
+	}
+	file, err := root.Open(name)
 	if err != nil {
 		return "", err
 	}

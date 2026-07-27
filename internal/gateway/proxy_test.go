@@ -40,3 +40,21 @@ func TestRedirectUsesCanonicalHomeArpaHost(t *testing.T) {
 		t.Fatalf("status=%d location=%s", response.Code, response.Header().Get("Location"))
 	}
 }
+
+func TestRedirectDoesNotTreatRequestPathAsAuthority(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://attacker.invalid//other.example/path?q=1", nil)
+	response := httptest.NewRecorder()
+	RedirectToHTTPS("foxos.home.arpa").ServeHTTP(response, request)
+	if response.Code != http.StatusPermanentRedirect || response.Header().Get("Location") != "https://foxos.home.arpa//other.example/path?q=1" {
+		t.Fatalf("status=%d location=%s", response.Code, response.Header().Get("Location"))
+	}
+}
+
+func TestRedirectRejectsInvalidPublicHostname(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://foxos.invalid/", nil)
+	response := httptest.NewRecorder()
+	RedirectToHTTPS("foxos.home.arpa@attacker.invalid").ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError || response.Header().Get("Location") != "" {
+		t.Fatalf("status=%d location=%s", response.Code, response.Header().Get("Location"))
+	}
+}
