@@ -1,32 +1,47 @@
-# 操作确认与计划执行
+# 操作计划与确认
 
-RouterOS 写入采用“预览”和“执行”分离接口。
+所有可能改变 RouterOS、Mihomo、订阅节点集或备份恢复状态的操作，都使用“预览/计划 -> 明确确认 -> 执行 -> 验证 -> 审计”。
 
-## 确认令牌
+## 令牌约束
 
-预览接口根据完整计划生成短期 HMAC 令牌。令牌绑定：
+- HMAC-SHA256 使用 `FOXOS_CONFIRMATION_KEY`。
+- 令牌绑定规范化后的完整计划，而不是按钮名称或资源 ID。
+- 默认五分钟过期。
+- 服务端持久记录令牌摘要，成功消费后不能重放。
+- 计划、资源前态或依赖摘要改变时必须重新生成。
+- API Token 与确认密钥必须不同。
 
-- 操作方法
-- RouterOS REST 路径
-- 请求内容
-- FoxOS 所有权标识
-- 过期时间
+## 前端确认
 
-任何字段发生变化后，原令牌立即失效。令牌最长有效 15 分钟，正式 UI 默认使用 5 分钟。
+危险 Dialog 展示：
 
-## 执行器限制
+- 操作目标与当前/目标状态。
+- 精确方法、路径、owner comment 或文件范围。
+- 受影响设备、节点、订阅或快照数量。
+- 前置警告、失败补偿和回滚结果。
 
-静态绑定执行器仅允许：
+确认按钮在影响范围被明确勾选前不可用。Dialog 具备语义标题、焦点锁定、Escape 关闭和焦点恢复；执行期间防止重复提交。
 
-- `PUT /rest/ip/dhcp-server/lease`
-- `PATCH /rest/ip/dhcp-server/lease/*ID`
+## RouterOS 执行
 
-同时必须满足：
+静态 Lease 和出口策略都连接真实 RouterOS REST Writer。Writer 在三层拒绝越界：
 
-- comment 以 `foxos:device:` 开头
-- 请求体 comment 与计划所有权一致
-- 计划非空且明确要求确认
-- 确认令牌未过期
-- 确认令牌对应的计划没有变化
+1. 计划器只产生允许的资源与字段。
+2. 执行器再次比较实时状态、前态摘要和 owner。
+3. Writer 对 HTTP 方法、REST 路径、RouterOS ID、字段和 `foxos:` comment 使用允许列表。
 
-当前实现使用模拟 Writer 测试安全边界。真实 RouterOS Writer 接入后仍受同一验证器约束。
+写后回读验证。中途失败按已执行操作逆序补偿；补偿失败与成功回滚使用不同错误分类。API 和审计不会把“请求已发送”当作成功。
+
+## Mihomo、订阅和恢复
+
+- Mihomo apply 令牌绑定草稿和生成配置 digest。
+- Mihomo snapshot restore 令牌绑定 snapshot ID。
+- 订阅 update 绑定抓取 digest、增删改数量和删除节点 ID。
+- 订阅 delete 绑定关联节点完整列表。
+- 备份 restore 绑定 backup ID、manifest digest、文件数和 Mihomo 是否存在。
+
+这些操作由持久任务执行。前端轮询任务直到终态，重启时未完成的 RUNNING/VERIFYING 会恢复到可检查的队列状态。
+
+## 审计
+
+审计记录 actor、来源 IP、动作、目标、脱敏 Diff/变更列表、关联任务、结果、回滚标志和错误分类。确认令牌、Authorization、密码、Controller Secret、节点 UUID/密码不会写入审计。

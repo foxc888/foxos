@@ -1,59 +1,50 @@
-# RouterOS Container 安装说明
+# RouterOS x86_64 部署说明
 
-> 当前文档描述最终部署结构。正式镜像发布后会补充可直接复制的命令和版本校验值。
+可直接部署的主入口是 [全量 QUICK-INSTALL](../deploy/routeros/QUICK-INSTALL.md)。本页说明资产选择和边界。
 
-## 前置条件
+## 目标要求
 
-- RouterOS v7
-- 已安装并启用 Container 功能
-- 支持的 CPU：amd64 或 arm64
-- 建议使用独立存储保存容器和数据
-- RouterOS 能访问 Mihomo、MosDNS 与 FoxOS 容器地址
+- RouterOS 7.21+，x86_64 CPU 对应 `architecture-name=x86`。
+- 与 RouterOS 完全同版本的 x86 `container` package。
+- 由设备操作者在物理控制台确认并启用 `container=yes`。
+- 已存在 `bridge-lan` 与 `10.0.0.1/24`。
+- 已挂载 `disk1`，上传后至少 512 MiB 可用。
+- 管理 IP `10.0.0.2`、`.3`、`.4` 未被占用。
 
-## 推荐地址
+地址和目录不是可随意替换的示例；全量包当前固定使用上述管理面。需要不同拓扑时必须重新审阅脚本，不能直接运行。
 
-| 组件 | 示例地址 | 用途 |
+## 发布资产
+
+Core CI 每个提交生成 `foxos-full-amd64-<sha>.tar.gz` 与外部 `.sha256`。包内包含三张 RouterOS 本地导入镜像、完整 Mihomo/MosDNS 配置、两阶段安装、升级、回滚、只读预检、计划、说明和内部 `SHA256SUMS`。
+
+镜像已经转换为 RouterOS 兼容的单层、未压缩 Docker v1 tar。不能把 GitHub ZIP、外层 `.tar.gz` 或 OCI layout 直接交给 `/container/add file=`。
+
+## 安装顺序
+
+1. 工作站验证两层 checksum。
+2. 上传解压目录内容到 `disk1/` 根。
+3. 保存 RouterOS export 与 binary backup。
+4. import `disk1/preflight.rsc`，只读。
+5. import `disk1/foxos-plan.rsc`，只读。
+6. 操作者明确确认精确影响与回滚。
+7. import `disk1/foxos-full-install.rsc`。
+8. 等三个容器均为 stopped。
+9. import `disk1/foxos-start-all.rsc`。
+10. 保存首次凭据并完成 live/ready、页面、依赖和测试设备验收。
+
+## 持久数据
+
+| RouterOS 路径 | 容器路径 | 内容 |
 |---|---|---|
-| RouterOS | 10.0.0.1 | 宿主和 REST API |
-| Mihomo | 10.0.0.2 | 代理与 Controller |
-| MosDNS | 10.0.0.3 | DNS，只读接入 |
-| FoxOS | 10.0.0.4 | Web 管理后台 |
+| `disk1/mihomo-config` | Mihomo `/root/.config/mihomo`、FoxOS `/data/mihomo` | 运行配置 |
+| `disk1/mosdns-config` | `/cus/mosdns` | MosDNS 配置 |
+| `disk1/foxos-data` | `/data` | SQLite |
+| `disk1/foxos-backups` | `/backups` | Mihomo/FoxOS 备份 |
 
-地址仅为示例，正式安装脚本会先检测冲突。
+升级只切换 FoxOS root-dir，复用上述数据。不要在新版本验收前删除旧 root-dir、旧镜像或 rollback 槽位。
 
-## 持久化目录
+## DNS 和所有权边界
 
-- `foxos/config`：运行配置
-- `foxos/data`：SQLite 数据库
-- `foxos/backups`：Mihomo 与 RouterOS 快照
-- `foxos/logs`：操作与诊断日志
+安装脚本不修改 DNS、DHCP、默认路由、NAT、Mangle 或防火墙。MosDNS 保持只读接入。所有脚本仅复用匹配 `foxos:` comment/marker 的资源，遇到同名用户资源则停止。
 
-升级时只替换容器 root-dir，不删除这些挂载目录。
-
-## 安装流程
-
-1. 检查 RouterOS 版本、架构、Container 和存储空间。
-2. 上传对应架构的 `foxos_*.tar`。
-3. 创建 veth 并加入容器 bridge。
-4. 配置 FoxOS 固定地址。
-5. 创建持久化 mounts。
-6. 导入并启动容器。
-7. 访问 FoxOS 初始化页面。
-8. 配置 RouterOS 和 Mihomo 连接。
-9. 执行只读检测。
-10. 用户确认后才启用写入能力。
-
-## DNS 边界
-
-安装脚本不会修改：
-
-- RouterOS DNS
-- DHCP 下发 DNS
-- Mihomo DNS
-- MosDNS 配置
-
-DNS 第一阶段只显示运行状态。
-
-## 卸载原则
-
-停止并删除 FoxOS Container 后，保留数据目录和备份。FoxOS 创建的 RouterOS 资源均带 `foxos:` 标识，可通过卸载向导单独清理，不影响用户原有规则。
+当前仓库没有提供自动卸载脚本。卸载或 RouterOS binary restore 都是破坏性操作，必须先列出精确目标、备份和恢复路径，并再次由设备操作者确认。

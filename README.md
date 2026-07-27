@@ -1,77 +1,63 @@
 # FoxOS
 
-FoxOS 是面向 RouterOS Container 的网络管理后台，用一个中文 Web 界面统一查看和管理 RouterOS、Mihomo 与 MosDNS。项目借鉴 [qianfree/ClashManager](https://github.com/qianfree/ClashManager) 的节点解析、策略组、配置生成和单文件部署思路，并增加 RouterOS 设备清单、安全确认、审计、部署与回滚能力。
+FoxOS 是面向 RouterOS Container 的网络运维后台，用一个高密度中文控制台管理 RouterOS、Mihomo 与 MosDNS。后端使用 Go 1.24、SQLite，前端使用 React、TypeScript、Vite。
 
-> 当前状态：可构建的发布候选版。Go/Web 自动化验证和 RouterOS 部署资产已接入；真实 RouterOS 设备联调仍必须在隔离环境完成。未实现的写入能力不会显示为成功。
+> 发布状态：代码和发布脚本已形成 release candidate，Go/Web/安全/E2E/RouterOS 静态门禁均已建立。尚未连接真实 RouterOS 设备，因此不能把自动化通过等同于生产部署验收。
 
-## 组件与边界
+![FoxOS 总览，数据源独立降级状态](docs/screenshots/overview-desktop.jpg)
 
-| 组件 | 默认示例地址 | 职责 |
+## 固定部署拓扑
+
+| 组件 | 管理地址 | 当前职责 |
 |---|---|---|
-| RouterOS | `10.0.0.1` | 宿主、DHCP、路由、原生 L2TP、防火墙 |
-| Mihomo | `10.0.0.2` | 代理节点、策略组与流量出口 |
-| MosDNS | `10.0.0.3:53` | DNS；当前阶段只读 |
-| FoxOS | `10.0.0.4:8090` | Web、API、SQLite、计划确认和审计 |
+| RouterOS | `10.0.0.1` | 宿主、DHCP、路由、L2TP、Container |
+| Mihomo | `10.0.0.2:9090` | Controller、节点、策略组、运行流量 |
+| MosDNS | `10.0.0.3:53` | DNS，只读 TCP 状态检查 |
+| FoxOS | `10.0.0.4:8090` | Web、API、SQLite、任务、审计与备份 |
 
-硬边界：
+RouterOS x86_64 CPU 在 `/system/resource` 中报告的 `architecture-name` 是 `x86`；发布包使用 Linux `amd64` 镜像。
 
-- 不修改 RouterOS DNS、DHCP 下发 DNS、Mihomo DNS 或 MosDNS 配置。
-- 不自动增加默认路由、NAT、Mangle 或全 LAN 代理。
-- 只有用户明确操作的设备才允许进入变更计划。
-- RouterOS L2TP 当前只读，密码永不进入 API 输出。
-- FoxOS 写入只允许带 `foxos:` 所有权标识的资源。
-- `10.0.0.1` 至 `10.0.0.4` 为管理面地址，策略设计必须旁路保护。
+## 能力状态
 
-## 已实现
+| 状态 | 能力 |
+|---|---|
+| 已实现并自动化验证 | 独立数据源状态、Hash 深链接、响应式与键盘访问；节点/组/设备资料；Mihomo 草稿、生成、脱敏 Diff、校验、快照、发布和失败回滚；订阅、告警、备份、审计、持久任务 |
+| 已实现但要求 RouterOS 前置资源 | 静态 DHCP Lease；设备出口 `direct`、`mihomo-node`、`proxy-chain`、`l2tp`、`blocked`；写入前必须具备 FoxOS anchor、路由表和网关等安全前置条件 |
+| 只读 | RouterOS 资源、接口、WAN/路由、DHCP、容器、L2TP；Mihomo 活动连接、流量、选择器、延迟；MosDNS TCP 可达状态 |
+| 暂未开放 | MosDNS 配置写入、DNS 接管、RouterOS 原生 L2TP CRUD、诊断包导出、多用户/RBAC |
+| 尚未验收 | 真实 RouterOS/Mihomo/MosDNS 设备部署、真实流量切换和物理回滚 |
 
-### Web
+### 可信状态
 
-- 总览、RouterOS、MosDNS、代理节点、设备管理、网络拓扑、日志、设置。
-- 明确显示连接中、实时数据或演示数据。
-- API Token 仅保存在当前浏览器。
-- RouterOS DHCP/ARP 设备、Mihomo 状态、节点、L2TP、审计实时读取。
-- 节点手动新增、删除、多行分享链接原子导入。
-- 单节点及批量 TCP 可达性探测。
-- 固定 IP：计划预览、警告、二次确认、执行、回读验证。
-- MosDNS 保持只读。
+页面不会用样例数据冒充在线：
 
-### 后端
+- 每个 RouterOS、Mihomo、MosDNS、设备、策略、节点和审计请求独立加载、成功或失败。
+- 单个接口失败只降级对应区域，不会让整页切换到静态数据。
+- 每项状态显示来源、最后更新时间，以及加载中、不可用或过期状态。
+- 只有对应实时接口明确返回在线，页面才显示在线。
+- TCP 建连、Mihomo 节点 HTTP 检查、当前策略出口 IP、RouterOS L2TP 会话分别显示，不互相替代。
 
-- Go HTTP 服务、Bearer Token、SQLite、健康与就绪接口。
-- 节点和策略组 CRUD。
-- SS、VMess、VLESS、Trojan、Hysteria2、SOCKS5、HTTP 分享链接解析。
-- 原子批量导入：任一链接或数据库写入失败时整批拒绝。
-- `select`、`url-test`、`fallback`、`load-balance` 策略组。
-- Mihomo YAML 生成、校验、快照、原子替换、热重载、健康检查和失败回滚基础。
-- RouterOS 资源、接口、DHCP Lease、ARP、L2TP 读取。
-- DHCP 与 ARP 合并为设备清单。
-- 静态租约 IP/MAC 冲突检测。
-- HMAC-SHA256 确认令牌绑定完整计划，五分钟过期、不可篡改、仅用一次。
-- RouterOS Writer 方法/路径/所有权双层允许列表。
-- 写后重新读取 Lease 并验证 MAC、IP、静态状态和 comment。
-- STARTED/SUCCEEDED/FAILED 审计。
+### 安全写入闭环
 
-### 发布
+Mihomo：
 
-- Go 与 Web CI。
-- 多阶段、非 root 容器镜像。
-- amd64/arm64 二进制和 RouterOS image tar 工作流。
-- RouterOS 只读预检、安装、升级、回滚模板。
-- 运行变量模板不包含真实密钥。
+```text
+SQLite 草稿 -> 生成 YAML -> 脱敏 Diff -> 校验 -> 快照
+-> 原子替换 -> 热重载 -> Controller 健康验证 -> 失败回滚
+```
 
-## 暂未开放
+RouterOS：
 
-- RouterOS 原生 L2TP 新增、编辑、删除。
-- RouterOS 设备出口策略路由执行器。
-- 链式代理从 UI 到 Mihomo 配置应用的完整闭环。
-- MosDNS 写入和 DNS 接管。
-- 真实 RouterOS、Mihomo、MosDNS 实机验收。
+```text
+读取实际状态 -> 生成精确计划 -> 用户确认 -> 单次签名令牌
+-> 允许列表写入 -> 回读验证 -> 审计 -> 失败补偿
+```
 
-UI 中这些区域可用于展示或编排，但不能把未执行的状态标为“已生效”。
+确认令牌绑定完整计划，五分钟过期且只能使用一次。节点和策略组删除前检查引用，拒绝产生悬空策略。长操作持久化为 `QUEUED`、`RUNNING`、`VERIFYING`、`SUCCEEDED`、`FAILED` 或 `ROLLED_BACK`，支持幂等提交、重试和重启恢复。
 
 ## 快速开发
 
-要求 Go 1.24+、Node.js 22+。
+要求 Go 1.24.x、Node.js 22.x。
 
 ```bash
 go mod download
@@ -80,10 +66,11 @@ go test ./...
 cd web
 npm ci
 npm run typecheck
+npm run test:unit
 npm run build
 ```
 
-运行：
+启动后端：
 
 ```bash
 export FOXOS_API_TOKEN="$(openssl rand -hex 32)"
@@ -91,358 +78,170 @@ export FOXOS_CONFIRMATION_KEY="$(openssl rand -hex 32)"
 go run ./cmd/server -listen :8090 -static web/dist -database data/foxos.db
 ```
 
-打开 `http://127.0.0.1:8090`，在设置页填入同一个 `FOXOS_API_TOKEN`。
+打开 `http://127.0.0.1:8090`，在设置页输入同一个 `FOXOS_API_TOKEN`。Token 仅保存在当前页面内存，刷新或关闭标签页后清除；旧版本遗留在 Web Storage 的 Token 会被迁移一次并立即删除。
 
 ## 运行配置
 
-必填：
+`FOXOS_API_TOKEN` 与 `FOXOS_CONFIRMATION_KEY` 必填、至少 32 字符、不得相同。依赖端点必须是私网或 loopback IP 字面量，禁止 URL 用户信息和开放公网目标。
 
-```text
-FOXOS_API_TOKEN=至少32字符
-FOXOS_CONFIRMATION_KEY=另一个至少32字符密钥
-```
+| 变量 | 全量包默认值 | 说明 |
+|---|---|---|
+| `FOXOS_API_TOKEN` | 首次安装随机生成 | Web/API Bearer Token |
+| `FOXOS_CONFIRMATION_KEY` | 首次安装随机生成 | 高风险计划签名密钥 |
+| `FOXOS_ROUTEROS_URL` | `http://10.0.0.1` | RouterOS REST 根地址 |
+| `FOXOS_ROUTEROS_USERNAME` | `foxos-service` | 专用服务用户 |
+| `FOXOS_ROUTEROS_PASSWORD` | 首次安装随机生成 | RouterOS 服务密码 |
+| `FOXOS_MIHOMO_URL` | `http://10.0.0.2:9090` | Mihomo Controller |
+| `FOXOS_MIHOMO_PROXY_URL` | `http://10.0.0.2:7890` | 当前策略出口探测代理 |
+| `FOXOS_MIHOMO_SECRET` | 首次安装随机生成 | Controller Secret |
+| `FOXOS_MIHOMO_LOCAL_CONFIG` | `/data/mihomo/config.yaml` | FoxOS 可写挂载路径 |
+| `FOXOS_MIHOMO_RUNTIME_CONFIG` | `/root/.config/mihomo/config.yaml` | Mihomo 进程内配置路径 |
+| `FOXOS_MIHOMO_BACKUP_DIR` | `/backups/mihomo` | 发布快照目录 |
+| `FOXOS_MOSDNS_URL` | `http://10.0.0.3:53` | 仅用于 TCP 53 状态检查 |
+| `FOXOS_BACKUP_DIR` | `/backups/foxos` | SQLite/Mihomo 管理备份 |
 
-RouterOS：
-
-```text
-FOXOS_ROUTEROS_URL=http://10.0.0.1
-FOXOS_ROUTEROS_USERNAME=foxos-service
-FOXOS_ROUTEROS_PASSWORD=仅运行时提供
-```
-
-Mihomo：
-
-```text
-FOXOS_MIHOMO_URL=http://10.0.0.2:9090
-FOXOS_MIHOMO_SECRET=Controller密钥
-FOXOS_MIHOMO_LOCAL_CONFIG=/data/mihomo/config.yaml
-FOXOS_MIHOMO_RUNTIME_CONFIG=/root/.config/mihomo/config.yaml
-FOXOS_MIHOMO_BACKUP_DIR=/backups/mihomo
-```
-
-不要提交实际 Token、密码、Controller secret、节点分享链接或带敏感字段的 RouterOS 导出。此前在聊天中暴露过的 GitHub PAT 也应撤销并重新生成。
+完整约束见 [运行配置](docs/configuration.md)。
 
 ## API
 
-健康接口无需认证：
+`GET /api/v1/health/live` 和 `GET /api/v1/health/ready` 无需认证。live 只表示进程存活；ready 会真实检查 SQLite、关键挂载以及已配置依赖。
 
-- `GET /api/v1/health/live`
-- `GET /api/v1/health/ready`
-
-业务接口使用：
+其余接口使用：
 
 ```http
 Authorization: Bearer <FOXOS_API_TOKEN>
 ```
 
-主要接口：
+主要接口组：
 
-- `GET/POST /api/v1/nodes`
-- `GET/PUT/DELETE /api/v1/nodes/{id}`
-- `POST /api/v1/nodes/import`
-- `POST /api/v1/nodes/{id}/probe`
-- `GET/POST /api/v1/proxy-groups`
-- `PUT/DELETE /api/v1/proxy-groups/{id}`
-- `GET/POST /api/v1/device-policies`
-- `GET/PUT/DELETE /api/v1/device-policies/{id}`
-- `GET /api/v1/routeros/overview`
-- `GET /api/v1/mihomo/overview`
-- `GET /api/v1/routeros/l2tp`
-- `POST /api/v1/routeros/plans/device-binding`
-- `POST /api/v1/routeros/plans/device-binding/execute`
-- `GET /api/v1/audit-events?limit=100`
+- 节点与策略组：`/api/v1/nodes`、`/api/v1/proxy-groups`
+- 设备与在线历史：`/api/v1/devices`、`/api/v1/device-policies`
+- RouterOS 状态：`/api/v1/routeros/overview`、`routes`、`dhcp-servers`、`containers`、`l2tp`
+- 受控写入：`/api/v1/routeros/plans/device-binding`、`/api/v1/routeros/plans/egress/{id}`
+- Mihomo：`/api/v1/mihomo/draft`、`config/preview`、`config/apply`、`snapshots`、`probes/{id}`
+- 运维：`/api/v1/jobs/{id}`、`subscriptions`、`alerts`、`backups`、`audit-events`
+- MosDNS：`GET /api/v1/mosdns/overview`，无写入接口
 
-读取节点不会返回密码、UUID 或完整凭据。详见 [API 速查](docs/api-reference.md)。
+请求体有固定大小上限，错误响应不返回内部密钥。节点读取不会返回密码、UUID 或完整凭据。完整方法和确认流程见 [API 参考](docs/api-reference.md)。
 
-## RouterOS 部署
+## RouterOS 全量部署包
 
-你的现有设备为 RouterOS x86_64，网络规划为：
+Core CI 为每个提交生成：
 
-| 组件 | 地址 |
+```text
+foxos-full-amd64-<commit>.tar.gz
+foxos-full-amd64-<commit>.tar.gz.sha256
+```
+
+发布包包含：
+
+- FoxOS、Mihomo、MosDNS 三个单层、未压缩 Docker v1 tar，供 RouterOS 本地 `file=` 导入。
+- `mihomo-config/`、`mosdns-config/`、安装/启动/升级/回滚脚本。
+- `preflight.rsc`、`foxos-plan.rsc`、`QUICK-INSTALL.md`、`RELEASE-MANIFEST.txt`、`SHA256SUMS`。
+- 首次安装随机凭据；仓库和包内不预置真实 Token、密码或节点链接。
+
+目标要求 RouterOS 7.21+、同版本 x86 `container` package、`container=yes`、现有 `bridge-lan`、`disk1`，上传完成后仍至少有 512 MiB 可用空间。
+
+安全顺序：
+
+1. 在工作站验证外层 `.sha256` 和包内 `SHA256SUMS`。
+2. 把解压后的完整目录内容上传到 RouterOS `disk1/`。
+3. 保存 RouterOS export 与 binary backup。
+4. 运行只读 `/import file-name=disk1/preflight.rsc`。
+5. 运行只读 `/import file-name=disk1/foxos-plan.rsc`。
+6. 审核精确影响和回滚路径，并取得操作者明确确认。
+7. 才运行 `/import file-name=disk1/foxos-full-install.rsc`。
+8. 等三个容器均为 `status=stopped`，再运行 `/import file-name=disk1/foxos-start-all.rsc`。
+
+安装器幂等复用匹配所有权的资源，遇到同名用户资源会失败关闭。容器名称是 `foxos-mihomo`、`foxos-mosdns`、`foxos-active`；对应 comment 是 `foxos:mihomo`、`foxos:mosdns`、`foxos:active`。
+
+完整步骤见 [QUICK-INSTALL](deploy/routeros/QUICK-INSTALL.md) 和 [发布、升级与回滚](docs/release-and-routeros.md)。
+
+## 安全边界
+
+- 永久保护 `10.0.0.1` 至 `10.0.0.4`，禁止为管理地址创建设备策略。
+- 不修改 RouterOS DNS、DHCP 下发 DNS、默认路由、NAT、Mangle 或用户防火墙。
+- 不接管没有 `foxos:` 所有权标识的 RouterOS 资源。
+- 出口执行器要求预置且回读验证 FoxOS anchor/路由表/网关；活动 FastTrack 会导致计划失败。
+- 订阅仅允许 HTTPS 443、无 URL 凭据、公共目标；逐次重解析防 DNS rebinding，最多三次重定向、2 MiB、15 秒。
+- RouterOS/Mihomo/MosDNS 配置端点只允许私网或 loopback IP 字面量，并禁用重定向。
+- CSP、安全响应头和 API `no-store` 已启用；容器以非 root 用户运行。
+- MosDNS 保持只读，L2TP 密码不会进入 API、日志或数据库输出。
+- 当前是单一 Bearer Token 模型，没有多用户/RBAC；不要把 8090 或 RouterOS REST 暴露到 WAN。
+
+不要提交密钥、节点链接、密码、Token、RouterOS 导出或真实公网信息。
+
+## 备份、恢复与升级
+
+FoxOS 备份包含 SQLite 和已配置的 Mihomo 配置，记录 SHA-256 清单，默认保留最近 20 份。恢复必须先获取预览与一次性确认令牌；恢复后校验 SQLite 与 Mihomo，失败时补偿，并保留任务和审计结果。
+
+RouterOS 升级使用 pending/active/rollback 槽位。升级前保存 RouterOS backup、FoxOS 备份与旧镜像；新容器通过 live/ready 和只读状态验证后才执行 promote。恢复与升级细节见 [备份恢复](docs/backup-restore.md) 和 [发布文档](docs/release-and-routeros.md)。
+
+## 故障排查
+
+| 现象 | 先检查 |
 |---|---|
-| RouterOS | `10.0.0.1` |
-| Mihomo Controller | `10.0.0.2:9090` |
-| MosDNS | `10.0.0.3:53` |
-| FoxOS | `10.0.0.4:8090` |
+| 页面所有数据源不可用 | 当前页面内存中的 API Token、401、FoxOS live/ready |
+| 只有 RouterOS 不可用 | REST URL、专用账号权限、www/www-ssl 访问范围、bridge 连通 |
+| 只有 Mihomo 不可用 | Controller 9090、Secret、配置挂载、Controller 日志 |
+| MosDNS 不可用 | TCP 53 监听、`FOXOS_MOSDNS_URL`、容器状态 |
+| 出口计划被拒绝 | 静态 IP、管理面保护、FoxOS anchor、FIB 表、Mihomo/L2TP 网关、FastTrack |
+| 发布后回滚 | 对应持久任务、Mihomo Controller、快照目录和审计错误分类 |
+| 容器无法启动 | 架构、同版本 container package、`container=yes`、磁盘、`/log/print where topics~"container"` |
 
-管理桥固定为 `bridge-lan`。因此应下载 `foxos-full-amd64-<commit>`，不要使用 arm64 镜像。全量包已经包含 FoxOS、Mihomo、MosDNS 三个镜像、两套完整配置目录和自动随机凭据的 RouterOS 安装脚本。解压后可以直接上传，不需要运行 PowerShell 或再次下载配置。
+故障材料必须先脱敏。不要上传 Authorization header、env list values、分享链接或 RouterOS export。
 
-### 推荐：全栈快速安装
+## 质量门禁
 
-完整操作见 [`deploy/routeros/QUICK-INSTALL.md`](deploy/routeros/QUICK-INSTALL.md)。最短流程是：
+Core CI 执行：
 
-1. 下载并解压最新绿色 Core CI 的 `foxos-full-amd64-<commit>`。
-2. 确认 RouterOS 已安装同版本 x86 `container` package、`container=yes`，并有至少 512 MiB 可用空间。
-3. 用 WinBox 上传文档列出的七项文件/目录。
-4. 用 `/file print` 确认三个镜像和两个配置入口文件都存在。
-5. 执行 `/import file-name=foxos-full-install.rsc`。
-6. 等三个容器全部 `status=stopped` 后执行 `/import file-name=foxos-start-all.rsc`。
-7. 启动脚本会在终端打印四个随机凭据；保存后打开 `http://10.0.0.4:8090`，使用打印出的 FoxOS Token。
+- Go 1.24：module verify、gofmt、vet、全量测试、覆盖率和 race。
+- Go 1.25 工具链：golangci-lint、gosec、govulncheck。
+- Web：npm clean install、TypeScript、Vitest、npm audit、production build。
+- Playwright：桌面、平板、390px 移动端，覆盖深链接、浏览器前进后退、键盘、焦点锁定、失败降级、危险确认、发布与回滚。
+- CodeQL、Trivy、RouterOS 脚本静态检查、敏感材料和生成物检查。
+- amd64 FoxOS 镜像与全量 RouterOS 包构建、校验和 Artifact 上传。
 
-必须分成两次 import：RouterOS 会异步解压 `/container/add file=...` 导入的镜像，而且首次不会自动启动；固定等待时间不能保证三张镜像都已完成。
+本地完整命令：
 
-安装脚本使用 RouterOS 当前脚本语法中的 `:rndstr`。如果终端提示不认识
-`rndstr`，先将 RouterOS 与 `container` package 一起升级到同一当前稳定版本，
-重启后重新安装。
+```bash
+go test -race -shuffle=on -count=1 ./...
+cd web
+npm run typecheck
+npm run test:unit
+npm run build
+npm run test:e2e
+cd ..
+scripts/check-routeros-scripts.sh
+scripts/check-sensitive-material.sh
+```
 
-快速安装不会修改 RouterOS DNS、DHCP DNS、Mihomo DNS、MosDNS、NAT、默认路由、Mangle 或现有防火墙。
-
-以下内容保留为“仅安装 FoxOS 单容器”的手动高级流程。
-
-### 第 1 步：下载 FoxOS 镜像
-
-在 GitHub 仓库打开：
+## 项目与文档
 
 ```text
-Actions → FoxOS Core CI → 最新一次绿色运行
-→ 页面底部 Artifacts
-→ foxos-full-amd64-<commit>
+cmd/server/                 HTTP 服务入口
+cmd/routeros-image/         RouterOS 单层镜像转换
+internal/api/               API、认证和确认边界
+internal/mihomo/            生成、发布、探测和回滚
+internal/routeros/          读取、计划、Writer、验证和补偿
+internal/subscription/      安全抓取、预览、更新和调度
+internal/task/              持久任务与恢复
+internal/backup/            备份与恢复
+internal/store/sqlite/      SQLite 持久化
+web/                        React UI、Vitest、Playwright
+deploy/routeros/            RouterOS 部署脚本
+scripts/                    质量与组包脚本
 ```
-
-下载的文件是 ZIP，先在电脑解压，得到 `foxos-amd64.tar`。不要把 ZIP 直接导入 RouterOS。
-
-如果分支尚未产生 Artifact，可以先合并 PR #2，再手动运行 `Release artifacts`，下载同名 amd64 tar。
-
-### 第 2 步：上传文件
-
-使用 WinBox 打开 `Files`，上传：
-
-```text
-foxos-amd64.tar
-deploy/routeros/preflight.rsc
-deploy/routeros/install.rsc
-```
-
-脚本上传后在 RouterOS 根目录中的文件名通常是 `preflight.rsc` 和 `install.rsc`。
-
-### 第 3 步：只读预检
-
-在 WinBox Terminal 执行：
-
-```routeros
-/import file-name=preflight.rsc
-```
-
-必须检查：
-
-- Architecture 是 `x86_64`。
-- RouterOS Container 已允许。
-- `10.0.0.4` 没有被占用。
-- 输出中存在你的 LAN 管理桥；默认安装脚本使用 `bridge-lan`。
-- `foxos-amd64.tar` 已上传且大小正常。
-- 磁盘空间足够。
-
-如果管理桥不是 `bridge-lan`，先用文本编辑器修改 `install.rsc` 中：
-
-```routeros
-:local managementBridge "你的实际桥名称"
-```
-
-不要为了匹配脚本而改动现有 LAN 或 DHCP。
-
-### 第 4 步：准备 RouterOS REST 服务账号
-
-不要让 FoxOS 使用 `admin`。以下命令创建最小化专用账号；把密码替换成你本地生成的强密码：
-
-```routeros
-/user/group/add name=foxos-rest policy=read,write,rest-api
-/user/add name=foxos-service group=foxos-rest password="替换为强密码" disabled=no
-```
-
-FoxOS 通过 RouterOS REST API 工作。当前 env 模板使用内网 HTTP：
-
-```routeros
-/ip/service/enable www
-/ip/service/set www port=80 address=10.0.0.0/24
-```
-
-这只把 RouterOS Web/REST 限制在管理网段，不应暴露到 WAN。若你的 RouterOS 已使用 `www-ssl` 和可信证书，可改用 HTTPS；不要直接把自签名 HTTPS 地址填入 FoxOS，因为当前客户端不会跳过证书校验。
-
-### 第 5 步：生成 FoxOS 密钥
-
-在 Windows PowerShell 执行两次，每次保存不同结果：
-
-```powershell
-[Convert]::ToHexString(
-  [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
-).ToLower()
-```
-
-分别用于：
-
-- `FOXOS_API_TOKEN`
-- `FOXOS_CONFIRMATION_KEY`
-
-两者至少 32 字符且不能相同。
-
-### 第 6 步：填写并导入 env
-
-下载 `deploy/routeros/foxos-env.example.rsc` 到电脑，复制为 `foxos-env.local.rsc`，只在本地副本中替换：
-
-```text
-FOXOS_API_TOKEN
-FOXOS_CONFIRMATION_KEY
-FOXOS_ROUTEROS_PASSWORD
-FOXOS_MIHOMO_SECRET
-```
-
-确认这些非秘密配置保持为：
-
-```text
-FOXOS_ROUTEROS_URL=http://10.0.0.1
-FOXOS_ROUTEROS_USERNAME=foxos-service
-FOXOS_MIHOMO_URL=http://10.0.0.2:9090
-FOXOS_MIHOMO_RUNTIME_CONFIG=/root/.config/mihomo/config.yaml
-```
-
-上传本地副本后执行：
-
-```routeros
-/import file-name=foxos-env.local.rsc
-/container/envs/print where list="foxos-env"
-```
-
-确认 key 全部存在即可，不要截图或复制 value。随后删除含明文的导入文件：
-
-```routeros
-/file/remove [find where name="foxos-env.local.rsc"]
-```
-
-### 第 7 步：安装 FoxOS
-
-再次确认 `install.rsc` 的管理桥名称，然后执行：
-
-```routeros
-/import file-name=install.rsc
-/container/print
-```
-
-脚本会：
-
-- 按 CPU 架构自动选择 `foxos-amd64.tar`。
-- 创建 `veth-foxos = 10.0.0.4/24`。
-- 把 veth 加入指定管理桥。
-- 创建持久化 `foxos-data` 和 `foxos-backups` mounts。
-- 导入 `foxos:active` 容器。
-
-脚本不会修改 DNS、默认路由、NAT、Mangle、防火墙或 DHCP DNS。
-
-镜像导入完成并显示 stopped 后启动：
-
-```routeros
-/container/start [find where comment="foxos:active"]
-/container/print
-/log/print where topics~"container"
-```
-
-### 第 8 步：打开和验证
-
-电脑浏览器打开：
-
-```text
-http://10.0.0.4:8090
-```
-
-在 FoxOS 设置页输入 `FOXOS_API_TOKEN`。然后依次确认：
-
-1. 总览显示“实时数据”，不是演示数据。
-2. RouterOS 显示在线。
-3. Mihomo 显示在线。
-4. MosDNS 只显示状态，不出现写入操作。
-5. 节点列表可读取并可进行 TCP 探测。
-6. 日志页面能看到审计记录。
-
-健康接口：
-
-```text
-http://10.0.0.4:8090/api/v1/health/live
-http://10.0.0.4:8090/api/v1/health/ready
-```
-
-### 第 9 步：第一次写入测试
-
-不要先操作主要设备。选择一台可随时重新联网的测试设备：
-
-1. 在设备管理中选择设备。
-2. 保持当前 IP，不修改出口策略。
-3. 点击固定 IP。
-4. 阅读 RouterOS 变更计划和警告。
-5. 确认执行。
-6. 在 RouterOS 检查该 Lease 为静态，并带有 `foxos:device:` comment。
-7. 确认设备能续租、访问网关和互联网。
-
-当前版本只执行静态 DHCP Lease；设备出口路由、链式代理写入和 L2TP 写入尚未开放。
-
-### 第 10 步：失败时停止与清理
-
-仅停止 FoxOS：
-
-```routeros
-/container/stop [find where comment="foxos:active"]
-```
-
-停止 FoxOS 不会停止 Mihomo 或 MosDNS，也不会恢复或修改 DNS，因为安装过程从未修改 DNS。
-
-完整升级、双槽回滚、备份、验收和故障排查见 [发布与 RouterOS 安装](docs/release-and-routeros.md)。
-
-## 安全执行闭环
-
-Mihomo：
-
-```text
-SQLite期望状态 → 临时YAML → 校验 → 快照
-→ 原子替换 → 热重载 → 健康检查 → 失败回滚
-```
-
-RouterOS：
-
-```text
-读取实际状态 → 生成计划 → 用户确认 → 单次令牌
-→ 允许列表写入 → 回读验证 → 审计
-```
-
-FoxOS 不接管没有 `foxos:` 标识的用户资源。
-
-## 项目结构
-
-```text
-cmd/server/                 服务入口
-internal/api/               HTTP API与认证
-internal/config/            运行配置
-internal/domain/            节点、策略组、设备策略
-internal/mihomo/            解析、配置生成、Controller与回滚
-internal/routeros/          REST读取、计划、Writer与验证
-internal/store/sqlite/      持久化
-web/                        React Web UI
-deploy/routeros/            RouterOS脚本与env模板
-docs/                       中文说明
-.github/workflows/          CI与发布构建
-```
-
-## 文档
 
 - [总体架构](docs/architecture.md)
+- [API 参考](docs/api-reference.md)
 - [运行配置](docs/configuration.md)
-- [RouterOS 连接](docs/routeros-setup.md)
-- [发布与 RouterOS 安装](docs/release-and-routeros.md)
-- [API 速查](docs/api-reference.md)
-- [节点管理](docs/node-management.md)
-- [设备管理](docs/device-management.md)
-- [RouterOS 原生 L2TP](docs/l2tp.md)
-- [备份与恢复](docs/backup-restore.md)
+- [设备策略](docs/device-management.md)
 - [操作确认](docs/operation-confirmation.md)
-- [操作审计](docs/logs.md)
-- [ClashManager 来源说明](docs/clashmanager-origin.md)
-- [Web 与 API 接线](docs/web-api-integration.md)
+- [备份恢复](docs/backup-restore.md)
+- [Web/API 状态语义](docs/web-api-integration.md)
+- [RouterOS 连接](docs/routeros-setup.md)
+- [RouterOS 全量安装](deploy/routeros/QUICK-INSTALL.md)
+- [发布、升级与回滚](docs/release-and-routeros.md)
 
-## 验证说明
-
-PR 合并前必须通过：
-
-- `go mod tidy` / `go mod verify`
-- `gofmt -l cmd internal`
-- `go test ./...`
-- Web `npm ci`、TypeScript 类型检查、Vite 生产构建
-- Docker amd64/arm64 构建
-
-自动化通过不等于生产 RouterOS 已验证。首次部署应在可恢复的隔离环境中完成，并保留 RouterOS 导出、SQLite 备份和旧容器槽位。
+自动化和模拟组包只能证明代码与资产一致。真实 RouterOS 写入前仍必须展示设备上的精确计划、影响范围、备份和回滚路径，并由操作者明确确认。

@@ -1,50 +1,81 @@
-# Web UI 与 FoxOS API 接线
+# Web UI 与 FoxOS API 状态语义
 
-本页说明 FoxOS Web UI 如何读取真实后端，以及页面何时显示演示数据。
+Web UI 只显示 API 返回或浏览器实际完成的检查，不内置会被当作实时状态的演示设备、节点或日志。
 
-## 数据模式
+## 独立数据源
 
-顶部状态栏明确显示：
+首轮加载并行请求：
 
-- **连接中**：浏览器正在请求 FoxOS API。
-- **实时数据**：RouterOS、Mihomo、节点、L2TP 和审计接口已完成读取。
-- **演示数据**：未配置 API Token、API 不可达、认证失败或任一必要接口失败。
+- RouterOS overview、routes、DHCP servers、containers。
+- Mihomo overview、MosDNS overview。
+- 节点、L2TP、设备库存、设备策略、代理组、审计。
 
-演示模式不会被标记为真实在线状态。UI 保留演示内容是为了安装前预览布局，不代表 RouterOS 或代理链路已经工作。
+每项维护独立状态：
 
-## 首次连接
+| 状态 | 含义 |
+|---|---|
+| `loading` | 正在请求，不推断在线 |
+| `live` | 该接口本次成功返回；服务是否在线仍取决于响应中的 `online` |
+| `stale` | 曾有数据，但刷新失败或超过 120 秒 |
+| `unavailable` | 尚无可用数据且请求失败 |
 
-1. 启动 FoxOS 后端。
-2. 打开 Web UI 的“设置”。
-3. 在“FoxOS API”中填写至少 32 个字符的 `FOXOS_API_TOKEN`。
-4. Token 只保存在当前浏览器的 Local Storage，不写入源码、GitHub 或 URL。
-5. 返回总览，点击“运行全链路检测”。
+单个接口失败只影响对应区域。旧数据可以在 `stale` 状态下供排障参考，但不能显示为实时或在线。每个资源区域显示 API 来源、最后成功时间和错误。
 
-生产部署时 Web UI 与 Go 后端同源，所有请求使用相对路径 `/api/v1/...`。本地开发时 Vite 只把 `/api` 转发到固定的 `127.0.0.1:8090`，不支持把 Token 转发到任意远端。
+## Token 生命周期
 
-## 已接入接口
+设置页要求至少 32 字符的 `FOXOS_API_TOKEN`。Token：
 
-| 页面 | 接口 | 当前行为 |
-|---|---|---|
-| 总览 | RouterOS/Mihomo overview | 判断控制面是否在线 |
-| 代理节点 | `GET /api/v1/nodes` | 读取 SQLite 节点 |
-| 代理节点 | `DELETE /api/v1/nodes/{id}` | 删除普通 Mihomo 节点 |
-| 代理节点 | `GET /api/v1/routeros/l2tp` | 合并显示 RouterOS 原生 L2TP，只读 |
-| 设备管理 | RouterOS overview devices | 显示 DHCP 与 ARP 合并设备清单 |
-| 日志 | `GET /api/v1/audit-events` | 显示持久化操作审计 |
+- 只保存在当前 JavaScript 页面内存。
+- 不写入 URL、SQLite、`localStorage` 或 `sessionStorage`。
+- 刷新或关闭标签页后清除，需要重新输入。
+- 旧版本遗留在 `sessionStorage` 的值只迁移一次，并同时删除两个 Web Storage 中的旧键。
 
-L2TP 不通过 Mihomo 节点 API 删除。设备“固定 IP”和“应用出口”仍保持预览交互，下一阶段接入计划确认与执行 API。
+生产部署中 Web 与 API 同源，业务请求使用相对路径 `/api/v1/...`。Vite 开发服务器只把 `/api` 转发到固定的 `127.0.0.1:8090`。
 
-## 尚未接入
+## 导航与可访问性
 
-- 节点新增/编辑时的完整协议字段提交
-- 机场订阅和 Sub-Store
-- 节点延迟、丢包、落地 IP 与地区检测
-- 设备静态绑定计划确认界面
-- 设备出口路由执行
-- 链式代理保存与 Mihomo 应用
-- MosDNS 状态适配器
+页面使用 Hash 路由，例如：
 
-## DNS 边界
+```text
+/#/overview
+/#/devices
+/#/proxies
+/#/operations
+```
 
-此阶段不会修改 RouterOS DNS、DHCP 下发 DNS、Mihomo DNS 或 MosDNS 配置。MosDNS 页面仍然是只读展示。
+直接打开深链接、浏览器前进和后退都会同步视图。切换视图后主标题获得程序化焦点，移动菜单关闭后焦点回到菜单按钮。
+
+交互约束：
+
+- 全站统一 `:focus-visible`。
+- Dialog 使用 `role=dialog`、`aria-modal`、标题关联、Tab 焦点锁定、Escape 关闭和焦点恢复。
+- 状态和操作结果通过 `aria-live` 发布。
+- 设备与节点表格支持方向键、Home、End、Enter 和 Space。
+- 表单使用可见 label；图标按钮有可访问名称。
+- 390px、平板和桌面布局不产生页面级水平滚动。
+
+## 写操作
+
+前端不会在本地假定成功：
+
+- 节点、组、设备资料保存后等待对应 API 成功。
+- 保存节点或链式组只改变 SQLite，通知明确说明 Mihomo 运行配置尚未发布。
+- 固定 IP、出口策略、Mihomo 发布/恢复、订阅更新/删除和备份恢复都先显示后端计划、影响和警告。
+- 高风险 Dialog 要求影响确认；发布类操作轮询持久任务，以 `SUCCEEDED`、`FAILED` 或 `ROLLED_BACK` 为最终结果。
+- API 失败、任务失败或回滚不会显示成功 toast。
+
+## 探测语义
+
+| 显示项 | 证明范围 |
+|---|---|
+| TCP 可达 | FoxOS 到节点地址端口完成 TCP 建连 |
+| Mihomo 节点 HTTP | Controller 对指定节点完成 HTTP delay check |
+| 当前策略出口 | 通过 Mihomo mixed port 请求外部出口检查，作用域是当前策略 |
+| L2TP 会话 | RouterOS 报告 client running 且未禁用 |
+| MosDNS 在线 | FoxOS 到 MosDNS TCP 53 建连成功 |
+
+这些结果不会被合并成一个笼统的“节点在线”。当前版本不声称提供 UDP 丢包、抖动或完整 DNS 查询质量测试。
+
+## 自动化覆盖
+
+Vitest 覆盖 API 并行降级、Token 生命周期、状态转换、错误引用、策略状态与 Dialog。Playwright 在桌面、平板和 390px 项目中覆盖深链接、前进后退、接口失败、键盘表格、移动菜单、焦点锁定、危险确认、Mihomo 发布成功和回滚。

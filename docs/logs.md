@@ -1,35 +1,33 @@
-# 操作审计
+# 审计与告警
 
-FoxOS 对 RouterOS 写操作保存持久化审计记录。
+## 审计
 
-## 状态
+高风险操作在执行前写 `STARTED`，完成后更新为 `SUCCEEDED` 或 `FAILED`。任务自身还会区分 `ROLLED_BACK`。
 
-- `STARTED`：已完成认证、计划校验和重放检查，即将写入
-- `SUCCEEDED`：RouterOS 写入及回读验证均成功
-- `FAILED`：写入或回读验证失败
+记录内容包括：
 
-同一次执行使用相同审计 ID 更新状态，不重复创建无关记录。
+- actor（当前认证模型固定为 `api-token`）与请求来源 IP。
+- 动作、目标、RouterOS 方法/路径摘要。
+- 设备策略 before/after、订阅增删改数量、备份/Mihomo digest。
+- 脱敏且最大 64 KiB 的 Mihomo Diff。
+- job ID、结果、rolledBack 和稳定 errorClass。
 
-## 保存内容
+不保存 Authorization、确认令牌、RouterOS/Mihomo 密钥、节点密码/UUID、订阅原始正文或完整分享链接。
 
-- 操作类型
-- 目标设备策略 ID
-- 操作数量
-- 结果
-- 错误分类
-- 创建和更新时间
+`GET /api/v1/audit-events?limit=100` 接受 1 到 500。
 
-## 不保存
+## 告警
 
-- 确认令牌
-- FoxOS API Token
-- RouterOS 用户名和密码
-- Mihomo Secret
-- 节点密码或 UUID
-- 完整认证请求头
+后台每分钟评估一次；依赖读取失败会单独形成 telemetry 告警，不把未知状态推断为业务故障。
 
-## 查询接口
+覆盖：
 
-`GET /api/v1/audit-events?limit=100`
+- 连续两次没有活动默认路由。
+- FoxOS 所有权容器连续两次非 running。
+- RouterOS 磁盘少于 512 MiB/10%，严重阈值为 128 MiB/5%。
+- Mihomo 节点连续三次 `alive=false`。
+- MosDNS 连续两次 TCP 状态失败。
+- Mihomo、出口、备份恢复、订阅任务失败或自动回滚。
+- 启用订阅超过更新周期。
 
-要求 Bearer Token。limit 范围为 1–500。
+告警可确认，条件恢复后记录 resolved 时间。读取接口失败不会删除或伪造已有告警。

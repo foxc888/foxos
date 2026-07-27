@@ -1,36 +1,60 @@
-# RouterOS 连接配置
+# RouterOS REST 连接
 
-FoxOS 第一阶段通过 RouterOS REST API 读取状态，不使用 SSH 拼接命令。
+FoxOS 使用 RouterOS v7 REST API，不通过 SSH 拼接命令。目标部署固定为 `10.0.0.1`，全量包要求 RouterOS 7.21+。
 
-## RouterOS 准备
+## 专用账号
 
-建议为 FoxOS 创建独立的 RouterOS 用户和最小权限组。开发阶段先启用只读权限，确认资源、接口、DHCP 和 ARP 均可读取后，再单独授权设备绑定、路由和 L2TP 写入能力。
+不要使用 `admin`。全量安装器创建或验证：
 
-REST API 地址示例：
+```routeros
+/user/group/add name=foxos-rest policy=read,write,rest-api
+/user/add name=foxos-service group=foxos-rest address=10.0.0.4/32 password="<随机强密码>" comment="foxos:service"
+```
 
-- HTTP：`http://10.0.0.1`
-- HTTPS：`https://10.0.0.1`
+同名账号或组不带 FoxOS marker/comment 时安装失败，不接管用户资源。REST 服务必须限制在 `10.0.0.0/24` 或更窄的 `10.0.0.4/32`，不得暴露 WAN。
 
-生产环境推荐 HTTPS。
+全量包当前使用 `http://10.0.0.1`。HTTP 凭据在管理 LAN 内不是加密传输；生产环境可以改为 `www-ssl`，但必须提供 FoxOS 系统信任链可验证的证书，客户端不会跳过 TLS 校验。
 
-## 当前只读端点
+## 读取允许列表
 
 - `/rest/system/resource`
 - `/rest/interface`
 - `/rest/ip/dhcp-server/lease`
 - `/rest/ip/arp`
+- `/rest/interface/l2tp-client`
+- `/rest/ip/route`
+- `/rest/ip/dhcp-server`
+- `/rest/container`
+- `/rest/routing/table`
+- `/rest/ip/firewall/address-list`
+- `/rest/ip/firewall/mangle`
+- `/rest/ip/firewall/filter`
 
-代码内使用固定允许列表，不能把任意 URL 路径转发给 RouterOS。
+代码不接受调用者提供任意 RouterOS 路径。
+
+## 写入允许列表
+
+静态绑定只允许 DHCP Lease PUT/PATCH/DELETE，并要求 `foxos:device:` owner。出口执行只允许 FoxOS 自有：
+
+- `/rest/ip/firewall/address-list`
+- `/rest/ip/firewall/mangle`
+- `/rest/ip/firewall/filter`
+- `/rest/ip/route`
+
+PUT 只能创建集合项，PATCH/DELETE 必须使用合法 RouterOS ID，并在写入前回读相同 comment。Writer 还验证 chain、action、routing mark、目标表、网关和管理地址字段。
 
 ## 设备识别
 
-FoxOS 使用 MAC 地址合并 DHCP Lease 与 ARP：
+DHCP 提供主机名、Lease 和 server；ARP 提供接口邻居。FoxOS 规范化 MAC 并合并为库存，将实时状态与 SQLite 中的别名、厂商、标签、首次/最后在线和历史分开保存。
 
-- DHCP 提供主机名、租约状态和地址
-- ARP 提供当前接口和在线邻居状态
-- MAC 地址统一转为大写格式
-- 静态绑定和出口策略后续均以 MAC + 稳定设备 ID 关联
+## 连接失败
 
-## 凭据
+依次检查：
 
-RouterOS 用户名和密码只从 FoxOS Secret 配置读取，不提交到 GitHub，也不通过状态 API 返回。
+1. `/ip/service/print where name=www` 或可信 `www-ssl`。
+2. `foxos-service` 地址限制与 policy。
+3. `veth-foxos`、`bridge-lan` 和 `10.0.0.4 -> 10.0.0.1`。
+4. RouterOS 日志中的 401/403。
+5. FoxOS ready 的 RouterOS check。
+
+不要把 RouterOS 密码、env list value 或 export 附在问题报告中。

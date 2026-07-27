@@ -1,25 +1,29 @@
-# 节点导入说明
+# 节点、策略组与订阅
 
-FoxOS 节点导入以 ClashManager 的批量导入思路为基础，导入过程先解析和校验全部链接，再写入数据库。
+## 手动与批量导入
 
-## 支持格式
+支持 SS、VMess、VLESS、Trojan、Hysteria2/Hy2、SOCKS5、HTTP(S) 分享链接。批量导入流程：
 
-- Shadowsocks：`ss://`
-- VMess：`vmess://`
-- VLESS：`vless://`
-- Trojan：`trojan://`
-- Hysteria2：`hysteria2://` 或 `hy2://`
-- SOCKS5：`socks5://`
-- HTTP/HTTPS：`http://` 或 `https://`
+1. 在内存中解析全部非空行。
+2. 验证协议、服务器、端口和凭据字段。
+3. 为整批生成稳定数据库输入。
+4. 使用 SQLite 事务保存；任一解析或写入失败时整批不变。
+5. API 只返回脱敏节点字段和 `hasCredential`。
 
-## 导入流程
+分享链接是敏感材料，不进入日志、审计或发布包。TCP probe 会拒绝 private、loopback、link-local、multicast 目标，避免把节点探测变成内网扫描器。
 
-1. 在内存中解析全部链接。
-2. 校验服务器、端口和协议必填字段。
-3. 检查重复名称与重复节点。
-4. 展示导入预览，密码和 UUID 始终脱敏。
-5. 用户确认后事务写入 SQLite。
-6. 生成临时 Mihomo 配置并验证。
-7. 验证成功后才允许应用。
+## 策略组
 
-如果批次中任意链接无法解析，默认整批不写入，防止只导入一半造成配置不一致。
+支持 `select`、`url-test`、`fallback`、`load-balance` 和 `chain`。组成员使用 node/group ID，生成时验证引用和组环。
+
+chain 只允许至少两个有序节点且不能包含子组。生成器复制 hop 并用 `dialer-proxy` 从前向后串联，最终创建只暴露首 hop 的选择组。
+
+## 发布边界
+
+保存、导入或删除节点/组只改变 SQLite，不会暗中热重载 Mihomo。运行配置必须在运维页完成 preview、脱敏 Diff、确认和 apply。仍被其他组、设备策略或订阅引用的节点/组不能删除。
+
+## 订阅
+
+订阅创建后先 preview，再提交确认 update。抓取失败、内容 digest 在确认后变化或数据库更新失败时保留上一份节点集。启用的订阅由调度器按秒级 interval 检查到期，并用持久任务更新；长时间未成功会产生过期告警。
+
+订阅安全限制见 [API 参考](api-reference.md#订阅)。

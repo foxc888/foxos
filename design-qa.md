@@ -1,62 +1,70 @@
 # FoxOS Design QA
 
-- Source visual truth:
-  - `/root/.codex/generated_images/019f9d41-284e-72c1-9afe-7d3ae5a9d978/call_89FdAwbK1ar7tkcdlBkGvFXh.png`
-  - `/root/.codex/generated_images/019f9d41-284e-72c1-9afe-7d3ae5a9d978/call_0HcGS2Yk8Zg2VrqWF0rsvM0s.png`
-  - `/root/.codex/generated_images/019f9d41-284e-72c1-9afe-7d3ae5a9d978/call_b1MxBrAi7TnnKeWqHvtN6ZLa.png`
-- Browser-rendered implementation evidence:
-  - `docs/design/qa/overview-comparison.jpg`
-  - `docs/design/qa/proxy-comparison.jpg`
-  - `docs/design/qa/device-comparison.jpg`
-- Browser: ChatGPT Work Mode cloud Chrome
-- Captured viewport: 1363 × 936 for overview; 1348 × 926 for proxy and device pages
-- Source pixels: 1487 × 1058
-- Implementation density: 1 CSS pixel per screenshot pixel
-- Normalization: source was center-cropped and resized to the implementation viewport before side-by-side comparison
-- State: dark desktop application, primary/default state with first device and first node selected
+This record describes browser acceptance of the current FoxOS implementation. It
+does not claim acceptance against a physical RouterOS host.
 
-## Full-view comparison evidence
+## Evidence
 
-The implementation preserves the selected visual system: deep navy surfaces, fox-orange navigation and primary actions, green system health, blue traffic, purple proxy and DNS semantics, restrained separators, dense tables, and fixed right-hand detail panels. The overview composition, proxy chain builder, node table, device table, and action hierarchy match the selected concepts at the normalized viewport.
+- Desktop screenshot: `docs/screenshots/overview-desktop.jpg`
+- Browser: Codex in-app Browser against the local Vite build and an isolated
+  mock FoxOS API
+- Viewports: 1440x900 desktop, 834x1112 tablet, and 390x844 mobile
+- Browser console: no application warnings or errors; only Vite connection and
+  React development-mode messages were present
 
-## Focused region comparison evidence
+## Visual direction
 
-- Overview topology: service strip, RouterOS-centered path, LAN/DNS read-only summaries, device policy preview, and active chain summary were compared in `overview-comparison.jpg`.
-- Proxy management: chain ordering, node filters, table density, selected-row state, health actions, L2TP representation, and right detail panel were compared in `proxy-comparison.jpg`.
-- Device management: summary metrics, search/filter bar, row selection, static-IP state, egress policy, warning copy, and apply action were compared in `device-comparison.jpg`.
+The interface keeps a restrained, high-density network operations console:
+dark neutral surfaces, compact status rows and tables, orange primary actions,
+and distinct semantic colors for health, traffic, Mihomo, MosDNS, warnings, and
+destructive actions. Headings, controls, data provenance, and timestamps remain
+legible without turning operational sections into decorative cards.
 
-## Required fidelity surfaces
+## Responsive acceptance
 
-- Fonts and typography: passed. System Chinese sans-serif fallbacks render cleanly; body copy remains readable at 10–12px in the captured high-density desktop state, with clear 14–19px headings.
-- Spacing and layout rhythm: passed. Sidebar, 12px panel gaps, table row heights, summary cards, and detail panels maintain consistent alignment and density.
-- Colors and tokens: passed. Semantic colors map consistently to health, traffic, proxy/DNS, warnings, and destructive actions.
-- Image quality and assets: passed. The FoxOS brand mark is a generated raster asset; operational icons come from the existing Lucide icon system. No emoji, handcrafted SVG, or placeholder imagery is used.
-- Copy and content: passed. Navigation and operational copy match the requested FoxOS scope; DNS controls are absent and MosDNS is visibly read-only.
+- Desktop: the overview, proxy, device, and operations views fit at 1440x900
+  without root horizontal overflow.
+- Tablet: proxy, device, and operations views fit at 834x1112 without root
+  horizontal overflow; dense sections stack into readable columns.
+- Mobile: the operations and overview views fit at 390x844 without root
+  horizontal overflow. The sidebar becomes an overlay navigation surface.
+- Mobile navigation traps keyboard focus while open, closes with Escape, and
+  restores focus to the navigation trigger.
 
-## Interaction verification
+## Credibility and failure states
 
-- Navigation tested: 总览 → 代理节点 → 设备管理.
-- Proxy workflow tested: open 添加节点, enter node name/server, submit, and verify the new node appears in the table and chain-node selector.
-- Device workflow tested: apply the selected device's egress policy and verify the success confirmation.
-- Primary controls inspected: 全链路检测, 订阅导入, 批量节点检测, chain stage selection/removal, fixed-IP state, filters, settings, and sidebar collapse.
-- Scroll behavior tested after route changes.
-- Console checked: no application-origin warnings or errors. Observed errors were emitted only by the cloud-browser extension and were unrelated to FoxOS.
+- Each live data surface exposes its source, last update, loading, unavailable,
+  and stale state.
+- Enabling the RouterOS failure fixture left Mihomo, MosDNS, and SQLite-backed
+  node data live. The overview reported 11 of 12 sources live and retained the
+  previous RouterOS values as stale instead of substituting demo data.
+- A live non-service data source uses the normal status marker; unavailable and
+  stale resources use their own markers. This regression is covered in Vitest.
+- Mihomo publish confirmation lists the hash, changed-line count, affected
+  runtime paths, one-time-token behavior, and rollback condition. The rollback
+  fixture produced the explicit result: publish failed and the previous snapshot
+  was restored.
 
-## Comparison history
+## Accessibility and interaction acceptance
 
-1. Initial device-page verification found one P2 issue: route navigation preserved the previous page's vertical scroll position, causing the device summary row to open partially out of view.
-2. Fix: `navigate()` now resets the document scroll position after changing routes.
-3. Post-fix evidence: `device-comparison.jpg` opens at scroll position 0 with the summary strip, table, and device details correctly visible.
+- Hash deep links, browser Back, and browser Forward update the selected view.
+- A skip link, semantic landmarks, visible focus states, form labels, status
+  announcements, and keyboard-operable tables are present.
+- Destructive dialogs use dialog semantics, move and trap focus, close with
+  Escape, restore focus to the invoking control, and require a separate impact
+  acknowledgement before execution.
+- Node deletion, Mihomo publish, snapshot restore, backup restore, and other
+  state-changing operations describe their impact before confirmation.
 
-## Findings
+## Scope boundary
 
-No actionable P0, P1, or P2 issues remain.
+Automated and browser acceptance use isolated substitutes for RouterOS and
+Mihomo. The screenshot and results above prove the web behavior only. Physical
+RouterOS container installation, management-plane bypass protection, real
+container health, and rollback still require the read-only preflight, an exact
+change plan, backups, an upload channel, and explicit operator confirmation.
 
-## Follow-up polish
+## Result
 
-- P3: the custom FoxOS logo has slightly more dark padding than the visual target; it remains sharp and readable at sidebar size.
-- P3: connect visible metrics to live backend observations after the new node/device APIs are implemented.
-
-## Final result
-
-final result: passed
+Passed for automated desktop, tablet, mobile, keyboard, failure-isolation, and
+rollback UI acceptance. Physical RouterOS acceptance remains pending.
