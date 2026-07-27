@@ -24,6 +24,7 @@ type Document struct {
 }
 
 type Input struct {
+	Base      []byte
 	Mode      string
 	MixedPort int
 	AllowLAN  bool
@@ -34,6 +35,12 @@ type Input struct {
 }
 
 func Generate(input Input) ([]byte, error) {
+	if input.MixedPort == 0 {
+		input.MixedPort = 7890
+	}
+	if input.MixedPort < 1 || input.MixedPort > 65535 {
+		return nil, fmt.Errorf("%w: mixed port out of range", ErrInvalidConfig)
+	}
 	if input.Mode == "" {
 		input.Mode = "rule"
 	}
@@ -107,18 +114,47 @@ func Generate(input Input) ([]byte, error) {
 	rules := append([]string(nil), policyRules...)
 	rules = append(rules, input.Rules...)
 	sort.SliceStable(proxies, func(i, j int) bool { return proxies[i]["name"].(string) < proxies[j]["name"].(string) })
-	document := Document{
-		Mode: input.Mode, MixedPort: input.MixedPort, AllowLAN: input.AllowLAN,
-		Proxies: proxies, ProxyGroups: groups, Rules: rules,
+	document, err := trustedBaseDocument(input.Base)
+	if err != nil {
+		return nil, err
 	}
-	if len(document.Rules) == 0 {
-		document.Rules = []string{"MATCH,DIRECT"}
+	if len(rules) == 0 {
+		rules = []string{"MATCH,DIRECT"}
 	}
+	document["mode"] = input.Mode
+	document["mixed-port"] = input.MixedPort
+	document["allow-lan"] = input.AllowLAN
+	document["proxies"] = proxies
+	document["proxy-groups"] = groups
+	document["rules"] = rules
 	body, err := yaml.Marshal(document)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
 	return body, nil
+}
+
+const defaultTrustedBase = `bind-address: 127.0.0.1
+log-level: warning
+tun:
+  enable: false
+`
+
+func trustedBaseDocument(body []byte) (map[string]any, error) {
+	if len(body) == 0 {
+		body = []byte(defaultTrustedBase)
+	}
+	if err := ValidateYAML(body); err != nil {
+		return nil, fmt.Errorf("%w: trusted base: %v", ErrInvalidConfig, err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(body, &document); err != nil {
+		return nil, fmt.Errorf("%w: trusted base: %v", ErrInvalidConfig, err)
+	}
+	if document == nil {
+		return nil, fmt.Errorf("%w: trusted base is empty", ErrInvalidConfig)
+	}
+	return document, nil
 }
 
 func renderPolicyRules(policies []domain.DevicePolicy, nodes, groups map[string]string) ([]string, error) {
@@ -242,10 +278,10 @@ func renderChain(group domain.Group, nodes map[string]domain.Node) ([]map[string
 		proxy["name"] = names[index]
 		proxies = append(proxies, proxy)
 	}
-	for index := 0; index+1 < len(proxies); index++ {
-		proxies[index]["dialer-proxy"] = names[index+1]
+	for index := 1; index < len(proxies); index++ {
+		proxies[index]["dialer-proxy"] = names[index-1]
 	}
-	return proxies, map[string]any{"name": group.Name, "type": "select", "proxies": []string{names[0]}}, nil
+	return proxies, map[string]any{"name": group.Name, "type": "select", "proxies": []string{names[len(names)-1]}}, nil
 }
 
 func validateGroupGraph(groups []domain.Group) error {

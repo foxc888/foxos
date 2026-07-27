@@ -150,7 +150,7 @@
   :if ([:len $foxosConfirmationKey] < 32) do={ :error "现有确认密钥不足 32 字符，拒绝自动覆盖" }
 }
 
-:local fixedEnvDefinitions {"FOXOS_ROUTEROS_URL|http://10.0.0.1";"FOXOS_ROUTEROS_USERNAME|foxos-service";"FOXOS_MIHOMO_URL|http://10.0.0.2:9090";"FOXOS_MIHOMO_PROXY_URL|http://10.0.0.2:7890";"FOXOS_MIHOMO_LOCAL_CONFIG|/data/mihomo/config.yaml";"FOXOS_MIHOMO_RUNTIME_CONFIG|/root/.config/mihomo/config.yaml";"FOXOS_MIHOMO_BACKUP_DIR|/backups/mihomo";"FOXOS_MOSDNS_URL|http://10.0.0.3:53";"FOXOS_BACKUP_DIR|/backups/foxos"}
+:local fixedEnvDefinitions {"FOXOS_ROUTEROS_URL|http://10.0.0.1";"FOXOS_ROUTEROS_USERNAME|foxos-service";"FOXOS_MIHOMO_URL|http://10.0.0.2:9090";"FOXOS_MIHOMO_PROXY_URL|http://10.0.0.2:7890";"FOXOS_MIHOMO_BASE_CONFIG|/data/mihomo/base.yaml";"FOXOS_MIHOMO_LOCAL_CONFIG|/data/mihomo/config.yaml";"FOXOS_MIHOMO_RUNTIME_CONFIG|/root/.config/mihomo/config.yaml";"FOXOS_MIHOMO_BACKUP_DIR|/backups/mihomo";"FOXOS_MIHOMO_VALIDATOR_BINARY|/usr/local/bin/mihomo";"FOXOS_MOSDNS_URL|http://10.0.0.3:53";"FOXOS_BACKUP_DIR|/backups/foxos"}
 :foreach definition in=$fixedEnvDefinitions do={
   :local separator [:find $definition "|"]
   :local envKey [:pick $definition 0 $separator]
@@ -165,7 +165,7 @@
     }
   }
 }
-:if ([:len [/container/envs find where list="foxos-env"]] != 14) do={
+:if ([:len [/container/envs find where list="foxos-env"]] != 16) do={
   :error "foxos-env 包含安全基线之外的键，拒绝继续"
 }
 :if ($existingInstall) do={
@@ -174,18 +174,21 @@
   :put "已生成新的随机 FoxOS 凭据。"
 }
 
-:local mihomoConfigFile [/file find where name=($storageRoot . "/mihomo-config/config.yaml")]
-:local mihomoConfig [/file get $mihomoConfigFile contents]
-:local secretStart [:find $mihomoConfig "\nsecret:"]
-:if ([:typeof $secretStart] = "nil") do={
-  :if ([:find $mihomoConfig "secret:"] = 0) do={ :set secretStart 0 } else={ :error "mihomo config 缺少顶层 secret 字段" }
-} else={ :set secretStart ($secretStart + 1) }
-:local secretEnd [:find $mihomoConfig "\n" $secretStart]
-:if ([:typeof $secretEnd] = "nil") do={ :set secretEnd [:len $mihomoConfig] }
-:local updatedMihomoConfig (([:pick $mihomoConfig 0 $secretStart]) . "secret: \"" . $foxosMihomoSecret . "\"" . ([:pick $mihomoConfig $secretEnd [:len $mihomoConfig]]))
-/file set $mihomoConfigFile contents=$updatedMihomoConfig
-:if ([:typeof [:find [/file get $mihomoConfigFile contents] ("secret: \"" . $foxosMihomoSecret . "\"")]] = "nil") do={
-  :error "Mihomo Secret 写入后验证失败"
+:foreach mihomoConfigName in={"config.yaml";"base.yaml"} do={
+  :local mihomoConfigFile [/file find where name=($storageRoot . "/mihomo-config/" . $mihomoConfigName)]
+  :if ([:len $mihomoConfigFile] != 1) do={ :error ("Mihomo 配置文件缺失或不唯一: " . $mihomoConfigName) }
+  :local mihomoConfig [/file get $mihomoConfigFile contents]
+  :local secretStart [:find $mihomoConfig "\nsecret:"]
+  :if ([:typeof $secretStart] = "nil") do={
+    :if ([:find $mihomoConfig "secret:"] = 0) do={ :set secretStart 0 } else={ :error ("Mihomo 配置缺少顶层 secret 字段: " . $mihomoConfigName) }
+  } else={ :set secretStart ($secretStart + 1) }
+  :local secretEnd [:find $mihomoConfig "\n" $secretStart]
+  :if ([:typeof $secretEnd] = "nil") do={ :set secretEnd [:len $mihomoConfig] }
+  :local updatedMihomoConfig (([:pick $mihomoConfig 0 $secretStart]) . "secret: \"" . $foxosMihomoSecret . "\"" . ([:pick $mihomoConfig $secretEnd [:len $mihomoConfig]]))
+  /file set $mihomoConfigFile contents=$updatedMihomoConfig
+  :if ([:typeof [:find [/file get $mihomoConfigFile contents] ("secret: \"" . $foxosMihomoSecret . "\"")]] = "nil") do={
+    :error ("Mihomo Secret 写入后验证失败: " . $mihomoConfigName)
+  }
 }
 
 :local mountDefinitions {"foxos-mihomo-runtime|mihomo-config|/root/.config/mihomo";"foxos-mihomo-config|mihomo-config|/data/mihomo";"foxos-mosdns-runtime|mosdns-config|/cus/mosdns";"foxos-data|foxos-data|/data";"foxos-backups|foxos-backups|/backups"}

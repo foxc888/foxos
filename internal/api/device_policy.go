@@ -46,25 +46,8 @@ func (s *Server) RegisterDevicePolicies(mux *http.ServeMux, store DevicePolicySt
 		writeJSON(w, 200, out)
 	})))
 	mux.Handle("POST /api/v1/device-policies", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in devicePolicyPayload
-		if err := decode(r, &in); err != nil {
-			problem(w, 400, "invalid_json", err)
-			return
-		}
-		policy := in.domain()
-		if validator, ok := store.(interface {
-			ValidateDevicePolicyTarget(context.Context, domain.DevicePolicy) error
-		}); ok {
-			if err := validator.ValidateDevicePolicyTarget(r.Context(), policy); err != nil {
-				problem(w, http.StatusUnprocessableEntity, "invalid_policy_target", err)
-				return
-			}
-		}
-		if err := store.SaveDevicePolicy(r.Context(), policy); err != nil {
-			problem(w, 422, "invalid_policy", err)
-			return
-		}
-		writeJSON(w, 201, policyPayload(policy))
+		w.Header().Set("Allow", http.MethodGet)
+		problemCode(w, http.StatusMethodNotAllowed, "egress_workflow_required")
 	})))
 	mux.Handle("GET /api/v1/device-policies/{id}", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		policy, err := store.DevicePolicy(r.Context(), r.PathValue("id"))
@@ -79,37 +62,11 @@ func (s *Server) RegisterDevicePolicies(mux *http.ServeMux, store DevicePolicySt
 		writeJSON(w, 200, policyPayload(policy))
 	})))
 	mux.Handle("PUT /api/v1/device-policies/{id}", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in devicePolicyPayload
-		if err := decode(r, &in); err != nil {
-			problem(w, 400, "invalid_json", err)
-			return
-		}
-		in.ID = r.PathValue("id")
-		policy := in.domain()
-		if validator, ok := store.(interface {
-			ValidateDevicePolicyTarget(context.Context, domain.DevicePolicy) error
-		}); ok {
-			if err := validator.ValidateDevicePolicyTarget(r.Context(), policy); err != nil {
-				problem(w, http.StatusUnprocessableEntity, "invalid_policy_target", err)
-				return
-			}
-		}
-		if err := store.SaveDevicePolicy(r.Context(), policy); err != nil {
-			problem(w, 422, "invalid_policy", err)
-			return
-		}
-		writeJSON(w, 200, policyPayload(policy))
+		w.Header().Set("Allow", http.MethodGet)
+		problemCode(w, http.StatusMethodNotAllowed, "egress_workflow_required")
 	})))
 	mux.Handle("DELETE /api/v1/device-policies/{id}", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := store.DeleteDevicePolicy(r.Context(), r.PathValue("id"))
-		if errors.Is(err, storepkg.ErrNotFound) {
-			problem(w, 404, "not_found", err)
-			return
-		}
-		if err != nil {
-			problem(w, 500, "delete_failed", err)
-			return
-		}
-		w.WriteHeader(204)
+		w.Header().Set("Allow", http.MethodGet)
+		problemCode(w, http.StatusMethodNotAllowed, "egress_workflow_required")
 	})))
 }

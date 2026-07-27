@@ -54,9 +54,12 @@ func TestLoadRequiresStrongMihomoSecret(t *testing.T) {
 			t.Setenv("FOXOS_MIHOMO_LOCAL_CONFIG", "/var/lib/foxos/mihomo/config.yaml")
 			t.Setenv("FOXOS_MIHOMO_RUNTIME_CONFIG", "/root/.config/mihomo/config.yaml")
 			t.Setenv("FOXOS_MIHOMO_BACKUP_DIR", "/var/lib/foxos/mihomo/backups")
-			_, err := Load()
+			cfg, err := Load()
 			if (err != nil) != test.wantErr {
 				t.Fatalf("Load() error = %v, wantErr %t", err, test.wantErr)
+			}
+			if err == nil && (cfg.Mihomo.BaseConfigPath != "/data/mihomo/base.yaml" || cfg.Mihomo.ValidatorBinary != "/usr/local/bin/mihomo") {
+				t.Fatalf("unexpected Mihomo safe defaults: %+v", cfg.Mihomo)
 			}
 		})
 	}

@@ -178,7 +178,7 @@
     }
   }
 }
-:foreach configFile in={"mihomo-config/config.yaml";"mosdns-config/config_custom.yaml"} do={
+:foreach configFile in={"mihomo-config/config.yaml";"mihomo-config/base.yaml";"mosdns-config/config_custom.yaml"} do={
   :local configPath ($storageRoot . "/" . $configFile)
   :local configID [/file find where name=$configPath]
   :put ("config " . $configPath . ": " . [:len $configID])

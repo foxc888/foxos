@@ -13,9 +13,9 @@ import (
 	"github.com/foxc888/foxos/internal/routeros"
 )
 
-type fakeLeases struct{ leases []routeros.Lease }
+type fakeLeases struct{ state routeros.BindingState }
 
-func (f fakeLeases) Leases(context.Context) ([]routeros.Lease, error) { return f.leases, nil }
+func (f fakeLeases) BindingState(context.Context) (routeros.BindingState, error) { return f.state, nil }
 
 type fakeBindingExecutor struct{ calls int }
 type fakeAudit struct{ events []domain.AuditEvent }
@@ -42,7 +42,14 @@ func TestBindingPreviewReturnsConfirmationAndExecuteConsumesOnce(t *testing.T) {
 	executor := &fakeBindingExecutor{}
 	mux := http.NewServeMux()
 	audit := &fakeAudit{}
-	app.RegisterBindingPlan(mux, fakeLeases{leases: []routeros.Lease{{ID: "*1", Address: "10.0.0.19", MACAddress: "AA:BB:CC:DD:EE:FF", Server: "dhcp-lan", Dynamic: "false", Comment: "foxos:device:phone"}}}, signer, executor, confirmation.NewReplayGuard(), audit)
+	state := routeros.BindingState{
+		Leases:      []routeros.Lease{{ID: "*1", Address: "10.0.0.19", MACAddress: "AA:BB:CC:DD:EE:FF", Server: "dhcp-lan", Dynamic: "false", Comment: "foxos:device:phone"}},
+		Pools:       []routeros.IPPool{{Name: "pool-lan", Ranges: "10.0.0.100-10.0.0.200"}},
+		Networks:    []routeros.DHCPNetwork{{Address: "10.0.0.0/24", Gateway: "10.0.0.1"}},
+		Addresses:   []routeros.IPAddress{{Address: "10.0.0.1/24", Interface: "bridge-lan"}},
+		DHCPServers: []routeros.DHCPServer{{Name: "dhcp-lan", Interface: "bridge-lan", AddressPool: "pool-lan"}},
+	}
+	app.RegisterBindingPlan(mux, fakeLeases{state: state}, signer, executor, confirmation.NewReplayGuard(), audit)
 	body := `{"id":"phone","name":"iPhone","macAddress":"AA:BB:CC:DD:EE:FF","staticIp":"10.0.0.20","dhcpServer":"dhcp-lan","egress":"direct"}`
 	request := httptest.NewRequest("POST", "/api/v1/routeros/plans/device-binding", strings.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+token)

@@ -1,3 +1,6 @@
+ARG MIHOMO_IMAGE=metacubex/mihomo:v1.19.23
+FROM ${MIHOMO_IMAGE} AS mihomo-validator
+
 FROM node:22-alpine AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
@@ -25,6 +28,7 @@ RUN apk add --no-cache ca-certificates tzdata \
 WORKDIR /app
 COPY --from=server /out/foxos /app/foxos
 COPY --from=web /src/web/dist /app/web
+COPY --from=mihomo-validator /mihomo /usr/local/bin/mihomo
 USER 10001:10001
 EXPOSE 8090
 VOLUME ["/data", "/backups"]

@@ -19,8 +19,6 @@ func TestPlanDeviceEgressModes(t *testing.T) {
 		wantOps  int
 	}{
 		{name: "direct", egress: domain.EgressDirect, wantOps: 0},
-		{name: "Mihomo node", egress: domain.EgressMihomoNode, target: "node-a", wantPath: "/rest/ip/firewall/mangle", wantOps: 5},
-		{name: "proxy chain", egress: domain.EgressProxyChain, target: "group-a", wantPath: "/rest/ip/firewall/mangle", wantOps: 5},
 		{name: "L2TP", egress: domain.EgressL2TP, target: "l2tp-out", wantPath: "/rest/ip/route", wantOps: 6},
 		{name: "blocked", egress: domain.EgressBlocked, wantPath: "/rest/ip/firewall/filter", wantOps: 1},
 	}
@@ -44,6 +42,17 @@ func TestPlanDeviceEgressModes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPlanDeviceEgressRejectsUnverifiedMihomoDataPlane(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []domain.EgressType{domain.EgressMihomoNode, domain.EgressProxyChain} {
+		policy := domain.DevicePolicy{ID: "phone", MACAddress: "AA:BB:CC:DD:EE:FF", StaticIP: "10.0.0.20", DHCPServer: "dhcp-lan", Egress: mode, TargetID: "target"}
+		_, err := PlanDeviceEgress(policy, readyEgressState(mode, "target"))
+		if !errors.Is(err, ErrEgressPrerequisite) {
+			t.Fatalf("mode=%s err=%v", mode, err)
+		}
 	}
 }
 
@@ -130,8 +139,8 @@ func TestEgressExecutorCompensatesFailedVerification(t *testing.T) {
 
 func TestEgressExecutorCompensatesOnlyAppliedPrefix(t *testing.T) {
 	t.Parallel()
-	policy := domain.DevicePolicy{ID: "phone", MACAddress: "AA:BB:CC:DD:EE:FF", StaticIP: "10.0.0.20", DHCPServer: "dhcp-lan", Egress: domain.EgressMihomoNode, TargetID: "node-a"}
-	state := readyEgressState(domain.EgressMihomoNode, policy.TargetID)
+	policy := domain.DevicePolicy{ID: "phone", MACAddress: "AA:BB:CC:DD:EE:FF", StaticIP: "10.0.0.20", DHCPServer: "dhcp-lan", Egress: domain.EgressL2TP, TargetID: "l2tp-out"}
+	state := readyEgressState(domain.EgressL2TP, policy.TargetID)
 	plan, err := PlanDeviceEgress(policy, state)
 	if err != nil {
 		t.Fatal(err)

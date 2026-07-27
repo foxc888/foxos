@@ -77,6 +77,7 @@ type Lease struct {
 	Server     string `json:"server"`
 	LastSeen   string `json:"last-seen"`
 	Comment    string `json:"comment"`
+	Disabled   string `json:"disabled"`
 }
 
 type L2TPClient struct {
@@ -118,6 +119,39 @@ type DHCPServer struct {
 	AddressPool string `json:"address-pool"`
 	Disabled    string `json:"disabled"`
 	Running     string `json:"running"`
+}
+
+type IPPool struct {
+	ID       string `json:".id"`
+	Name     string `json:"name"`
+	Ranges   string `json:"ranges"`
+	NextPool string `json:"next-pool"`
+}
+
+type DHCPNetwork struct {
+	ID      string `json:".id"`
+	Address string `json:"address"`
+	Gateway string `json:"gateway"`
+	Comment string `json:"comment"`
+}
+
+type IPAddress struct {
+	ID        string `json:".id"`
+	Address   string `json:"address"`
+	Network   string `json:"network"`
+	Interface string `json:"interface"`
+	Dynamic   string `json:"dynamic"`
+	Disabled  string `json:"disabled"`
+	Comment   string `json:"comment"`
+}
+
+type BindingState struct {
+	Leases      []Lease       `json:"leases"`
+	Pools       []IPPool      `json:"pools"`
+	Networks    []DHCPNetwork `json:"networks"`
+	Addresses   []IPAddress   `json:"addresses"`
+	ARP         []ARP         `json:"arp"`
+	DHCPServers []DHCPServer  `json:"dhcpServers"`
 }
 
 type Container struct {
@@ -164,6 +198,44 @@ func (c *Client) DHCPServers(ctx context.Context) ([]DHCPServer, error) {
 	err := c.get(ctx, "/rest/ip/dhcp-server", &out)
 	return out, err
 }
+func (c *Client) IPPools(ctx context.Context) ([]IPPool, error) {
+	var out []IPPool
+	err := c.get(ctx, "/rest/ip/pool", &out)
+	return out, err
+}
+func (c *Client) DHCPNetworks(ctx context.Context) ([]DHCPNetwork, error) {
+	var out []DHCPNetwork
+	err := c.get(ctx, "/rest/ip/dhcp-server/network", &out)
+	return out, err
+}
+func (c *Client) IPAddresses(ctx context.Context) ([]IPAddress, error) {
+	var out []IPAddress
+	err := c.get(ctx, "/rest/ip/address", &out)
+	return out, err
+}
+func (c *Client) BindingState(ctx context.Context) (BindingState, error) {
+	var state BindingState
+	var err error
+	if state.Leases, err = c.Leases(ctx); err != nil {
+		return BindingState{}, err
+	}
+	if state.Pools, err = c.IPPools(ctx); err != nil {
+		return BindingState{}, err
+	}
+	if state.Networks, err = c.DHCPNetworks(ctx); err != nil {
+		return BindingState{}, err
+	}
+	if state.Addresses, err = c.IPAddresses(ctx); err != nil {
+		return BindingState{}, err
+	}
+	if state.ARP, err = c.ARP(ctx); err != nil {
+		return BindingState{}, err
+	}
+	if state.DHCPServers, err = c.DHCPServers(ctx); err != nil {
+		return BindingState{}, err
+	}
+	return state, nil
+}
 func (c *Client) Containers(ctx context.Context) ([]Container, error) {
 	var out []Container
 	err := c.get(ctx, "/rest/container", &out)
@@ -204,7 +276,7 @@ func (c *Client) get(ctx context.Context, path string, destination any) error {
 }
 func allowedReadPath(path string) bool {
 	switch path {
-	case "/rest/system/resource", "/rest/interface", "/rest/ip/dhcp-server/lease", "/rest/ip/arp", "/rest/interface/l2tp-client", "/rest/ip/route", "/rest/ip/dhcp-server", "/rest/container", "/rest/routing/table":
+	case "/rest/system/resource", "/rest/interface", "/rest/ip/dhcp-server/lease", "/rest/ip/arp", "/rest/interface/l2tp-client", "/rest/ip/route", "/rest/ip/dhcp-server", "/rest/ip/dhcp-server/network", "/rest/ip/pool", "/rest/ip/address", "/rest/container", "/rest/routing/table":
 		return true
 	case "/rest/ip/firewall/address-list", "/rest/ip/firewall/mangle", "/rest/ip/firewall/filter":
 		return true

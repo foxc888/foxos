@@ -31,9 +31,10 @@ type ConfigStore interface {
 }
 
 type Service struct {
-	Store   ConfigStore
-	Applier *Applier
-	Now     func() time.Time
+	Store      ConfigStore
+	Applier    *Applier
+	BaseConfig []byte
+	Now        func() time.Time
 }
 
 type Preview struct {
@@ -54,6 +55,9 @@ func (s *Service) Preview(ctx context.Context, draft domain.MihomoDraft) (Previe
 	if draft.Mode == "" {
 		draft.Mode = "rule"
 	}
+	if draft.MixedPort == 0 {
+		draft.MixedPort = 7890
+	}
 	nodes, err := s.Store.Nodes(ctx)
 	if err != nil {
 		return Preview{}, fmt.Errorf("read nodes: %w", err)
@@ -66,7 +70,7 @@ func (s *Service) Preview(ctx context.Context, draft domain.MihomoDraft) (Previe
 	if err != nil {
 		return Preview{}, fmt.Errorf("read device policies: %w", err)
 	}
-	body, err := Generate(Input{Mode: draft.Mode, MixedPort: draft.MixedPort, AllowLAN: draft.AllowLAN, Nodes: nodes, Groups: groups, Policies: policies, Rules: draft.Rules})
+	body, err := Generate(Input{Base: s.BaseConfig, Mode: draft.Mode, MixedPort: draft.MixedPort, AllowLAN: draft.AllowLAN, Nodes: nodes, Groups: groups, Policies: policies, Rules: draft.Rules})
 	if err != nil {
 		return Preview{}, err
 	}
@@ -92,6 +96,9 @@ func (s *Service) SaveDraft(ctx context.Context, draft domain.MihomoDraft) (doma
 	if draft.ID == "" {
 		draft.ID = "active"
 	}
+	if draft.MixedPort == 0 {
+		draft.MixedPort = 7890
+	}
 	if err := s.Store.SaveMihomoDraft(ctx, draft); err != nil {
 		return domain.MihomoDraft{}, err
 	}
@@ -108,7 +115,7 @@ func (s *Service) Draft(ctx context.Context) (domain.MihomoDraft, error) {
 	}
 	draft, err := s.Store.MihomoDraft(ctx)
 	if errors.Is(err, domain.ErrNotFound) {
-		return domain.MihomoDraft{ID: "active", Mode: "rule", Rules: []string{"MATCH,DIRECT"}}, nil
+		return domain.MihomoDraft{ID: "active", Mode: "rule", MixedPort: 7890, Rules: []string{"MATCH,DIRECT"}}, nil
 	}
 	return draft, err
 }
@@ -132,7 +139,7 @@ func (s *Service) ApplyPreview(ctx context.Context, draft domain.MihomoDraft, ex
 	if err != nil {
 		return ApplyResult{}, domain.MihomoSnapshot{}, err
 	}
-	body, err := Generate(Input{Mode: draft.Mode, MixedPort: draft.MixedPort, AllowLAN: draft.AllowLAN, Nodes: nodes, Groups: groups, Policies: policies, Rules: draft.Rules})
+	body, err := Generate(Input{Base: s.BaseConfig, Mode: draft.Mode, MixedPort: draft.MixedPort, AllowLAN: draft.AllowLAN, Nodes: nodes, Groups: groups, Policies: policies, Rules: draft.Rules})
 	if err != nil {
 		return ApplyResult{}, domain.MihomoSnapshot{}, err
 	}

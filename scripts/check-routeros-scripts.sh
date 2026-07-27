@@ -66,8 +66,8 @@ for endpoint in \
     report "missing FoxOS runtime endpoint: $endpoint"
   fi
 done
-if ! rg -Fq '!= 14' "$rsc_root/foxos-full-install.rsc"; then
-  report "FoxOS env allowlist does not enforce the 14-key runtime baseline"
+if ! rg -Fq '!= 16' "$rsc_root/foxos-full-install.rsc"; then
+  report "FoxOS env allowlist does not enforce the 16-key runtime baseline"
 fi
 if ! rg -Fq 'address] != "10.0.0.1/24"' "$rsc_root/preflight.rsc"; then
   report "preflight does not require the exact RouterOS management prefix"

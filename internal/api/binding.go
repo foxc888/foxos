@@ -13,8 +13,8 @@ import (
 	"github.com/foxc888/foxos/internal/routeros"
 )
 
-type LeaseReader interface {
-	Leases(context.Context) ([]routeros.Lease, error)
+type BindingStateReader interface {
+	BindingState(context.Context) (routeros.BindingState, error)
 }
 type BindingExecutor interface {
 	Execute(context.Context, routeros.Plan, string) error
@@ -40,7 +40,7 @@ type bindingExecution struct {
 	ConfirmationToken string        `json:"confirmationToken"`
 }
 
-func (s *Server) RegisterBindingPlan(mux *http.ServeMux, reader LeaseReader, signer *confirmation.Signer, executor BindingExecutor, guard *confirmation.ReplayGuard, audit AuditStore, durable ...ReplayStore) {
+func (s *Server) RegisterBindingPlan(mux *http.ServeMux, reader BindingStateReader, signer *confirmation.Signer, executor BindingExecutor, guard *confirmation.ReplayGuard, audit AuditStore, durable ...ReplayStore) {
 	mux.Handle("POST /api/v1/routeros/plans/device-binding", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if reader == nil || signer == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"configured": false, "error": "routeros_not_configured"})
@@ -53,12 +53,12 @@ func (s *Server) RegisterBindingPlan(mux *http.ServeMux, reader LeaseReader, sig
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
-		leases, err := reader.Leases(ctx)
+		state, err := reader.BindingState(ctx)
 		if err != nil {
-			problem(w, http.StatusServiceUnavailable, "routeros_leases", err)
+			problem(w, http.StatusServiceUnavailable, "routeros_binding_state", err)
 			return
 		}
-		plan, err := routeros.PlanDeviceBinding(domain.DevicePolicy{ID: input.ID, Name: input.Name, MACAddress: input.MACAddress, StaticIP: input.StaticIP, DHCPServer: input.DHCPServer, Egress: input.Egress, TargetID: input.TargetID}, leases)
+		plan, err := routeros.PlanDeviceBinding(domain.DevicePolicy{ID: input.ID, Name: input.Name, MACAddress: input.MACAddress, StaticIP: input.StaticIP, DHCPServer: input.DHCPServer, Egress: input.Egress, TargetID: input.TargetID}, state)
 		if err != nil {
 			problem(w, http.StatusConflict, "binding_conflict", err)
 			return
@@ -126,6 +126,9 @@ func (s *Server) RegisterBindingPlan(mux *http.ServeMux, reader LeaseReader, sig
 			case errors.Is(err, routeros.ErrWriteVerification):
 				event.Details["errorClass"] = "routeros_verification_failed"
 				event.Details["rolledBack"] = false
+			case errors.Is(err, routeros.ErrBindingPlanStale):
+				event.Details["errorClass"] = "routeros_binding_plan_stale"
+				event.Details["rolledBack"] = false
 			default:
 				event.Details["errorClass"] = "routeros_write_failed"
 				event.Details["rolledBack"] = false
@@ -133,6 +136,10 @@ func (s *Server) RegisterBindingPlan(mux *http.ServeMux, reader LeaseReader, sig
 			_ = audit.SaveAudit(r.Context(), event)
 			if errors.Is(err, routeros.ErrBindingRolledBack) {
 				problem(w, http.StatusConflict, "routeros_binding_rolled_back", err)
+				return
+			}
+			if errors.Is(err, routeros.ErrBindingPlanStale) {
+				problem(w, http.StatusConflict, "routeros_binding_plan_stale", err)
 				return
 			}
 			if errors.Is(err, routeros.ErrCompensationFailed) {

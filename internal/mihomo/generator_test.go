@@ -1,6 +1,7 @@
 package mihomo
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -23,6 +24,73 @@ func TestGenerate(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in:\n%s", want, text)
 		}
+	}
+}
+
+func TestGenerateStructurallyMergesManagedFieldsIntoTrustedBase(t *testing.T) {
+	t.Parallel()
+	base := []byte(`external-controller: 0.0.0.0:9090
+secret: controller-secret
+bind-address: "*"
+external-ui: ui
+log-level: warning
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+tun:
+  enable: false
+proxies:
+  - name: stale
+    type: direct
+proxy-groups:
+  - name: stale
+    type: select
+    proxies: [DIRECT]
+rules: [MATCH,REJECT]
+`)
+	body, err := Generate(Input{
+		Base: base, Mode: "global", MixedPort: 7891, AllowLAN: true,
+		Nodes: []domain.Node{{ID: "node", Name: "Managed", Type: "http", Server: "proxy.example", Port: 8080}},
+		Rules: []string{"MATCH,DIRECT"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{
+		"external-controller": "0.0.0.0:9090",
+		"secret":              "controller-secret",
+		"bind-address":        "*",
+		"external-ui":         "ui",
+		"log-level":           "warning",
+		"mode":                "global",
+		"mixed-port":          7891,
+		"allow-lan":           true,
+	} {
+		if got := document[key]; got != want {
+			t.Fatalf("%s=%#v, want %#v\n%s", key, got, want, body)
+		}
+	}
+	if document["dns"] == nil || document["tun"] == nil {
+		t.Fatalf("runtime sections were discarded:\n%s", body)
+	}
+	text := string(body)
+	if strings.Contains(text, "name: stale") || !strings.Contains(text, "name: Managed") {
+		t.Fatalf("managed collections were not replaced:\n%s", body)
+	}
+}
+
+func TestGenerateDefaultsMixedPort(t *testing.T) {
+	t.Parallel()
+	body, err := Generate(Input{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "mixed-port: 7890") {
+		t.Fatalf("missing safe mixed port default:\n%s", body)
 	}
 }
 
@@ -64,46 +132,53 @@ func TestGenerateRejectsProtectedPolicyAddress(t *testing.T) {
 	}
 }
 
-func TestGenerateRendersOrderedProxyChainWithDialerProxy(t *testing.T) {
+func TestGenerateRendersProxyChainInUIOrder(t *testing.T) {
 	t.Parallel()
-	entry := domain.Node{ID: "entry", Name: "Exit", Type: "http", Server: "exit.example", Port: 8080, Extra: map[string]any{"dialer-proxy": "untrusted"}}
-	relay := domain.Node{ID: "relay", Name: "Relay", Type: "socks5", Server: "relay.example", Port: 1080}
-	chain := domain.Group{ID: "chain-a", Name: "Work Chain", Type: "chain", NodeIDs: []string{entry.ID, relay.ID}}
-	policy := domain.DevicePolicy{ID: "phone", Name: "Phone", MACAddress: "AA:BB:CC:DD:EE:FF", StaticIP: "192.168.1.20", DHCPServer: "dhcp", Egress: domain.EgressProxyChain, TargetID: chain.ID}
-	body, err := Generate(Input{Nodes: []domain.Node{entry, relay}, Groups: []domain.Group{chain}, Policies: []domain.DevicePolicy{policy}})
-	if err != nil {
-		t.Fatal(err)
+	nodes := []domain.Node{
+		{ID: "first", Name: "First", Type: "http", Server: "first.example", Port: 8080, Extra: map[string]any{"dialer-proxy": "untrusted"}},
+		{ID: "second", Name: "Second", Type: "socks5", Server: "second.example", Port: 1080},
+		{ID: "third", Name: "Exit", Type: "http", Server: "exit.example", Port: 8080},
 	}
-	var document Document
-	if err := yaml.Unmarshal(body, &document); err != nil {
-		t.Fatal(err)
-	}
-	chainEntry := "Work Chain [hop 1] Exit"
-	chainRelay := "Work Chain [hop 2] Relay"
-	foundEntry := false
-	for _, proxy := range document.Proxies {
-		if proxy["name"] == chainEntry {
-			foundEntry = proxy["dialer-proxy"] == chainRelay
-		}
-		if proxy["dialer-proxy"] == "untrusted" {
-			t.Fatalf("unmanaged dialer-proxy leaked into proxy: %+v", proxy)
-		}
-	}
-	if !foundEntry {
-		t.Fatalf("chain entry or dialer target missing: %+v", document.Proxies)
-	}
-	foundGroup := false
-	for _, group := range document.ProxyGroups {
-		members, _ := group["proxies"].([]any)
-		if group["name"] == chain.Name && group["type"] == "select" && len(members) == 1 && members[0] == chainEntry {
-			foundGroup = true
-		}
-	}
-	if !foundGroup {
-		t.Fatalf("chain selector missing: %+v", document.ProxyGroups)
-	}
-	if len(document.Rules) != 1 || document.Rules[0] != "SRC-IP-CIDR,192.168.1.20/32,Work Chain" {
-		t.Fatalf("rules=%v", document.Rules)
+	for _, test := range []struct {
+		name    string
+		nodeIDs []string
+	}{
+		{name: "two hops", nodeIDs: []string{"first", "second"}},
+		{name: "three hops", nodeIDs: []string{"first", "second", "third"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			chain := domain.Group{ID: "chain-a", Name: "Work Chain", Type: "chain", NodeIDs: test.nodeIDs}
+			body, err := Generate(Input{Nodes: nodes, Groups: []domain.Group{chain}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document Document
+			if err := yaml.Unmarshal(body, &document); err != nil {
+				t.Fatal(err)
+			}
+			byName := make(map[string]map[string]any, len(document.Proxies))
+			for _, proxy := range document.Proxies {
+				name, _ := proxy["name"].(string)
+				byName[name] = proxy
+				if proxy["dialer-proxy"] == "untrusted" {
+					t.Fatalf("unmanaged dialer-proxy leaked into proxy: %+v", proxy)
+				}
+			}
+			for index := 1; index < len(test.nodeIDs); index++ {
+				current := fmt.Sprintf("Work Chain [hop %d] %s", index+1, nodes[index].Name)
+				previous := fmt.Sprintf("Work Chain [hop %d] %s", index, nodes[index-1].Name)
+				if got := byName[current]["dialer-proxy"]; got != previous {
+					t.Fatalf("%s dialer-proxy=%v, want %s; UI order must be RouterOS -> %v -> Internet\n%s", current, got, previous, test.nodeIDs, body)
+				}
+			}
+			last := len(test.nodeIDs)
+			wantExit := fmt.Sprintf("Work Chain [hop %d] %s", last, nodes[last-1].Name)
+			members, _ := document.ProxyGroups[0]["proxies"].([]any)
+			if len(members) != 1 || members[0] != wantExit {
+				t.Fatalf("selector=%v, want final exit %s\n%s", members, wantExit, body)
+			}
+		})
 	}
 }
 

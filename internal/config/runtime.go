@@ -27,9 +27,11 @@ type Mihomo struct {
 	URL               string
 	ProxyURL          string
 	Secret            string // #nosec G117 -- Mihomo authentication requires this secret-bearing field.
+	BaseConfigPath    string
 	LocalConfigPath   string
 	RuntimeConfigPath string
 	BackupDir         string
+	ValidatorBinary   string
 }
 
 func Load() (Runtime, error) {
@@ -37,12 +39,20 @@ func Load() (Runtime, error) {
 		APIToken:        os.Getenv("FOXOS_API_TOKEN"),
 		ConfirmationKey: os.Getenv("FOXOS_CONFIRMATION_KEY"),
 		RouterOS:        Endpoint{URL: os.Getenv("FOXOS_ROUTEROS_URL"), Username: os.Getenv("FOXOS_ROUTEROS_USERNAME"), Password: os.Getenv("FOXOS_ROUTEROS_PASSWORD")},
-		Mihomo:          Mihomo{URL: os.Getenv("FOXOS_MIHOMO_URL"), ProxyURL: os.Getenv("FOXOS_MIHOMO_PROXY_URL"), Secret: os.Getenv("FOXOS_MIHOMO_SECRET"), LocalConfigPath: os.Getenv("FOXOS_MIHOMO_LOCAL_CONFIG"), RuntimeConfigPath: os.Getenv("FOXOS_MIHOMO_RUNTIME_CONFIG"), BackupDir: os.Getenv("FOXOS_MIHOMO_BACKUP_DIR")},
+		Mihomo:          Mihomo{URL: os.Getenv("FOXOS_MIHOMO_URL"), ProxyURL: os.Getenv("FOXOS_MIHOMO_PROXY_URL"), Secret: os.Getenv("FOXOS_MIHOMO_SECRET"), BaseConfigPath: os.Getenv("FOXOS_MIHOMO_BASE_CONFIG"), LocalConfigPath: os.Getenv("FOXOS_MIHOMO_LOCAL_CONFIG"), RuntimeConfigPath: os.Getenv("FOXOS_MIHOMO_RUNTIME_CONFIG"), BackupDir: os.Getenv("FOXOS_MIHOMO_BACKUP_DIR"), ValidatorBinary: os.Getenv("FOXOS_MIHOMO_VALIDATOR_BINARY")},
 		MosDNSURL:       os.Getenv("FOXOS_MOSDNS_URL"),
 		BackupDir:       os.Getenv("FOXOS_BACKUP_DIR"),
 	}
 	if cfg.BackupDir == "" {
 		cfg.BackupDir = "backups"
+	}
+	if cfg.Mihomo.URL != "" {
+		if cfg.Mihomo.BaseConfigPath == "" {
+			cfg.Mihomo.BaseConfigPath = "/data/mihomo/base.yaml"
+		}
+		if cfg.Mihomo.ValidatorBinary == "" {
+			cfg.Mihomo.ValidatorBinary = "/usr/local/bin/mihomo"
+		}
 	}
 	if len(cfg.APIToken) < 32 {
 		return Runtime{}, errors.New("FOXOS_API_TOKEN must contain at least 32 characters")
@@ -76,8 +86,8 @@ func Load() (Runtime, error) {
 	if err := validateOptionalEndpoint(cfg.MosDNSURL); err != nil {
 		return Runtime{}, errors.New("invalid FOXOS_MOSDNS_URL")
 	}
-	if cfg.Mihomo.URL != "" && (cfg.Mihomo.LocalConfigPath == "" || cfg.Mihomo.RuntimeConfigPath == "" || cfg.Mihomo.BackupDir == "") {
-		return Runtime{}, errors.New("Mihomo config and backup paths are required when Mihomo is configured")
+	if cfg.Mihomo.URL != "" && (cfg.Mihomo.BaseConfigPath == "" || cfg.Mihomo.LocalConfigPath == "" || cfg.Mihomo.RuntimeConfigPath == "" || cfg.Mihomo.BackupDir == "" || cfg.Mihomo.ValidatorBinary == "") {
+		return Runtime{}, errors.New("Mihomo base, runtime, validator and backup paths are required when Mihomo is configured")
 	}
 	return cfg, nil
 }

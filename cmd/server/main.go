@@ -59,7 +59,7 @@ func main() {
 	}
 
 	var ros api.RouterOSReader
-	var leases api.LeaseReader
+	var leases api.BindingStateReader
 	var l2tp api.L2TPReader
 	var bindingExecutor api.BindingExecutor
 	var egressPlanner api.EgressPlanner
@@ -89,6 +89,13 @@ func main() {
 	var mihomoNodeProbe api.MihomoNodeProber
 	var mihomoExitProbe api.MihomoExitProber
 	if runtimeConfig.Mihomo.URL != "" {
+		baseConfig, err := os.ReadFile(runtimeConfig.Mihomo.BaseConfigPath)
+		if err != nil {
+			log.Fatalf("read trusted Mihomo base config: %v", err)
+		}
+		if err := mihomo.ValidateYAML(baseConfig); err != nil {
+			log.Fatalf("validate trusted Mihomo base config: %v", err)
+		}
 		controller, err := mihomo.NewController(runtimeConfig.Mihomo.URL, runtimeConfig.Mihomo.Secret, runtimeConfig.Mihomo.RuntimeConfigPath)
 		if err != nil {
 			log.Fatal(err)
@@ -96,8 +103,15 @@ func main() {
 		clash = controller
 		mihomoMonitor = controller
 		mihomoNodeProbe = controller
-		mihomoApplier = &mihomo.Applier{ConfigPath: runtimeConfig.Mihomo.LocalConfigPath, BackupDir: runtimeConfig.Mihomo.BackupDir, Runtime: controller}
-		mihomoService = &mihomo.Service{Store: store, Applier: mihomoApplier}
+		validatedRuntime := &mihomo.ValidatedRuntime{
+			Runtime: controller,
+			Validator: mihomo.CommandValidator{
+				BinaryPath: runtimeConfig.Mihomo.ValidatorBinary,
+				DataDir:    filepath.Dir(runtimeConfig.Mihomo.BaseConfigPath),
+			},
+		}
+		mihomoApplier = &mihomo.Applier{ConfigPath: runtimeConfig.Mihomo.LocalConfigPath, BackupDir: runtimeConfig.Mihomo.BackupDir, Runtime: validatedRuntime}
+		mihomoService = &mihomo.Service{Store: store, Applier: mihomoApplier, BaseConfig: baseConfig}
 	}
 	if runtimeConfig.Mihomo.ProxyURL != "" {
 		mihomoExitProbe, err = mihomo.NewExitProbe(runtimeConfig.Mihomo.ProxyURL)
@@ -140,6 +154,11 @@ func main() {
 	app.RegisterMosDNS(mux, mosdnsReader)
 	app.RegisterL2TP(mux, l2tp)
 	app.RegisterBindingPlan(mux, leases, signer, bindingExecutor, confirmation.NewReplayGuard(), store, store)
+	var egressReadiness api.EgressReadinessReader
+	if client, ok := ros.(api.EgressReadinessReader); ok {
+		egressReadiness = client
+	}
+	app.RegisterEgressCapabilities(mux, egressReadiness)
 	app.RegisterEgress(mux, store, egressPlanner, signer, store, egressExecutor, jobManager, store)
 	app.RegisterMihomo(mux, mihomoService, store, signer, store, jobManager, store)
 	app.RegisterMihomoProbes(mux, mihomoNodeProbe, mihomoExitProbe)

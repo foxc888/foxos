@@ -25,10 +25,12 @@ var (
 var egressExecutionMu sync.Mutex
 
 const (
-	egressMangleChain = "foxos-prerouting"
-	egressFilterChain = "foxos-forward"
-	mihomoTable       = "foxos-mihomo"
-	managementList    = "foxos-management-plane"
+	egressMangleChain   = "foxos-prerouting"
+	egressFilterChain   = "foxos-forward"
+	mihomoTable         = "foxos-mihomo"
+	managementList      = "foxos-management-plane"
+	MaxEgressOperations = 32
+	maxEgressResources  = 4096
 )
 
 // EgressState is a read-only snapshot of the RouterOS resources used to build
@@ -83,7 +85,7 @@ type EgressExecutor struct {
 }
 
 func (e EgressExecutor) Execute(ctx context.Context, plan EgressPlan) error {
-	if e.Writer == nil || !plan.RequiresConfirmation || len(plan.Operations) == 0 || !validEgressDigest(plan.StateDigest) {
+	if e.Writer == nil || !plan.RequiresConfirmation || len(plan.Operations) == 0 || len(plan.Operations) > MaxEgressOperations || !validEgressDigest(plan.StateDigest) {
 		return ErrUnsafeOperation
 	}
 	for _, operation := range plan.Operations {
@@ -158,6 +160,9 @@ func (e EgressExecutor) Compensate(ctx context.Context, plan EgressPlan) error {
 // the FoxOS jump chains and routing prerequisites exist can silently place a
 // rule after a user drop/accept rule and give a false success signal.
 func PlanDeviceEgress(policy domain.DevicePolicy, state EgressState) (EgressPlan, error) {
+	if egressResourceCount(state) > maxEgressResources {
+		return EgressPlan{}, fmt.Errorf("%w: RouterOS egress state exceeds the planning limit", ErrEgressPlan)
+	}
 	if isManagementAddress(policy.StaticIP) {
 		return EgressPlan{}, fmt.Errorf("%w: management address is protected", ErrEgressPlan)
 	}
@@ -216,31 +221,7 @@ func PlanDeviceEgress(policy domain.DevicePolicy, state EgressState) (EgressPlan
 		plan.Warnings = append(plan.Warnings, "设备流量将在 FoxOS forward 链中拒绝；已有 FastTrack 连接必须先结束")
 
 	case domain.EgressMihomoNode, domain.EgressProxyChain:
-		if err := requireManglePrerequisites(state, policy); err != nil {
-			return EgressPlan{}, err
-		}
-		if err := remove("/rest/ip/firewall/filter", state.FilterRules); err != nil {
-			return EgressPlan{}, err
-		}
-		if err := remove("/rest/ip/route", state.Routes); err != nil {
-			return EgressPlan{}, err
-		}
-		bypass, err := ensureManagementBypass(state.AddressLists)
-		if err != nil {
-			return EgressPlan{}, err
-		}
-		plan.Operations = append(plan.Operations, bypass...)
-		body := map[string]string{"chain": egressMangleChain, "src-address": policy.StaticIP, "dst-address-list": "!" + managementList, "action": "mark-routing", "new-routing-mark": mihomoTable, "passthrough": "no", "comment": owner, "disabled": "false"}
-		op, err := ensureOwned("/rest/ip/firewall/mangle", state.MangleRules, body, owner, "设备流量导向 Mihomo 路由表")
-		if err != nil {
-			return EgressPlan{}, err
-		}
-		plan.Operations = append(plan.Operations, op...)
-		if policy.Egress == domain.EgressMihomoNode {
-			plan.Warnings = append(plan.Warnings, "Mihomo 节点选择由生成的 SRC-IP 规则决定；RouterOS 只负责把流量送到透明入口")
-		} else {
-			plan.Warnings = append(plan.Warnings, "代理链选择由生成的 SRC-IP 规则决定；RouterOS 只负责把流量送到透明入口")
-		}
+		return EgressPlan{}, fmt.Errorf("%w: Mihomo transparent ingress, return path, management bypass and exit-IP evidence are not verified; a marked route to 10.0.0.2 is not a data plane", ErrEgressPrerequisite)
 
 	case domain.EgressL2TP:
 		if err := requireL2TPPrerequisites(state, policy); err != nil {
@@ -273,8 +254,15 @@ func PlanDeviceEgress(policy domain.DevicePolicy, state EgressState) (EgressPlan
 		plan.Warnings = append(plan.Warnings, "只写入 FoxOS 自有 L2TP 路由和 mangle 规则，不修改用户默认路由")
 	}
 
+	if len(plan.Operations) > MaxEgressOperations {
+		return EgressPlan{}, fmt.Errorf("%w: plan exceeds %d operations", ErrEgressPlan, MaxEgressOperations)
+	}
 	plan.RequiresConfirmation = len(plan.Operations) > 0
 	return plan, nil
+}
+
+func egressResourceCount(state EgressState) int {
+	return len(state.MangleRules) + len(state.FilterRules) + len(state.AddressLists) + len(state.Routes) + len(state.RoutingTables) + len(state.L2TPClients)
 }
 
 func EgressStateDigest(state EgressState) string {

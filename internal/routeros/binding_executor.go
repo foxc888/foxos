@@ -26,6 +26,10 @@ type PlanVerifier interface {
 	Verify(context.Context, Plan) error
 }
 
+type PlanPreconditionVerifier interface {
+	CheckPrecondition(context.Context, Plan) error
+}
+
 type BindingExecutor struct {
 	writer   OperationWriter
 	signer   *confirmation.Signer
@@ -48,13 +52,20 @@ func (e *BindingExecutor) Execute(ctx context.Context, plan Plan, token string) 
 	if err := e.signer.Verify(token, plan); err != nil {
 		return err
 	}
-	if !plan.RequiresConfirmation || len(plan.Operations) == 0 || e.verifier == nil {
+	if !plan.RequiresConfirmation || len(plan.Operations) == 0 || len(plan.Operations) > maxBindingOperations || e.verifier == nil || plan.PreState.Digest == "" {
 		return ErrUnsafeOperation
 	}
 	for _, operation := range plan.Operations {
 		if err := validateBindingOperation(operation); err != nil {
 			return err
 		}
+	}
+	preconditions, ok := e.verifier.(PlanPreconditionVerifier)
+	if !ok {
+		return ErrUnsafeOperation
+	}
+	if err := preconditions.CheckPrecondition(ctx, plan); err != nil {
+		return err
 	}
 	applied := make([]Operation, 0, len(plan.Operations))
 	for _, operation := range plan.Operations {
@@ -86,15 +97,21 @@ func (e *BindingExecutor) Execute(ctx context.Context, plan Plan, token string) 
 }
 
 func validateBindingOperation(operation Operation) error {
+	if !strings.HasPrefix(operation.OwnedComment, "foxos:device:") || operation.After == nil {
+		return fmt.Errorf("%w: owner or expected state", ErrUnsafeOperation)
+	}
+	if operation.Method == http.MethodPost {
+		if operation.Path != "/rest/ip/dhcp-server/lease/make-static" || operation.Before == nil || operation.Before.Dynamic != "true" || operation.After.Dynamic == "true" || operation.Body[".id"] != operation.Before.ID || operation.After.ID != operation.Before.ID || !safeRouterOSID(operation.Before.ID) {
+			return fmt.Errorf("%w: make-static operation", ErrUnsafeOperation)
+		}
+		return validateBindingRollback(operation)
+	}
 	if operation.Method != http.MethodPut && operation.Method != http.MethodPatch {
 		return fmt.Errorf("%w: method", ErrUnsafeOperation)
 	}
 	if operation.Path != "/rest/ip/dhcp-server/lease" &&
 		!(strings.HasPrefix(operation.Path, "/rest/ip/dhcp-server/lease/") && safeRouterOSID(strings.TrimPrefix(operation.Path, "/rest/ip/dhcp-server/lease/"))) {
 		return fmt.Errorf("%w: path", ErrUnsafeOperation)
-	}
-	if !strings.HasPrefix(operation.OwnedComment, "foxos:device:") {
-		return fmt.Errorf("%w: owner", ErrUnsafeOperation)
 	}
 	if operation.Body["comment"] != operation.OwnedComment {
 		return fmt.Errorf("%w: comment mismatch", ErrUnsafeOperation)
@@ -105,5 +122,48 @@ func validateBindingOperation(operation Operation) error {
 	if operation.Body["address"] == "" || operation.Body["mac-address"] == "" || operation.Body["server"] == "" {
 		return fmt.Errorf("%w: incomplete binding body", ErrUnsafeOperation)
 	}
+	if operation.Method == http.MethodPatch && operation.Before == nil {
+		return fmt.Errorf("%w: missing patch pre-state", ErrUnsafeOperation)
+	}
+	if !leaseBodyMatchesState(operation.Body, *operation.After) {
+		return fmt.Errorf("%w: expected state mismatch", ErrUnsafeOperation)
+	}
+	return validateBindingRollback(operation)
+}
+
+func validateBindingRollback(operation Operation) error {
+	if operation.Rollback == nil {
+		if operation.Method != http.MethodPut {
+			return fmt.Errorf("%w: missing rollback", ErrUnsafeOperation)
+		}
+		return nil
+	}
+	rollback := operation.Rollback
+	if rollback.Method != http.MethodPatch && rollback.Method != http.MethodDelete {
+		return fmt.Errorf("%w: rollback method", ErrUnsafeOperation)
+	}
+	if !strings.HasPrefix(rollback.Path, "/rest/ip/dhcp-server/lease/") || !safeRouterOSID(strings.TrimPrefix(rollback.Path, "/rest/ip/dhcp-server/lease/")) {
+		return fmt.Errorf("%w: rollback path", ErrUnsafeOperation)
+	}
+	if operation.Before == nil {
+		return fmt.Errorf("%w: rollback without pre-state", ErrUnsafeOperation)
+	}
+	if rollback.Method == http.MethodPatch && !leaseBodyMatchesState(rollback.Body, *operation.Before) {
+		return fmt.Errorf("%w: rollback body", ErrUnsafeOperation)
+	}
+	if rollback.Method == http.MethodDelete && operation.Method != http.MethodPost {
+		return fmt.Errorf("%w: delete rollback", ErrUnsafeOperation)
+	}
 	return nil
+}
+
+func leaseBodyMatchesState(body map[string]string, state LeaseState) bool {
+	return body["address"] == state.Address && normalizeMAC(body["mac-address"]) == state.MACAddress && body["server"] == state.Server && body["comment"] == state.Comment && normalizedBool(body["disabled"]) == state.Disabled
+}
+
+func normalizedBool(value string) string {
+	if value == "" {
+		return "false"
+	}
+	return value
 }

@@ -28,12 +28,19 @@ func (v *acceptingVerifier) Verify(context.Context, Plan) error {
 	v.calls++
 	return nil
 }
+func (v *acceptingVerifier) CheckPrecondition(context.Context, Plan) error { return nil }
 
 type rejectingVerifier struct{}
 
 func (rejectingVerifier) Verify(context.Context, Plan) error {
 	return errors.New("readback mismatch")
 }
+func (rejectingVerifier) CheckPrecondition(context.Context, Plan) error { return nil }
+
+type staleVerifier struct{}
+
+func (staleVerifier) CheckPrecondition(context.Context, Plan) error { return ErrBindingPlanStale }
+func (staleVerifier) Verify(context.Context, Plan) error            { return nil }
 
 type failingCompensatingWriter struct {
 	calls       int
@@ -71,12 +78,14 @@ func TestBindingExecutorRequiresUntamperedConfirmation(t *testing.T) {
 	plan := Plan{
 		PolicyID:             "phone",
 		RequiresConfirmation: true,
+		PreState:             BindingPreState{Digest: "state"},
 		Operations: []Operation{{
-			Method:       http.MethodPatch,
-			Path:         "/rest/ip/dhcp-server/lease/*1",
+			Method:       http.MethodPut,
+			Path:         "/rest/ip/dhcp-server/lease",
 			Body:         map[string]string{"address": "10.0.0.20", "mac-address": "AA:BB:CC:DD:EE:FF", "server": "dhcp-lan", "comment": "foxos:device:phone"},
 			Summary:      "bind",
 			OwnedComment: "foxos:device:phone",
+			After:        &LeaseState{Address: "10.0.0.20", MACAddress: "AA:BB:CC:DD:EE:FF", Server: "dhcp-lan", Dynamic: "false", Comment: "foxos:device:phone", Disabled: "false"},
 		}},
 	}
 	token, err := signer.Issue(plan, 5*time.Minute)
@@ -107,11 +116,13 @@ func TestBindingExecutorRejectsUnownedOperation(t *testing.T) {
 	executor.WithVerifier(&acceptingVerifier{})
 	plan := Plan{
 		RequiresConfirmation: true,
+		PreState:             BindingPreState{Digest: "state"},
 		Operations: []Operation{{
-			Method:       http.MethodPatch,
-			Path:         "/rest/ip/dhcp-server/lease/*1",
+			Method:       http.MethodPut,
+			Path:         "/rest/ip/dhcp-server/lease",
 			Body:         map[string]string{"address": "10.0.0.20", "mac-address": "AA:BB:CC:DD:EE:FF", "server": "dhcp-lan", "comment": "manual"},
 			OwnedComment: "manual",
+			After:        &LeaseState{Address: "10.0.0.20", MACAddress: "AA:BB:CC:DD:EE:FF", Server: "dhcp-lan", Dynamic: "false", Comment: "manual", Disabled: "false"},
 		}},
 	}
 	token, _ := signer.Issue(plan, time.Minute)
@@ -129,11 +140,13 @@ func TestBindingExecutorRequiresReadbackVerifier(t *testing.T) {
 	executor, _ := NewBindingExecutor(writer, signer)
 	plan := Plan{
 		RequiresConfirmation: true,
+		PreState:             BindingPreState{Digest: "state"},
 		Operations: []Operation{{
-			Method:       http.MethodPatch,
-			Path:         "/rest/ip/dhcp-server/lease/*1",
+			Method:       http.MethodPut,
+			Path:         "/rest/ip/dhcp-server/lease",
 			Body:         map[string]string{"address": "10.0.0.20", "mac-address": "AA:BB:CC:DD:EE:FF", "server": "dhcp-lan", "comment": "foxos:device:phone"},
 			OwnedComment: "foxos:device:phone",
+			After:        &LeaseState{Address: "10.0.0.20", MACAddress: "AA:BB:CC:DD:EE:FF", Server: "dhcp-lan", Dynamic: "false", Comment: "foxos:device:phone", Disabled: "false"},
 		}},
 	}
 	token, _ := signer.Issue(plan, time.Minute)
@@ -152,16 +165,34 @@ func TestBindingExecutorReportsReadbackMismatch(t *testing.T) {
 	executor.WithVerifier(rejectingVerifier{})
 	plan := Plan{
 		RequiresConfirmation: true,
+		PreState:             BindingPreState{Digest: "state"},
 		Operations: []Operation{{
-			Method:       http.MethodPatch,
-			Path:         "/rest/ip/dhcp-server/lease/*1",
+			Method:       http.MethodPut,
+			Path:         "/rest/ip/dhcp-server/lease",
 			Body:         map[string]string{"address": "10.0.0.20", "mac-address": "AA:BB:CC:DD:EE:FF", "server": "dhcp-lan", "comment": "foxos:device:phone"},
 			OwnedComment: "foxos:device:phone",
+			After:        &LeaseState{Address: "10.0.0.20", MACAddress: "AA:BB:CC:DD:EE:FF", Server: "dhcp-lan", Dynamic: "false", Comment: "foxos:device:phone", Disabled: "false"},
 		}},
 	}
 	token, _ := signer.Issue(plan, time.Minute)
 	if err := executor.Execute(context.Background(), plan, token); err == nil {
 		t.Fatal("expected readback verification error")
+	}
+}
+
+func TestBindingExecutorRejectsStalePlanBeforeWrite(t *testing.T) {
+	t.Parallel()
+	signer, _ := confirmation.New([]byte("01234567890123456789012345678901"))
+	writer := &recordingWriter{}
+	executor, _ := NewBindingExecutor(writer, signer)
+	executor.WithVerifier(staleVerifier{})
+	plan := bindingTestPlan()
+	token, _ := signer.Issue(plan, time.Minute)
+	if err := executor.Execute(context.Background(), plan, token); !errors.Is(err, ErrBindingPlanStale) {
+		t.Fatalf("err=%v", err)
+	}
+	if writer.calls != 0 {
+		t.Fatalf("stale plan wrote %d operations", writer.calls)
 	}
 }
 
@@ -227,7 +258,8 @@ func bindingTestPlan() Plan {
 			Body:         map[string]string{"address": fmt.Sprintf("192.168.1.%d", 20+index), "mac-address": fmt.Sprintf("AA:BB:CC:DD:EE:F%d", index), "server": "dhcp-lan", "comment": comment},
 			Summary:      "bind",
 			OwnedComment: comment,
+			After:        &LeaseState{Address: fmt.Sprintf("192.168.1.%d", 20+index), MACAddress: fmt.Sprintf("AA:BB:CC:DD:EE:F%d", index), Server: "dhcp-lan", Dynamic: "false", Comment: comment, Disabled: "false"},
 		})
 	}
-	return Plan{PolicyID: "batch", RequiresConfirmation: true, Operations: operations}
+	return Plan{PolicyID: "batch", RequiresConfirmation: true, Operations: operations, PreState: BindingPreState{Digest: "state"}}
 }

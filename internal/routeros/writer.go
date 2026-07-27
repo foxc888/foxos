@@ -11,19 +11,37 @@ import (
 )
 
 var ErrWriteVerification = errors.New("RouterOS write verification failed")
+var ErrCompensationStateChanged = errors.New("RouterOS state changed before compensation")
 
 func (c *Client) Apply(ctx context.Context, operation Operation) error {
 	if err := validateBindingOperation(operation); err != nil {
 		return err
 	}
-	body, err := json.Marshal(operation.Body)
+	if operation.Before != nil {
+		if _, err := c.requireLeaseState(ctx, *operation.Before); err != nil {
+			return err
+		}
+	}
+	if err := c.writeBindingOperation(ctx, operation.Method, operation.Path, operation.Body); err != nil {
+		return err
+	}
+	if operation.After != nil {
+		if _, err := c.requireLeaseState(ctx, *operation.After); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) writeBindingOperation(ctx context.Context, method, path string, values map[string]string) error {
+	body, err := json.Marshal(values)
 	if err != nil {
 		return err
 	}
 	target := *c.base
-	target.Path = strings.TrimRight(c.base.Path, "/") + operation.Path
+	target.Path = strings.TrimRight(c.base.Path, "/") + path
 	target.RawQuery = ""
-	request, err := http.NewRequestWithContext(ctx, operation.Method, target.String(), bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -47,65 +65,95 @@ func (c *Client) Apply(ctx context.Context, operation Operation) error {
 }
 
 func (c *Client) Verify(ctx context.Context, plan Plan) error {
-	leases, err := c.Leases(ctx)
+	if plan.FinalState.Address == "" || plan.FinalState.MACAddress == "" || plan.FinalState.Comment != "foxos:device:"+plan.PolicyID {
+		return ErrUnsafeOperation
+	}
+	_, err := c.requireLeaseState(ctx, plan.FinalState)
+	return err
+}
+
+func (c *Client) CheckPrecondition(ctx context.Context, plan Plan) error {
+	state, err := c.BindingState(ctx)
 	if err != nil {
 		return err
 	}
-	for _, operation := range plan.Operations {
-		wantMAC := normalizeMAC(operation.Body["mac-address"])
-		wantIP := operation.Body["address"]
-		wantComment := operation.OwnedComment
-		matched := false
-		for _, lease := range leases {
-			if normalizeMAC(lease.MACAddress) == wantMAC && lease.Address == wantIP && lease.Dynamic != "true" && lease.Comment == wantComment {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return fmt.Errorf("%w: lease %s %s", ErrWriteVerification, wantMAC, wantIP)
-		}
+	if plan.PreState.Digest == "" || BindingStateDigest(state) != plan.PreState.Digest {
+		return ErrBindingPlanStale
 	}
 	return nil
 }
 
-// Compensate restores only the FoxOS-owned resources touched by a plan. PUT
-// operations are removed by matching the ownership marker after a failed
-// verification; PATCH operations use the rollback operation embedded in the
-// signed plan.
+// Compensate is compare-and-swap based. It restores a touched lease only when
+// the current state still exactly matches the state written by FoxOS.
 func (c *Client) Compensate(ctx context.Context, operations []Operation) error {
 	for index := len(operations) - 1; index >= 0; index-- {
 		operation := operations[index]
+		if operation.After == nil {
+			return ErrUnsafeOperation
+		}
+		current, err := c.requireLeaseState(ctx, *operation.After)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrCompensationStateChanged, err)
+		}
 		if operation.Rollback != nil {
-			if err := c.Apply(ctx, *operation.Rollback); err != nil {
-				return err
+			switch operation.Rollback.Method {
+			case http.MethodDelete:
+				if err := c.deleteLeaseExact(ctx, current.ID); err != nil {
+					return err
+				}
+			case http.MethodPatch:
+				if err := c.writeBindingOperation(ctx, http.MethodPatch, operation.Rollback.Path, operation.Rollback.Body); err != nil {
+					return err
+				}
+				if operation.Before == nil {
+					return ErrUnsafeOperation
+				}
+				if _, err := c.requireLeaseState(ctx, *operation.Before); err != nil {
+					return fmt.Errorf("%w: rollback readback: %v", ErrWriteVerification, err)
+				}
+			default:
+				return ErrUnsafeOperation
 			}
 			continue
 		}
 		if operation.Method != http.MethodPut {
-			continue
+			return ErrUnsafeOperation
 		}
-		leases, err := c.Leases(ctx)
-		if err != nil {
+		if err := c.deleteLeaseExact(ctx, current.ID); err != nil {
 			return err
-		}
-		for _, lease := range leases {
-			if lease.Comment != operation.OwnedComment || normalizeMAC(lease.MACAddress) != normalizeMAC(operation.Body["mac-address"]) || lease.Address != operation.Body["address"] {
-				continue
-			}
-			if !safeRouterOSID(lease.ID) {
-				return errors.New("invalid RouterOS lease id during compensation")
-			}
-			if err := c.deleteLease(ctx, lease.ID, operation.OwnedComment); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
 }
 
-func (c *Client) deleteLease(ctx context.Context, id, owner string) error {
-	if !safeRouterOSID(id) || !strings.HasPrefix(owner, "foxos:") {
+func (c *Client) requireLeaseState(ctx context.Context, expected LeaseState) (LeaseState, error) {
+	leases, err := c.Leases(ctx)
+	if err != nil {
+		return LeaseState{}, err
+	}
+	var match *LeaseState
+	for _, lease := range leases {
+		actual := normalizedLeaseState(lease)
+		if expected.ID != "" && actual.ID != expected.ID {
+			continue
+		}
+		if actual.Address != expected.Address || actual.MACAddress != expected.MACAddress || actual.Server != expected.Server || actual.Dynamic != expected.Dynamic || actual.Comment != expected.Comment || actual.Disabled != expected.Disabled {
+			continue
+		}
+		if match != nil {
+			return LeaseState{}, fmt.Errorf("%w: lease state is ambiguous", ErrWriteVerification)
+		}
+		copy := actual
+		match = &copy
+	}
+	if match == nil {
+		return LeaseState{}, fmt.Errorf("%w: lease %s %s", ErrWriteVerification, expected.MACAddress, expected.Address)
+	}
+	return *match, nil
+}
+
+func (c *Client) deleteLeaseExact(ctx context.Context, id string) error {
+	if !safeRouterOSID(id) {
 		return ErrUnsafeOperation
 	}
 	target := *c.base

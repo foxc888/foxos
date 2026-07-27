@@ -31,6 +31,9 @@ func (s *Store) SaveMihomoDraft(ctx context.Context, draft domain.MihomoDraft) e
 	if draft.Mode != "rule" && draft.Mode != "global" && draft.Mode != "direct" {
 		return errors.New("unsupported Mihomo mode")
 	}
+	if draft.MixedPort == 0 {
+		draft.MixedPort = 7890
+	}
 	if draft.MixedPort < 0 || draft.MixedPort > 65535 {
 		return errors.New("mixed port out of range")
 	}
@@ -63,7 +66,7 @@ func (s *Store) MihomoDraft(ctx context.Context) (domain.MihomoDraft, error) {
 		&draft.ID, &draft.Mode, &draft.MixedPort, &allow, &rules, &draft.Revision, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.MihomoDraft{ID: "active", Mode: "rule", Rules: []string{"MATCH,DIRECT"}}, ErrNotFound
+		return domain.MihomoDraft{ID: "active", Mode: "rule", MixedPort: 7890, Rules: []string{"MATCH,DIRECT"}}, ErrNotFound
 	}
 	if err != nil {
 		return domain.MihomoDraft{}, err

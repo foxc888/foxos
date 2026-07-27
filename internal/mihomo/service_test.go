@@ -74,6 +74,18 @@ func TestServicePreviewRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestServiceDraftUsesReachableMixedPortOnFirstRun(t *testing.T) {
+	t.Parallel()
+	service := &Service{Store: &configMemoryStore{}}
+	draft, err := service.Draft(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.MixedPort != 7890 {
+		t.Fatalf("mixedPort=%d, want 7890", draft.MixedPort)
+	}
+}
+
 func TestRedactYAML(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
