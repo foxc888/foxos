@@ -16,7 +16,7 @@
 
 支持 `select`、`url-test`、`fallback`、`load-balance` 和 `chain`。组成员使用 node/group ID，生成时验证引用和组环。
 
-chain 只允许至少两个有序节点且不能包含子组。生成器复制 hop 并用 `dialer-proxy` 从前向后串联，最终创建只暴露首 hop 的选择组。
+chain 只允许至少两个有序节点且不能包含子组。UI 顺序是 RouterOS -> 第 1 跳 -> 第 2 跳 -> ... -> Internet。生成器复制 hop；从第 2 跳开始，每一跳的 `dialer-proxy` 指向前一跳，最终选择组只暴露最后一跳，因此最后一个节点是真实出口。两跳和三跳用例会校验生成 YAML 与 UI 顺序一致。
 
 ## 发布边界
 

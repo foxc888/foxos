@@ -37,6 +37,10 @@ FoxOS 管理备份覆盖 SQLite 数据和可选 Mihomo 配置。RouterOS binary 
 5. 任一步失败时恢复操作前 SQLite，并由 Mihomo applier 恢复旧配置。
 6. 写入 `SUCCEEDED`、`FAILED` 或 `ROLLED_BACK` 任务结果及审计。
 
+恢复任务持久记录 operation ID、backup ID、manifest digest、阶段和操作前回滚点。进程在“外部文件/数据库已替换但任务终态尚未保存”处中断时，会检查 operation marker、目标 digest、SQLite integrity 和回滚点：完整目标收敛为成功，仍是可重试前态才重排，已回滚收敛为 `ROLLED_BACK`，部分或外部变化状态失败关闭。不会把所有 `RUNNING/VERIFYING` 直接重新执行。
+
+备份创建同样使用 operation ID 命名发布结果；恢复时若已存在完整且 manifest 可验证的结果，任务直接收敛成功，不再生成第二份备份。
+
 ## RouterOS 部署备份
 
 运行安装或升级脚本前至少保存：
@@ -46,4 +50,4 @@ FoxOS 管理备份覆盖 SQLite 数据和可选 Mihomo 配置。RouterOS binary 
 /system/backup/save name=before-foxos
 ```
 
-同时保留旧 FoxOS 镜像/root-dir、`disk1/foxos-data` 和最近可用 FoxOS 备份。真实恢复前先在隔离环境验证版本兼容性；不要删除 rollback 槽位直到新版本完成 live/ready、状态读取和一台测试设备验收。
+同时保留旧 FoxOS 镜像/root-dir、站点存储中的 `foxos-data`、本地 CA 和最近可用 FoxOS 备份。升级 promote 前旧版本会创建 SQLite schema 兼容检查点；旧二进制回滚启动时在打开数据库前校验并按需恢复。不要删除 rollback 槽位或检查点，直到新版本完成 live/ready、页面、只读依赖和一台测试设备验收。

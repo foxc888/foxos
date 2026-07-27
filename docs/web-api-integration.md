@@ -4,11 +4,12 @@ Web UI 只显示 API 返回或浏览器实际完成的检查，不内置会被�
 
 ## 独立数据源
 
-首轮加载并行请求：
+首轮先读取公开站点清单，再并行请求：
 
 - RouterOS overview、routes、DHCP servers、containers。
 - Mihomo overview、MosDNS overview。
 - 节点、L2TP、设备库存、设备策略、代理组、审计。
+- 出口 capability、DHCP 地址规划、任务、告警和订阅。
 
 每项维护独立状态：
 
@@ -30,7 +31,7 @@ Web UI 只显示 API 返回或浏览器实际完成的检查，不内置会被�
 - 刷新或关闭标签页后清除，需要重新输入。
 - 旧版本遗留在 `sessionStorage` 的值只迁移一次，并同时删除两个 Web Storage 中的旧键。
 
-生产部署中 Web 与 API 同源，业务请求使用相对路径 `/api/v1/...`。Vite 开发服务器只把 `/api` 转发到固定的 `127.0.0.1:8090`。
+生产部署中 Web 与 API 通过 `https://<site-hostname>` 同源，业务请求使用相对路径 `/api/v1/...`；LAN HTTP 只跳转，内部 8090 仅 loopback。Vite 开发服务器只把 `/api` 转发到本地开发后端 `127.0.0.1:8090`。
 
 ## 导航与可访问性
 
@@ -60,7 +61,7 @@ Web UI 只显示 API 返回或浏览器实际完成的检查，不内置会被�
 
 - 节点、组、设备资料保存后等待对应 API 成功。
 - 保存节点或链式组只改变 SQLite，通知明确说明 Mihomo 运行配置尚未发布。
-- 固定 IP、出口策略、Mihomo 发布/恢复、订阅更新/删除和备份恢复都先显示后端计划、影响和警告。
+- 固定 IP、DHCP 扩容、出口策略、Mihomo 发布/恢复、订阅更新/删除和备份恢复都先显示后端计划、影响和警告。
 - 高风险 Dialog 要求影响确认；发布类操作轮询持久任务，以 `SUCCEEDED`、`FAILED` 或 `ROLLED_BACK` 为最终结果。
 - API 失败、任务失败或回滚不会显示成功 toast。
 
@@ -74,8 +75,8 @@ Web UI 只显示 API 返回或浏览器实际完成的检查，不内置会被�
 | L2TP 会话 | RouterOS 报告 client running 且未禁用 |
 | MosDNS 在线 | FoxOS 到 MosDNS TCP 53 建连成功 |
 
-这些结果不会被合并成一个笼统的“节点在线”。当前版本不声称提供 UDP 丢包、抖动或完整 DNS 查询质量测试。
+这些结果不会被合并成一个笼统的“节点在线”。mixed-port 出口不证明设备透明流量，Mihomo 节点/链 readiness 当前保持不可用。当前版本不声称提供 UDP 丢包、抖动或完整 DNS 查询质量测试。
 
 ## 自动化覆盖
 
-Vitest 覆盖 API 并行降级、Token 生命周期、状态转换、错误引用、策略状态与 Dialog。Playwright 在桌面、平板和 390px 项目中覆盖深链接、前进后退、接口失败、键盘表格、移动菜单、焦点锁定、危险确认、Mihomo 发布成功和回滚。
+Vitest 覆盖站点清单、API 并行降级、Token 生命周期、状态转换、错误引用、策略状态与 Dialog。Playwright 在 1440x900、834x1112、390x844 项目中逐元素检查裁切、桌面/移动交互、键盘、焦点锁定、危险确认、Mihomo 发布成功和回滚。

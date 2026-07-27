@@ -40,7 +40,7 @@
 - 订阅 delete 绑定关联节点完整列表。
 - 备份 restore 绑定 backup ID、manifest digest、文件数和 Mihomo 是否存在。
 
-这些操作由持久任务执行。前端轮询任务直到终态，重启时未完成的 RUNNING/VERIFYING 会恢复到可检查的队列状态。
+这些操作由持久任务执行。前端轮询任务直到终态。重启时不会把所有 `RUNNING/VERIFYING` 统一改回队列：Mihomo 按配置 digest/快照回读，RouterOS 出口对照真实规则与数据库策略，订阅对照内容和节点集 digest，备份创建对照已发布 manifest，备份恢复对照 operation marker/回滚点。只有外部和数据库仍是可安全重试的精确前态才重新排队；已写成功则收敛成功，部分状态失败关闭。
 
 ## 审计
 
