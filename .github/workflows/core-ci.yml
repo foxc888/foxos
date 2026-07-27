@@ -196,7 +196,7 @@ jobs:
       - name: Build FoxOS amd64 image
         run: docker buildx build --platform linux/amd64 --build-arg FOXOS_VERSION="${GITHUB_SHA}" --output type=docker,dest=foxos-amd64.tar .
       - name: Scan FoxOS image
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           input: foxos-amd64.tar
           scanners: vuln
