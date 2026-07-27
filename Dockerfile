@@ -5,7 +5,7 @@ RUN npm ci
 COPY web/ ./
 RUN npm run typecheck && npm run build
 
-FROM golang:1.24-alpine AS server
+FROM golang:1.25.12-alpine AS server
 WORKDIR /src
 ARG FOXOS_VERSION=dev
 RUN apk add --no-cache ca-certificates

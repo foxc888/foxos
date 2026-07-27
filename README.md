@@ -1,6 +1,6 @@
 # FoxOS
 
-FoxOS 是面向 RouterOS Container 的网络运维后台，用一个高密度中文控制台管理 RouterOS、Mihomo 与 MosDNS。后端使用 Go 1.24、SQLite，前端使用 React、TypeScript、Vite。
+FoxOS 是面向 RouterOS Container 的网络运维后台，用一个高密度中文控制台管理 RouterOS、Mihomo 与 MosDNS。后端保持 Go 1.24 模块语义并用受支持的 Go 1.25.12 构建发布资产，数据层使用 SQLite；前端使用 React、TypeScript、Vite。
 
 > 发布状态：代码和发布脚本已形成 release candidate，Go/Web/安全/E2E/RouterOS 静态门禁均已建立。尚未连接真实 RouterOS 设备，因此不能把自动化通过等同于生产部署验收。
 
@@ -57,7 +57,7 @@ RouterOS：
 
 ## 快速开发
 
-要求 Go 1.24.x、Node.js 22.x。
+要求 Go 1.25.12 或更新的受支持版本、Node.js 22.x。`go.mod` 保持 Go 1.24 语言兼容；不要用已停止维护的 Go 1.24 工具链构建生产二进制。
 
 ```bash
 go mod download
@@ -195,8 +195,8 @@ RouterOS 升级使用 pending/active/rollback 槽位。升级前保存 RouterOS 
 
 Core CI 执行：
 
-- Go 1.24：module verify、gofmt、vet、全量测试、覆盖率和 race。
-- Go 1.25 工具链：golangci-lint、gosec、govulncheck。
+- Go 1.24：module compatibility、module verify、gofmt、vet、全量测试、覆盖率和 race。
+- Go 1.25 最新补丁：发布二进制与镜像构建、golangci-lint、gosec、govulncheck；Trivy 阻止带 HIGH/CRITICAL 已知漏洞的镜像发布。
 - Web：npm clean install、TypeScript、Vitest、npm audit、production build。
 - Playwright：桌面、平板、390px 移动端，覆盖深链接、浏览器前进后退、键盘、焦点锁定、失败降级、危险确认、发布与回滚。
 - CodeQL、Trivy、RouterOS 脚本静态检查、敏感材料和生成物检查。
