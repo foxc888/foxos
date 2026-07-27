@@ -413,14 +413,14 @@ test("pauses resource polling while hidden and refreshes on visibility and comma
     Object.defineProperty(document, "hidden", { configurable: true, value: true });
     document.dispatchEvent(new Event("visibilitychange"));
   });
-  await page.clock.fastForward(45_000);
+  await page.clock.runFor(45_000);
   expect(calls.resourceReads["/api/v1/routeros/overview"]).toBe(initialReads);
 
   await page.evaluate(() => {
     Object.defineProperty(document, "hidden", { configurable: true, value: false });
     document.dispatchEvent(new Event("visibilitychange"));
   });
-  await page.clock.fastForward(300);
+  await page.clock.runFor(300);
   await expect.poll(() => calls.resourceReads["/api/v1/routeros/overview"] ?? 0).toBe(initialReads + 1);
 
   await page.getByRole("button", { name: "刷新全部状态" }).click();
@@ -436,11 +436,25 @@ test("backs off page polling after a resource failure", async ({ page }, testInf
   const initialReads = calls.resourceReads["/api/v1/routeros/overview"] ?? 0;
   expect(initialReads).toBeGreaterThan(0);
 
-  await page.clock.fastForward(15_100);
+  const refreshedPaths = [
+    "/api/v1/routeros/overview",
+    "/api/v1/mihomo/overview",
+    "/api/v1/mosdns/overview",
+    "/api/v1/routeros/dhcp/address-plan",
+    "/api/v1/jobs",
+    "/api/v1/audit-events",
+  ];
+  const refreshResponses = Promise.all(refreshedPaths.map((path) => page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET" && url.pathname === path;
+  })));
+  await page.clock.runFor(15_100);
+  await Promise.all((await refreshResponses).map((response) => response.finished()));
+  await page.evaluate(() => Promise.resolve());
   await expect.poll(() => calls.resourceReads["/api/v1/routeros/overview"] ?? 0).toBe(initialReads + 1);
-  await page.clock.fastForward(29_500);
+  await page.clock.runFor(29_500);
   expect(calls.resourceReads["/api/v1/routeros/overview"]).toBe(initialReads + 1);
-  await page.clock.fastForward(600);
+  await page.clock.runFor(600);
   await expect.poll(() => calls.resourceReads["/api/v1/routeros/overview"] ?? 0).toBe(initialReads + 2);
 });
 
