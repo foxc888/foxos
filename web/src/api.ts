@@ -132,6 +132,73 @@ export type RouterContainer = {
   interface: string;
 };
 
+export type DHCPRange = {
+  start: string;
+  end: string;
+  capacity: number;
+};
+
+export type DHCPConflict = {
+  address?: string;
+  kind: string;
+  detail: string;
+};
+
+export type DHCPServerCapacity = {
+  serverName: string;
+  interface: string;
+  running: boolean;
+  poolNames: string[];
+  network?: string;
+  gateway?: string;
+  ranges: DHCPRange[];
+  configuredCapacity: number;
+  excludedWithinPool: number;
+  dynamicCapacity: number;
+  dynamicOccupied: number;
+  remaining: number;
+  utilizationPercent: number;
+  reservationSpaceCapacity: number;
+  reservationUsed: number;
+  reservationRemaining: number;
+  risk: "normal" | "warning" | "critical" | "exhausted" | "unknown";
+  conflicts: DHCPConflict[];
+  ready: boolean;
+  error?: string;
+};
+
+export type DHCPAddressPlan = {
+  stateDigest: string;
+  servers: DHCPServerCapacity[];
+  ready: boolean;
+};
+
+export type DHCPExpansionAlternative = {
+  strategy: "expand-to-/23" | "split-vlan" | string;
+  executable: boolean;
+  capacity: number;
+  impact: string[];
+};
+
+export type DHCPExpansionPlan = {
+  serverName: string;
+  poolId?: string;
+  poolName?: string;
+  network?: string;
+  currentRanges?: string;
+  proposedRanges?: string;
+  requestedCapacity: number;
+  suggestedRanges: DHCPRange[];
+  before: DHCPServerCapacity;
+  after?: DHCPServerCapacity;
+  alternatives: DHCPExpansionAlternative[];
+  stateDigest: string;
+  operation?: { method: string; path: string; summary: string };
+  warnings: string[];
+  executable: boolean;
+  requiresConfirmation: boolean;
+};
+
 export type AuditEvent = {
   id: string;
   action: string;
@@ -420,6 +487,24 @@ export async function loadLiveSnapshot(): Promise<LiveSnapshot> {
     settle(request<AuditEvent[]>("/api/v1/audit-events?limit=100")),
   ]);
   return { routeros, mihomo, mosdns, nodes, l2tp, routes, dhcpServers, containers, deviceInventory, policies, groups, audit };
+}
+
+export async function getDHCPAddressPlan(): Promise<{ configured: boolean; plan: DHCPAddressPlan }> {
+  return request<{ configured: boolean; plan: DHCPAddressPlan }>("/api/v1/routeros/dhcp/address-plan");
+}
+
+export async function previewDHCPExpansion(input: { serverName: string; proposedRanges: string; requestedCapacity: number }): Promise<{ plan: DHCPExpansionPlan; confirmationToken: string; expiresInSeconds: number }> {
+  return request<{ plan: DHCPExpansionPlan; confirmationToken: string; expiresInSeconds: number }>("/api/v1/routeros/plans/dhcp-expansion", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function executeDHCPExpansion(plan: DHCPExpansionPlan, confirmationToken: string): Promise<{ status: string; serverName: string; poolName: string; ranges: string; auditId: string }> {
+  return request<{ status: string; serverName: string; poolName: string; ranges: string; auditId: string }>("/api/v1/routeros/plans/dhcp-expansion/execute", {
+    method: "POST",
+    body: JSON.stringify({ plan, confirmationToken }),
+  });
 }
 
 export async function updateDeviceMetadata(macAddress: string, input: { alias: string; vendor: string; tags: string[] }): Promise<DeviceProfile> {

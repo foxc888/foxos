@@ -64,6 +64,7 @@ func main() {
 	var bindingExecutor api.BindingExecutor
 	var egressPlanner api.EgressPlanner
 	var egressExecutor api.EgressExecutor
+	var dhcpExpansionExecutor api.DHCPExpansionExecutor
 	var routerMonitor alerting.RouterReader
 	if runtimeConfig.RouterOS.URL != "" {
 		client, err := routeros.NewClient(runtimeConfig.RouterOS.URL, runtimeConfig.RouterOS.Username, runtimeConfig.RouterOS.Password)
@@ -81,6 +82,7 @@ func main() {
 		bindingExecutor = executor.WithVerifier(client)
 		egressPlanner = client
 		egressExecutor = routeros.EgressExecutor{Writer: client}
+		dhcpExpansionExecutor = routeros.DHCPExpansionExecutor{Writer: client}
 	}
 	var clash api.MihomoReader
 	var mihomoService api.MihomoService
@@ -154,6 +156,7 @@ func main() {
 	app.RegisterMosDNS(mux, mosdnsReader)
 	app.RegisterL2TP(mux, l2tp)
 	app.RegisterBindingPlan(mux, leases, signer, bindingExecutor, confirmation.NewReplayGuard(), store, store)
+	app.RegisterDHCPPlanning(mux, leases, signer, store, dhcpExpansionExecutor, store)
 	var egressReadiness api.EgressReadinessReader
 	if client, ok := ros.(api.EgressReadinessReader); ok {
 		egressReadiness = client

@@ -318,6 +318,35 @@ select:focus, .field input:focus, .field textarea:focus, .search-box:focus-withi
 .operation-check { flex-direction: row; align-items: center; padding-top: 21px; }
 .operation-check input { width: 17px; height: 17px; accent-color: var(--orange); }
 .operation-actions, .operation-inline-form, .row-actions { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
+
+.dhcp-planner-panel { display: grid; gap: 12px; }
+.capacity-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.capacity-item { min-width: 0; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--surface-2); padding: 12px; }
+.capacity-title { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.capacity-title strong { font-size: 12px; }
+.capacity-item > small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.capacity-metrics { margin: 12px 0 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line-soft); border-radius: 6px; }
+.capacity-metrics div { min-width: 0; padding: 8px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+.capacity-metrics div:nth-child(3n) { border-right: 0; }
+.capacity-metrics div:nth-last-child(-n+3) { border-bottom: 0; }
+.capacity-metrics dt { color: var(--muted); font-size: 9px; }
+.capacity-metrics dd { margin: 3px 0 0; font-size: 14px; font-weight: 650; }
+.risk-badge { min-height: 23px; padding: 0 7px; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.risk-badge.normal { color: var(--green); border-color: rgba(56,212,119,.35); }
+.risk-badge.warning, .risk-badge.critical { color: var(--yellow); border-color: rgba(244,185,66,.4); }
+.risk-badge.exhausted { color: var(--red); border-color: rgba(255,93,97,.45); }
+.capacity-item details { margin-top: 10px; }
+.capacity-item summary { color: var(--yellow); cursor: pointer; font-size: 10px; }
+.compact-list { margin: 8px 0 0; }
+.dhcp-plan-form { display: grid; grid-template-columns: minmax(150px, .75fr) minmax(150px, .65fr) minmax(280px, 1.5fr) auto; gap: 10px; align-items: end; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.dhcp-plan-form .field { min-width: 0; }
+.dhcp-plan-form input, .dhcp-plan-form select { width: 100%; }
+.dhcp-preview { border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); padding: 12px; display: grid; gap: 8px; }
+.dhcp-preview > div:first-child { display: flex; justify-content: space-between; gap: 10px; }
+.dhcp-preview p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+.capacity-alternative { border-top: 1px solid var(--line-soft); padding-top: 9px; }
+.capacity-alternative strong { font-size: 11px; }
+.capacity-alternative ul { margin: 7px 0 0; padding-left: 18px; color: var(--muted); font-size: 10px; line-height: 1.6; }
 .operation-inline-form { align-items: end; padding-bottom: 4px; }
 .operation-inline-form .field { min-width: 150px; }
 .operation-grow { flex: 1; min-width: 220px; }
@@ -374,6 +403,8 @@ select:focus, .field input:focus, .field textarea:focus, .search-box:focus-withi
   .header-actions { flex-wrap: wrap; }
   .detail-panel { min-height: 240px; }
   .operations-grid { grid-template-columns: 1fr; }
+  .dhcp-plan-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dhcp-plan-form .button { align-self: stretch; }
 }
 
 @media (max-width: 760px) {
@@ -448,6 +479,12 @@ select:focus, .field input:focus, .field textarea:focus, .search-box:focus-withi
   .operation-wide { grid-column: auto; }
   .operation-check { padding-top: 0; }
   .operation-actions > .button { flex: 1 1 145px; }
+  .capacity-grid, .dhcp-plan-form { grid-template-columns: 1fr; }
+  .capacity-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .capacity-metrics div, .capacity-metrics div:nth-child(3n) { border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+  .capacity-metrics div:nth-child(2n) { border-right: 0; }
+  .capacity-metrics div:nth-last-child(-n+2) { border-bottom: 0; }
+  .dhcp-plan-form .button { width: 100%; }
   .operation-inline-form { align-items: stretch; }
   .operation-inline-form .field, .operation-grow { min-width: 100%; }
   .operation-inline-form > .button { width: 100%; }

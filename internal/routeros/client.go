@@ -126,6 +126,7 @@ type IPPool struct {
 	Name     string `json:"name"`
 	Ranges   string `json:"ranges"`
 	NextPool string `json:"next-pool"`
+	Comment  string `json:"comment"`
 }
 
 type DHCPNetwork struct {

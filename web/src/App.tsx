@@ -79,6 +79,7 @@ import {
   waitForJob,
 } from "./api";
 import { ConfirmDialog, Dialog } from "./components/Dialog";
+import { DHCPPlannerPanel } from "./components/DHCPPlannerPanel";
 import { AlertBackupOperations, MihomoOperations, SubscriptionOperations } from "./components/OperationsPanels";
 import { type Device, type ProxyNode, services } from "./data";
 import { egressLabel, policyForDevice, proposedDevicePolicy } from "./policy-state";
@@ -639,7 +640,7 @@ function App() {
 
         <div className="page-content">
           {page === "overview" ? <Overview devices={devices} nodes={nodes} onRefresh={() => void refreshLiveData(true)} resources={resources} scanning={scanning} /> : null}
-          {page === "routeros" ? <RouterOSPage containers={resources.containers} dhcpServers={resources.dhcpServers} navigate={navigate} onRefresh={() => void refreshLiveData(true)} resource={resources.routeros} routes={resources.routes} scanning={scanning} /> : null}
+          {page === "routeros" ? <RouterOSPage containers={resources.containers} dhcpServers={resources.dhcpServers} navigate={navigate} notify={notify} onRefresh={() => void refreshLiveData(true)} resource={resources.routeros} routes={resources.routes} scanning={scanning} /> : null}
           {page === "mosdns" ? <MosDNSPage resource={resources.mosdns} /> : null}
           {page === "proxies" ? <ProxyPage groupResource={resources.groups} l2tpResource={resources.l2tp} mihomoResource={resources.mihomo} navigate={navigate} nodeResource={resources.nodes} nodes={nodes} notify={notify} onRefresh={(showToast = true) => void refreshLiveData(showToast)} selectedNodeId={selectedNodeId} setNodes={setNodes} setSelectedNodeId={setSelectedNodeId} /> : null}
           {page === "devices" ? <DevicesPage devices={devices} groupResource={resources.groups} inventoryResource={resources.deviceInventory} l2tpResource={resources.l2tp} nodeResource={resources.nodes} notify={notify} onRefresh={(showToast = true) => void refreshLiveData(showToast)} policyResource={resources.policies} resource={resources.routeros} selectedDeviceId={selectedDeviceId} setDevices={setDevices} setSelectedDeviceId={setSelectedDeviceId} /> : null}
@@ -717,7 +718,7 @@ function FlowArrow({ label }: { label?: string }) {
   return <div aria-hidden="true" className="flow-arrow">{label ? <small>{label}</small> : null}<ArrowRight size={22} /></div>;
 }
 
-function RouterOSPage({ resource, routes, dhcpServers, containers, onRefresh, scanning, navigate }: { resource: ResourceState<RouterOverview>; routes: ResourceState<RouterRoute[]>; dhcpServers: ResourceState<RouterDHCPServer[]>; containers: ResourceState<RouterContainer[]>; onRefresh: () => void; scanning: boolean; navigate: (key: PageKey) => void }) {
+function RouterOSPage({ resource, routes, dhcpServers, containers, onRefresh, scanning, navigate, notify }: { resource: ResourceState<RouterOverview>; routes: ResourceState<RouterRoute[]>; dhcpServers: ResourceState<RouterDHCPServer[]>; containers: ResourceState<RouterContainer[]>; onRefresh: () => void; scanning: boolean; navigate: (key: PageKey) => void; notify: (message: string, tone?: Toast["tone"]) => void }) {
   const overview = resource.data;
   const live = resource.phase === "live" && Boolean(overview?.online);
   const system = overview?.resource ?? {};
@@ -757,6 +758,7 @@ function RouterOSPage({ resource, routes, dhcpServers, containers, onRefresh, sc
           <section className="panel"><div className="panel-heading"><div><h2>容器</h2><p>状态来自 RouterOS /container 回读</p></div><ResourceMeta resource={containers} /></div>{containerItems.length ? <dl className="definition-list">{containerItems.map((item) => <div key={item[".id"]}><dt>{item.name || item.comment || item[".id"]}</dt><dd><StatusDot status={containers.phase === "live" && item.status.toLowerCase() === "running" ? "ok" : containers.phase === "live" ? "offline" : "warning"} />{item.status || "未知"} · {item.interface || "无接口"}</dd></div>)}</dl> : <EmptyState detail={containers.error || "RouterOS 未返回容器。"} title="容器数据不可用" />}</section>
         </aside>
       </div>
+      <DHCPPlannerPanel notify={notify} />
     </div>
   );
 }

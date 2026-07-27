@@ -102,6 +102,10 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       await json(route, [{ ".id": "*d1", name: "dhcp-lan", interface: "bridge-lan", "address-pool": "lan-pool", running: "true", disabled: "false" }]);
       return;
     }
+    if (path === "/api/v1/routeros/dhcp/address-plan") {
+      await json(route, { configured: true, plan: { stateDigest: "d".repeat(64), ready: true, servers: [{ serverName: "dhcp-lan", interface: "bridge-lan", running: true, poolNames: ["lan-pool"], network: "10.0.0.0/24", gateway: "10.0.0.1", ranges: [{ start: "10.0.0.100", end: "10.0.0.200", capacity: 101 }], configuredCapacity: 101, excludedWithinPool: 0, dynamicCapacity: 101, dynamicOccupied: 2, remaining: 99, utilizationPercent: 1.98, reservationSpaceCapacity: 153, reservationUsed: 0, reservationRemaining: 153, risk: "normal", conflicts: [], ready: true }] } });
+      return;
+    }
     if (path === "/api/v1/routeros/containers") {
       await json(route, [{ ".id": "*c1", name: "foxos", comment: "foxos:container:foxos", status: "running", "root-dir": "disk1/foxos", interface: "veth-foxos" }]);
       return;
