@@ -26,9 +26,15 @@ func TestBackupAndRestoreDatabase(t *testing.T) {
 	if err := store.BackupDatabase(ctx, backupPath); err != nil {
 		t.Fatal(err)
 	}
+	if matches, err := store.DatabaseMatchesBackup(ctx, backupPath); err != nil || !matches {
+		t.Fatalf("initial match=%t err=%v", matches, err)
+	}
 	node.Name = "After"
 	if err := store.SaveNode(ctx, node); err != nil {
 		t.Fatal(err)
+	}
+	if matches, err := store.DatabaseMatchesBackup(ctx, backupPath); err != nil || matches {
+		t.Fatalf("changed match=%t err=%v", matches, err)
 	}
 	if err := store.RestoreDatabase(ctx, backupPath); err != nil {
 		t.Fatal(err)
@@ -36,6 +42,9 @@ func TestBackupAndRestoreDatabase(t *testing.T) {
 	restored, err := store.Node(ctx, node.ID)
 	if err != nil || restored.Name != "Before" {
 		t.Fatalf("restored=%+v err=%v", restored, err)
+	}
+	if matches, err := store.DatabaseMatchesBackup(ctx, backupPath); err != nil || !matches {
+		t.Fatalf("restored match=%t err=%v", matches, err)
 	}
 }
 

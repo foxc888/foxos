@@ -3,6 +3,7 @@ package subscription
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/foxc888/foxos/internal/domain"
@@ -115,5 +116,87 @@ func TestUpdaterApplyRetainsOldNodesOnAtomicStoreFailure(t *testing.T) {
 	}
 	if len(nodes.existing) != 1 || nodes.existing[0].ID != old.ID || sources.lastError == "" {
 		t.Fatalf("nodes=%+v source=%+v", nodes.existing, sources)
+	}
+}
+
+func TestUpdaterApplyCheckpointsDurablePhases(t *testing.T) {
+	t.Parallel()
+	sources := &updateSourceStore{item: domain.Subscription{ID: "source-a", Name: "Primary", URL: "https://example.com/source"}}
+	nodes := &updateNodeStore{}
+	updater := Updater{Sources: sources, Nodes: nodes, Fetcher: &updateFetcher{result: Result{Digest: "digest-a", Body: []byte("fixture")}}, Parser: func([]byte) ([]domain.Node, error) {
+		return []domain.Node{{Name: "East", Type: "vless", Server: "example.com", Port: 443, UUID: "fixture-uuid"}}, nil
+	}}
+	var phases []string
+	result, err := updater.ApplyWithCheckpoint(context.Background(), "source-a", nil, func(phase string, _ UpdatePreview) error {
+		phases = append(phases, phase)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"preview_verified", "nodes_replaced", "source_recorded"}
+	if !reflect.DeepEqual(phases, want) || result.Plan.Digest != "digest-a" {
+		t.Fatalf("phases=%v result=%+v", phases, result)
+	}
+}
+
+func TestUpdaterReconcileRepairsOnlyCompleteNodeSet(t *testing.T) {
+	t.Parallel()
+	old := domain.Node{ID: "old", Name: "Old", Type: "vless", Server: "old.example", Port: 443, UUID: "old-fixture", SubscriptionID: "source-a"}
+	newRemote := domain.Node{Name: "New", Type: "vless", Server: "new.example", Port: 443, UUID: "new-fixture"}
+	newRemote2 := domain.Node{Name: "Second", Type: "vless", Server: "second.example", Port: 443, UUID: "second-fixture"}
+	tests := []struct {
+		name           string
+		current        func(UpdatePreview) []domain.Node
+		lastDigest     string
+		wantState      RecoveryState
+		wantSourceSave bool
+	}{
+		{name: "complete nodes repair source result", current: func(preview UpdatePreview) []domain.Node { return preview.Nodes }, wantState: RecoveryCompleted, wantSourceSave: true},
+		{name: "exact prestate can retry", current: func(UpdatePreview) []domain.Node { return []domain.Node{old} }, wantState: RecoveryPreState},
+		{name: "partial nodes fail closed", current: func(preview UpdatePreview) []domain.Node { return []domain.Node{preview.Nodes[0]} }, wantState: RecoveryPartial},
+		{name: "source ahead of nodes fails closed", current: func(UpdatePreview) []domain.Node { return []domain.Node{old} }, lastDigest: "digest-a", wantState: RecoveryPartial},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			sources := &updateSourceStore{item: domain.Subscription{ID: "source-a", Name: "Primary", URL: "https://example.com/source", LastDigest: test.lastDigest}}
+			nodes := &updateNodeStore{existing: []domain.Node{old}}
+			updater := Updater{Sources: sources, Nodes: nodes, Fetcher: &updateFetcher{result: Result{Digest: "digest-a", Body: []byte("fixture")}}, Parser: func([]byte) ([]domain.Node, error) {
+				return []domain.Node{newRemote, newRemote2}, nil
+			}}
+			original, err := updater.Preview(context.Background(), "source-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			nodes.existing = append([]domain.Node(nil), test.current(original)...)
+			state, _, err := updater.Reconcile(context.Background(), "source-a", original.Plan.Digest, UpdatePlanDigest(original.Plan))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state != test.wantState || sources.success != test.wantSourceSave {
+				t.Fatalf("state=%s source=%+v", state, sources)
+			}
+		})
+	}
+}
+
+func TestSubscriptionNodeIDDoesNotExposeCredentialHash(t *testing.T) {
+	t.Parallel()
+	sources := &updateSourceStore{item: domain.Subscription{ID: "source-a", Name: "Primary", URL: "https://example.com/source"}}
+	credential := "00000000-0000-0000-0000-000000000001"
+	parserNode := domain.Node{Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: credential}
+	updater := Updater{Sources: sources, Nodes: &updateNodeStore{}, Fetcher: &updateFetcher{result: Result{Digest: "digest", Body: []byte("fixture")}}, Parser: func([]byte) ([]domain.Node, error) { return []domain.Node{parserNode}, nil }}
+	first, err := updater.Preview(context.Background(), "source-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parserNode.UUID = "00000000-0000-0000-0000-000000000002"
+	second, err := updater.Preview(context.Background(), "source-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Nodes[0].ID != second.Nodes[0].ID {
+		t.Fatalf("credential affected subscription node ID: %s != %s", first.Nodes[0].ID, second.Nodes[0].ID)
 	}
 }

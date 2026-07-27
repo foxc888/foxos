@@ -215,12 +215,6 @@ func (s *Store) Jobs(ctx context.Context, limit int) ([]domain.Job, error) {
 	return items, rows.Err()
 }
 
-// RecoverJobs moves an interrupted operation back to QUEUED and clears stale errors.
-func (s *Store) RecoverJobs(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status=?, progress=0, error_class='', error_message='', updated_at=? WHERE status IN (?,?)`, domain.JobQueued, time.Now().UTC().Format(time.RFC3339Nano), domain.JobRunning, domain.JobVerifying)
-	return err
-}
-
 func (s *Store) UpdateJob(ctx context.Context, job domain.Job) error {
 	request, err := json.Marshal(job.Request)
 	if err != nil {

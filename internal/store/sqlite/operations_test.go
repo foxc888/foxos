@@ -47,7 +47,7 @@ func TestMihomoDraftAndSnapshotLifecycle(t *testing.T) {
 	}
 }
 
-func TestCreateJobIsIdempotentAndRecoverable(t *testing.T) {
+func TestCreateJobIsIdempotentAndDoesNotApplyGenericRecovery(t *testing.T) {
 	t.Parallel()
 	store, err := Open(":memory:")
 	if err != nil {
@@ -64,11 +64,8 @@ func TestCreateJobIsIdempotentAndRecoverable(t *testing.T) {
 	if err != nil || !existed || second.ID != first.ID {
 		t.Fatalf("second=%+v existed=%v err=%v", second, existed, err)
 	}
-	if err := store.RecoverJobs(ctx); err != nil {
-		t.Fatal(err)
-	}
 	recovered, err := store.Job(ctx, first.ID)
-	if err != nil || recovered.Status != domain.JobQueued {
+	if err != nil || recovered.Status != domain.JobRunning {
 		t.Fatalf("recovered=%+v err=%v", recovered, err)
 	}
 }

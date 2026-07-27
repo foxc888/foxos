@@ -173,6 +173,7 @@ func main() {
 			_, err := mihomoApplier.Apply(ctx, body)
 			return err
 		}
+		backupService.MihomoHealthy = clash.Healthy
 	}
 	app.RegisterBackups(mux, backupService, signer, store, jobManager, store)
 	registerMihomoJobs(jobManager, mihomoService, store)
@@ -226,7 +227,7 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 	if manager == nil || service == nil {
 		return
 	}
-	_ = manager.Register("mihomo.apply", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	_ = manager.RegisterWithRecovery("mihomo.apply", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		event := mihomoAuditEvent(job, "mihomo.apply")
 		draft, err := decodeDraftRequest(job.Request["draft"])
 		if err != nil {
@@ -246,6 +247,9 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 		if digest == "" || !strings.EqualFold(digest, preview.Digest) {
 			return failMihomoJobAudit(ctx, audit, event, "mihomo_apply_stale", mihomo.ApplyResult{}, errors.New("Mihomo configuration changed since preview"))
 		}
+		if err := task.Checkpoint(ctx, "validated", map[string]any{"digest": preview.Digest}); err != nil {
+			return failMihomoJobAudit(ctx, audit, event, "mihomo_checkpoint_failed", mihomo.ApplyResult{}, err)
+		}
 		if audit == nil {
 			return map[string]any{"errorClass": "mihomo_audit_unavailable"}, domain.JobFailed, errors.New("Mihomo audit store is unavailable")
 		}
@@ -253,6 +257,9 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 			return map[string]any{"errorClass": "mihomo_audit_failed"}, domain.JobFailed, errors.New("Mihomo audit start failed")
 		}
 		progress(domain.JobVerifying, 35)
+		if err := task.Checkpoint(ctx, "applying", map[string]any{"digest": preview.Digest}); err != nil {
+			return failMihomoJobAudit(ctx, audit, event, "mihomo_checkpoint_failed", mihomo.ApplyResult{}, err)
+		}
 		label, _ := job.Request["label"].(string)
 		result, snapshot, err := service.ApplyPreview(ctx, draft, digest, label)
 		if err != nil {
@@ -263,6 +270,9 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 			_ = audit.SaveAudit(ctx, event)
 			return map[string]any{"rolledBack": result.RolledBack, "errorClass": errorClass}, status, err
 		}
+		if err := task.Checkpoint(ctx, "external_and_state_applied", map[string]any{"snapshotId": snapshot.ID}); err != nil {
+			return failMihomoJobAudit(ctx, audit, event, "mihomo_checkpoint_failed", result, err)
+		}
 		progress(domain.JobVerifying, 95)
 		event.Outcome = domain.AuditSucceeded
 		event.Details["snapshotId"] = snapshot.ID
@@ -271,8 +281,8 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 			return map[string]any{"snapshotId": snapshot.ID, "rolledBack": result.RolledBack, "errorClass": "mihomo_audit_finalize_failed"}, domain.JobFailed, errors.New("Mihomo audit finalization failed")
 		}
 		return map[string]any{"snapshotId": snapshot.ID, "rolledBack": result.RolledBack}, domain.JobSucceeded, nil
-	})
-	_ = manager.Register("mihomo.restore", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	}, recoverMihomoApply(service))
+	_ = manager.RegisterWithRecovery("mihomo.restore", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		event := mihomoAuditEvent(job, "mihomo.restore")
 		id, _ := job.Request["snapshotId"].(string)
 		id = strings.TrimSpace(id)
@@ -287,6 +297,9 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 			return map[string]any{"errorClass": "mihomo_restore_audit_failed"}, domain.JobFailed, errors.New("Mihomo audit start failed")
 		}
 		progress(domain.JobVerifying, 40)
+		if err := task.Checkpoint(ctx, "restoring", map[string]any{"snapshotId": id}); err != nil {
+			return failMihomoJobAudit(ctx, audit, event, "mihomo_restore_checkpoint_failed", mihomo.ApplyResult{}, err)
+		}
 		label, _ := job.Request["label"].(string)
 		result, snapshot, err := service.Restore(ctx, id, label)
 		if err != nil {
@@ -297,6 +310,9 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 			_ = audit.SaveAudit(ctx, event)
 			return map[string]any{"rolledBack": result.RolledBack, "errorClass": errorClass}, status, err
 		}
+		if err := task.Checkpoint(ctx, "external_and_state_restored", map[string]any{"snapshotId": snapshot.ID}); err != nil {
+			return failMihomoJobAudit(ctx, audit, event, "mihomo_restore_checkpoint_failed", result, err)
+		}
 		event.Outcome = domain.AuditSucceeded
 		event.Details["restoredSnapshotId"] = snapshot.ID
 		event.Details["rolledBack"] = result.RolledBack
@@ -304,7 +320,61 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 			return map[string]any{"snapshotId": snapshot.ID, "rolledBack": result.RolledBack, "errorClass": "mihomo_restore_audit_finalize_failed"}, domain.JobFailed, errors.New("Mihomo audit finalization failed")
 		}
 		return map[string]any{"snapshotId": snapshot.ID, "rolledBack": result.RolledBack}, domain.JobSucceeded, nil
-	})
+	}, recoverMihomoRestore(service))
+}
+
+type mihomoRecoveryService interface {
+	ReconcileApplied(context.Context, string, string) (domain.MihomoSnapshot, bool, error)
+	ReconcileRestore(context.Context, string) (domain.MihomoSnapshot, bool, error)
+}
+
+func recoverMihomoApply(service api.MihomoService) task.Recoverer {
+	return func(ctx context.Context, job domain.Job) (task.RecoveryDecision, error) {
+		draft, err := decodeDraftRequest(job.Request["draft"])
+		if err != nil {
+			return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: "mihomo_recovery_request_invalid", ErrorMessage: "operation recovery failed", Result: map[string]any{"phase": "recovery_request_invalid"}}, nil
+		}
+		expected, _ := job.Request["digest"].(string)
+		expected = strings.ToLower(strings.TrimSpace(expected))
+		label, _ := job.Request["label"].(string)
+		if reconciler, ok := service.(mihomoRecoveryService); ok {
+			snapshot, applied, reconcileErr := reconciler.ReconcileApplied(ctx, expected, label)
+			if reconcileErr != nil {
+				return task.RecoveryDecision{}, reconcileErr
+			}
+			if applied {
+				return task.RecoveryDecision{Status: domain.JobSucceeded, Result: map[string]any{"phase": "readback_succeeded", "snapshotId": snapshot.ID, "readback": true}}, nil
+			}
+		}
+		preview, err := service.Preview(ctx, draft)
+		if err != nil {
+			return task.RecoveryDecision{}, err
+		}
+		if expected == "" || !strings.EqualFold(expected, preview.Digest) {
+			return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: "mihomo_apply_stale", ErrorMessage: "operation recovery failed", Result: map[string]any{"phase": "recovery_stale"}}, nil
+		}
+		return task.RecoveryDecision{Status: domain.JobQueued, Result: map[string]any{"phase": "readback_not_applied", "readback": true}}, nil
+	}
+}
+
+func recoverMihomoRestore(service api.MihomoService) task.Recoverer {
+	return func(ctx context.Context, job domain.Job) (task.RecoveryDecision, error) {
+		id, _ := job.Request["snapshotId"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: "mihomo_restore_request_invalid", ErrorMessage: "operation recovery failed", Result: map[string]any{"phase": "recovery_request_invalid"}}, nil
+		}
+		if reconciler, ok := service.(mihomoRecoveryService); ok {
+			snapshot, applied, err := reconciler.ReconcileRestore(ctx, id)
+			if err != nil {
+				return task.RecoveryDecision{}, err
+			}
+			if applied {
+				return task.RecoveryDecision{Status: domain.JobSucceeded, Result: map[string]any{"phase": "readback_succeeded", "snapshotId": snapshot.ID, "readback": true}}, nil
+			}
+		}
+		return task.RecoveryDecision{Status: domain.JobQueued, Result: map[string]any{"phase": "readback_not_applied", "readback": true}}, nil
+	}
 }
 
 func mihomoAuditEvent(job domain.Job, action string) domain.AuditEvent {
@@ -357,7 +427,7 @@ func registerEgressJobs(manager *task.Manager, policies api.DevicePolicyStore, p
 	if manager == nil || policies == nil || planner == nil || executor == nil {
 		return
 	}
-	_ = manager.Register("routeros.egress", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	_ = manager.RegisterWithRecovery("routeros.egress", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		auditID, _ := job.Request["auditId"].(string)
 		if auditID == "" {
 			auditID = job.ID + "-audit"
@@ -394,9 +464,19 @@ func registerEgressJobs(manager *task.Manager, policies api.DevicePolicyStore, p
 				err = routeros.ErrEgressPlanStale
 			}
 		}
+		if err == nil {
+			err = task.Checkpoint(ctx, "preconditions_verified", map[string]any{"policyId": plan.PolicyID, "stateDigest": plan.StateDigest})
+		}
 		if err == nil && len(plan.Operations) > 0 {
 			progress(domain.JobVerifying, 35)
 			err = executor.Execute(ctx, plan)
+		}
+		if err == nil {
+			var readback routeros.EgressPlan
+			readback, err = planner.PlanDeviceEgress(ctx, plan.Policy)
+			if err == nil && len(readback.Operations) != 0 {
+				err = routeros.ErrWriteVerification
+			}
 		}
 		if err != nil {
 			status := domain.JobFailed
@@ -409,6 +489,12 @@ func registerEgressJobs(manager *task.Manager, policies api.DevicePolicyStore, p
 			event.Details["rolledBack"] = status == domain.JobRolledBack
 			_ = audit.SaveAudit(ctx, event)
 			return map[string]any{"auditId": auditID, "rolledBack": status == domain.JobRolledBack, "errorClass": errorClass}, status, err
+		}
+		if err := task.Checkpoint(ctx, "external_applied", map[string]any{"policyId": plan.PolicyID}); err != nil {
+			event.Outcome = domain.AuditFailed
+			event.Details["errorClass"] = "egress_checkpoint_failed"
+			_ = audit.SaveAudit(ctx, event)
+			return map[string]any{"auditId": auditID, "errorClass": "egress_checkpoint_failed"}, domain.JobFailed, err
 		}
 		progress(domain.JobVerifying, 85)
 		if err := policies.SaveDevicePolicy(ctx, plan.Policy); err != nil {
@@ -431,13 +517,83 @@ func registerEgressJobs(manager *task.Manager, policies api.DevicePolicyStore, p
 			_ = audit.SaveAudit(ctx, event)
 			return map[string]any{"auditId": auditID, "rolledBack": rolledBack, "errorClass": errorClass}, status, err
 		}
+		if err := task.Checkpoint(ctx, "policy_persisted", map[string]any{"policyId": plan.PolicyID}); err != nil {
+			event.Outcome = domain.AuditFailed
+			event.Details["errorClass"] = "egress_checkpoint_failed"
+			_ = audit.SaveAudit(ctx, event)
+			return map[string]any{"policyId": plan.PolicyID, "auditId": auditID, "errorClass": "egress_checkpoint_failed"}, domain.JobFailed, err
+		}
 		event.Outcome = domain.AuditSucceeded
 		event.Details["rolledBack"] = false
 		if err := audit.SaveAudit(ctx, event); err != nil {
 			return map[string]any{"policyId": plan.PolicyID, "auditId": auditID, "rolledBack": false, "errorClass": "egress_audit_finalize_failed"}, domain.JobFailed, errors.New("egress audit finalization failed")
 		}
 		return map[string]any{"policyId": plan.PolicyID, "auditId": auditID, "rolledBack": false}, domain.JobSucceeded, nil
-	})
+	}, recoverEgress(policies, planner))
+}
+
+func recoverEgress(policies api.DevicePolicyStore, planner api.EgressPlanner) task.Recoverer {
+	return func(ctx context.Context, job domain.Job) (task.RecoveryDecision, error) {
+		plan, err := decodeEgressPlan(job.Request["plan"])
+		if err != nil {
+			return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: "egress_recovery_request_invalid", ErrorMessage: "operation recovery failed", Result: map[string]any{"phase": "recovery_request_invalid"}}, nil
+		}
+		currentPlan, err := planner.PlanDeviceEgress(ctx, plan.Policy)
+		if err != nil {
+			return task.RecoveryDecision{}, err
+		}
+		policyState, err := recoveredPolicyState(ctx, policies, plan)
+		if err != nil {
+			return task.RecoveryDecision{}, err
+		}
+		if len(currentPlan.Operations) == 0 {
+			switch policyState {
+			case "desired":
+				return task.RecoveryDecision{Status: domain.JobSucceeded, Result: map[string]any{"phase": "readback_succeeded", "policyId": plan.PolicyID, "readback": true}}, nil
+			case "previous":
+				if err := policies.SaveDevicePolicy(ctx, plan.Policy); err != nil {
+					return task.RecoveryDecision{}, err
+				}
+				return task.RecoveryDecision{Status: domain.JobSucceeded, Result: map[string]any{"phase": "policy_reconciled", "policyId": plan.PolicyID, "readback": true}}, nil
+			default:
+				return egressPartialRecovery(plan.PolicyID), nil
+			}
+		}
+		currentPlan = api.FinalizeEgressPlan(currentPlan, plan.PreviousPolicy)
+		if policyState == "previous" && routeros.EqualEgressPlans(plan, currentPlan) {
+			return task.RecoveryDecision{Status: domain.JobQueued, Result: map[string]any{"phase": "prestate_verified", "policyId": plan.PolicyID, "readback": true}}, nil
+		}
+		return egressPartialRecovery(plan.PolicyID), nil
+	}
+}
+
+func recoveredPolicyState(ctx context.Context, policies api.DevicePolicyStore, plan routeros.EgressPlan) (string, error) {
+	current, err := policies.DevicePolicy(ctx, plan.PolicyID)
+	if err == nil {
+		if domain.EqualDevicePolicies(current, plan.Policy) {
+			return "desired", nil
+		}
+		if plan.PreviousPolicy != nil && domain.EqualDevicePolicies(current, *plan.PreviousPolicy) {
+			return "previous", nil
+		}
+		return "other", nil
+	}
+	if errors.Is(err, domain.ErrNotFound) {
+		if plan.PreviousPolicy == nil {
+			return "previous", nil
+		}
+		return "other", nil
+	}
+	return "", err
+}
+
+func egressPartialRecovery(policyID string) task.RecoveryDecision {
+	return task.RecoveryDecision{
+		Status:       domain.JobFailed,
+		ErrorClass:   "egress_recovery_partial_state",
+		ErrorMessage: "operation recovery requires manual reconciliation",
+		Result:       map[string]any{"phase": "recovery_partial_state", "policyId": policyID, "readback": true},
+	}
 }
 
 func egressJobErrorClass(err error) string {
@@ -457,10 +613,17 @@ func registerBackupJobs(manager *task.Manager, service api.BackupService, audit 
 	if manager == nil || service == nil {
 		return
 	}
-	_ = manager.Register("backup.create", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	_ = manager.RegisterWithRecovery("backup.create", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		progress(domain.JobRunning, 10)
 		label, _ := job.Request["label"].(string)
-		item, err := service.Create(ctx, label)
+		if err := task.Checkpoint(ctx, "creating", map[string]any{"operationId": job.ID}); err != nil {
+			return map[string]any{"errorClass": "backup_checkpoint_failed"}, domain.JobFailed, err
+		}
+		recoveryService, ok := service.(backupRecoveryService)
+		if !ok {
+			return map[string]any{"errorClass": "backup_recovery_unavailable"}, domain.JobFailed, errors.New("backup recovery service is unavailable")
+		}
+		item, err := recoveryService.CreateOperation(ctx, label, job.ID)
 		event := domain.AuditEvent{ID: job.ID + "-audit", Action: "backup.create", TargetID: job.ID, Outcome: domain.AuditSucceeded, Details: map[string]any{"jobId": job.ID, "actor": job.Request["actor"], "source": job.Request["source"]}}
 		if err != nil {
 			event.Outcome = domain.AuditFailed
@@ -470,14 +633,17 @@ func registerBackupJobs(manager *task.Manager, service api.BackupService, audit 
 			}
 			return map[string]any{"errorClass": "backup_create_failed"}, domain.JobFailed, err
 		}
+		if err := task.Checkpoint(ctx, "backup_published", map[string]any{"operationId": job.ID, "backupId": item.ID}); err != nil {
+			return map[string]any{"backupId": item.ID, "errorClass": "backup_checkpoint_failed"}, domain.JobFailed, err
+		}
 		event.TargetID = item.ID
 		event.Details["digestCount"] = item.FileCount
 		if audit != nil {
 			_ = audit.SaveAudit(ctx, event)
 		}
-		return map[string]any{"manifest": item}, domain.JobSucceeded, nil
-	})
-	_ = manager.Register("backup.restore", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+		return map[string]any{"manifest": item, "backupId": item.ID, "operationId": job.ID}, domain.JobSucceeded, nil
+	}, recoverBackupCreate(service))
+	_ = manager.RegisterWithRecovery("backup.restore", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		id, _ := job.Request["backupId"].(string)
 		digest, _ := job.Request["digest"].(string)
 		auditID, _ := job.Request["auditId"].(string)
@@ -486,28 +652,104 @@ func registerBackupJobs(manager *task.Manager, service api.BackupService, audit 
 		}
 		event := domain.AuditEvent{ID: auditID, Action: "backup.restore", TargetID: id, Outcome: domain.AuditStarted, Details: map[string]any{"jobId": job.ID, "digest": digest, "actor": job.Request["actor"], "source": job.Request["source"]}}
 		progress(domain.JobVerifying, 20)
-		err := service.Restore(ctx, id, digest)
+		if err := task.Checkpoint(ctx, "restore_starting", map[string]any{"operationId": job.ID, "backupId": id, "digest": digest}); err != nil {
+			return map[string]any{"backupId": id, "errorClass": "backup_restore_checkpoint_failed"}, domain.JobFailed, err
+		}
+		recoveryService, ok := service.(backupRecoveryService)
+		if !ok {
+			return map[string]any{"backupId": id, "errorClass": "backup_recovery_unavailable"}, domain.JobFailed, errors.New("backup recovery service is unavailable")
+		}
+		err := recoveryService.RestoreOperation(ctx, id, digest, job.ID)
 		if err != nil {
 			event.Outcome = domain.AuditFailed
-			event.Details["errorClass"] = "backup_restore_failed"
+			errorClass := "backup_restore_failed"
+			status := domain.JobFailed
+			if errors.Is(err, backup.ErrRestoreRolledBack) {
+				errorClass = "backup_restore_rolled_back"
+				status = domain.JobRolledBack
+			} else if errors.Is(err, backup.ErrRestoreRollbackFailed) {
+				errorClass = "backup_restore_rollback_failed"
+			}
+			event.Details["errorClass"] = errorClass
 			if audit != nil {
 				_ = audit.SaveAudit(ctx, event)
 			}
-			return map[string]any{"backupId": id, "errorClass": "backup_restore_failed"}, domain.JobFailed, err
+			return map[string]any{"backupId": id, "operationId": job.ID, "errorClass": errorClass, "rolledBack": status == domain.JobRolledBack}, status, err
+		}
+		if err := task.Checkpoint(ctx, "restore_completed", map[string]any{"operationId": job.ID, "backupId": id, "digest": digest}); err != nil {
+			return map[string]any{"backupId": id, "errorClass": "backup_restore_checkpoint_failed"}, domain.JobFailed, err
 		}
 		event.Outcome = domain.AuditSucceeded
 		if audit != nil {
 			_ = audit.SaveAudit(ctx, event)
 		}
-		return map[string]any{"backupId": id}, domain.JobSucceeded, nil
-	})
+		return map[string]any{"backupId": id, "operationId": job.ID}, domain.JobSucceeded, nil
+	}, recoverBackupRestore(service))
+}
+
+type backupRecoveryService interface {
+	CreateOperation(context.Context, string, string) (backup.Manifest, error)
+	ReconcileCreate(string) (backup.Manifest, bool, error)
+	RestoreOperation(context.Context, string, string, string) error
+	ReconcileRestore(context.Context, string, string, string) (backup.RestoreRecoveryState, error)
+}
+
+func recoverBackupCreate(service api.BackupService) task.Recoverer {
+	return func(_ context.Context, job domain.Job) (task.RecoveryDecision, error) {
+		recoveryService, ok := service.(backupRecoveryService)
+		if !ok {
+			return task.RecoveryDecision{}, errors.New("backup recovery service is unavailable")
+		}
+		manifest, found, err := recoveryService.ReconcileCreate(job.ID)
+		if err != nil {
+			return task.RecoveryDecision{}, err
+		}
+		if found {
+			return task.RecoveryDecision{Status: domain.JobSucceeded, Result: map[string]any{"phase": "readback_succeeded", "operationId": job.ID, "backupId": manifest.ID, "manifest": manifest, "readback": true}}, nil
+		}
+		if phase, _ := job.Result["phase"].(string); phase == "creating" {
+			return task.RecoveryDecision{Status: domain.JobQueued, Result: map[string]any{"phase": "publication_not_found", "operationId": job.ID, "readback": true}}, nil
+		}
+		return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: "backup_create_recovery_incomplete", ErrorMessage: "operation recovery requires manual reconciliation", Result: map[string]any{"phase": "recovery_incomplete", "operationId": job.ID, "readback": true}}, nil
+	}
+}
+
+func recoverBackupRestore(service api.BackupService) task.Recoverer {
+	return func(ctx context.Context, job domain.Job) (task.RecoveryDecision, error) {
+		recoveryService, ok := service.(backupRecoveryService)
+		if !ok {
+			return task.RecoveryDecision{}, errors.New("backup recovery service is unavailable")
+		}
+		id, _ := job.Request["backupId"].(string)
+		digest, _ := job.Request["digest"].(string)
+		state, err := recoveryService.ReconcileRestore(ctx, id, digest, job.ID)
+		if err != nil {
+			return task.RecoveryDecision{}, err
+		}
+		result := map[string]any{"backupId": id, "operationId": job.ID, "digest": digest, "readback": true}
+		switch state {
+		case backup.RestoreRecoveryCompleted:
+			result["phase"] = "readback_succeeded"
+			return task.RecoveryDecision{Status: domain.JobSucceeded, Result: result}, nil
+		case backup.RestoreRecoveryPending:
+			result["phase"] = "resume_verified"
+			return task.RecoveryDecision{Status: domain.JobQueued, Result: result}, nil
+		case backup.RestoreRecoveryRolledBack:
+			result["phase"] = "rollback_readback_succeeded"
+			result["rolledBack"] = true
+			return task.RecoveryDecision{Status: domain.JobRolledBack, ErrorClass: "backup_restore_rolled_back", ErrorMessage: "operation was rolled back", Result: result}, nil
+		default:
+			result["phase"] = "recovery_partial_state"
+			return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: "backup_restore_recovery_partial_state", ErrorMessage: "operation recovery requires manual reconciliation", Result: result}, nil
+		}
+	}
 }
 
 func registerSubscriptionJobs(manager *task.Manager, updater subscription.Updater, audit api.AuditStore) {
 	if manager == nil || updater.Sources == nil || updater.Nodes == nil || updater.Fetcher == nil {
 		return
 	}
-	_ = manager.Register("subscription.update", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	_ = manager.RegisterWithRecovery("subscription.update", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		id, _ := job.Request["subscriptionId"].(string)
 		scheduled, _ := job.Request["scheduled"].(bool)
 		auditID, _ := job.Request["auditId"].(string)
@@ -538,7 +780,14 @@ func registerSubscriptionJobs(manager *task.Manager, updater subscription.Update
 			expected = &plan
 		}
 		progress(domain.JobVerifying, 20)
-		result, err := updater.Apply(ctx, id, expected)
+		result, err := updater.ApplyWithCheckpoint(ctx, id, expected, func(phase string, preview subscription.UpdatePreview) error {
+			return task.Checkpoint(ctx, phase, map[string]any{
+				"subscriptionId": id,
+				"digest":         preview.Plan.Digest,
+				"planDigest":     subscription.UpdatePlanDigest(preview.Plan),
+				"nodeCount":      preview.Plan.NodeCount,
+			})
+		})
 		if err != nil {
 			event.Outcome = domain.AuditFailed
 			event.Details["errorClass"] = "subscription_update_failed"
@@ -559,8 +808,46 @@ func registerSubscriptionJobs(manager *task.Manager, updater subscription.Update
 		if audit != nil {
 			_ = audit.SaveAudit(ctx, event)
 		}
-		return map[string]any{"subscriptionId": id, "digest": result.Plan.Digest, "nodeCount": result.Plan.NodeCount, "oldNodesRetained": false}, domain.JobSucceeded, nil
-	})
+		return map[string]any{"subscriptionId": id, "digest": result.Plan.Digest, "planDigest": subscription.UpdatePlanDigest(result.Plan), "nodeCount": result.Plan.NodeCount, "oldNodesRetained": false}, domain.JobSucceeded, nil
+	}, recoverSubscriptionUpdate(updater))
+}
+
+func recoverSubscriptionUpdate(updater subscription.Updater) task.Recoverer {
+	return func(ctx context.Context, job domain.Job) (task.RecoveryDecision, error) {
+		id, _ := job.Request["subscriptionId"].(string)
+		id = strings.TrimSpace(id)
+		expectedDigest, _ := job.Result["digest"].(string)
+		expectedPlanDigest, _ := job.Result["planDigest"].(string)
+		if value, found := job.Request["plan"]; (expectedDigest == "" || expectedPlanDigest == "") && found && value != nil {
+			body, err := json.Marshal(value)
+			if err == nil {
+				var plan subscription.UpdatePlan
+				if json.Unmarshal(body, &plan) == nil {
+					expectedDigest = plan.Digest
+					expectedPlanDigest = subscription.UpdatePlanDigest(plan)
+				}
+			}
+		}
+		if id == "" || expectedDigest == "" || expectedPlanDigest == "" {
+			return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: "subscription_recovery_checkpoint_missing", ErrorMessage: "operation recovery failed", Result: map[string]any{"phase": "recovery_checkpoint_missing"}}, nil
+		}
+		state, preview, err := updater.Reconcile(ctx, id, expectedDigest, expectedPlanDigest)
+		if err != nil {
+			return task.RecoveryDecision{}, err
+		}
+		result := map[string]any{"subscriptionId": id, "digest": expectedDigest, "planDigest": expectedPlanDigest, "nodeCount": preview.Plan.NodeCount, "readback": true}
+		switch state {
+		case subscription.RecoveryCompleted:
+			result["phase"] = "readback_succeeded"
+			return task.RecoveryDecision{Status: domain.JobSucceeded, Result: result}, nil
+		case subscription.RecoveryPreState:
+			result["phase"] = "prestate_verified"
+			return task.RecoveryDecision{Status: domain.JobQueued, Result: result}, nil
+		default:
+			result["phase"] = "recovery_partial_state"
+			return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: "subscription_recovery_partial_state", ErrorMessage: "operation recovery requires manual reconciliation", Result: result}, nil
+		}
+	}
 }
 
 func decodeDraftRequest(value any) (domain.MihomoDraft, error) {

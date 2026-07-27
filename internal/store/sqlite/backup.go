@@ -47,6 +47,50 @@ func (s *Store) BackupDatabase(ctx context.Context, destination string) error {
 	return os.Chmod(absolute, 0o600)
 }
 
+// DatabaseMatchesBackup compares only the application tables owned by backup
+// restore. Jobs, replay tokens and audit events intentionally remain outside
+// the comparison because a restore never replaces them.
+func (s *Store) DatabaseMatchesBackup(ctx context.Context, source string) (returnMatch bool, returnErr error) {
+	if source == "" || strings.Contains(source, "\x00") {
+		return false, errors.New("backup comparison source is invalid")
+	}
+	absolute, err := filepath.Abs(source)
+	if err != nil {
+		return false, err
+	}
+	if info, err := os.Stat(absolute); err != nil || info.IsDir() {
+		return false, errors.New("backup comparison source is unavailable")
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `ATTACH DATABASE ? AS foxos_compare`, absolute); err != nil {
+		return false, err
+	}
+	defer func() {
+		if _, err := conn.ExecContext(context.Background(), `DETACH DATABASE foxos_compare`); returnErr == nil && err != nil {
+			returnErr = fmt.Errorf("detach backup comparison source: %w", err)
+		}
+	}()
+	if err := validateAttachedSchema(ctx, conn, "foxos_compare"); err != nil {
+		return false, err
+	}
+	for _, table := range restoredTables {
+		// The schema and table names are selected from fixed allowlists.
+		query := "SELECT NOT EXISTS(SELECT * FROM main." + table + " EXCEPT SELECT * FROM foxos_compare." + table + ") AND NOT EXISTS(SELECT * FROM foxos_compare." + table + " EXCEPT SELECT * FROM main." + table + ")" // #nosec G202
+		var matches bool
+		if err := conn.QueryRowContext(ctx, query).Scan(&matches); err != nil {
+			return false, err
+		}
+		if !matches {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // RestoreDatabase copies application tables from a verified SQLite backup in a
 // single transaction. Schema migrations remain owned by the running binary.
 func (s *Store) RestoreDatabase(ctx context.Context, source string) (returnErr error) {
@@ -120,8 +164,16 @@ type restoreColumn struct {
 }
 
 func validateRestoreSchema(ctx context.Context, conn *sql.Conn) error {
+	return validateAttachedSchema(ctx, conn, "foxos_restore")
+}
+
+func validateAttachedSchema(ctx context.Context, conn *sql.Conn, schema string) error {
+	if schema != "foxos_restore" && schema != "foxos_compare" {
+		return fmt.Errorf("%w: invalid schema", ErrIncompatibleBackup)
+	}
 	var version int
-	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM foxos_restore.schema_migrations`).Scan(&version); err != nil {
+	// Schema is selected from the fixed allowlist above.
+	if err := conn.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM "+schema+".schema_migrations").Scan(&version); err != nil { // #nosec G202
 		return fmt.Errorf("%w: schema migration metadata is unavailable", ErrIncompatibleBackup)
 	}
 	if version != currentSchemaVersion {
@@ -132,7 +184,7 @@ func validateRestoreSchema(ctx context.Context, conn *sql.Conn) error {
 		if err != nil {
 			return err
 		}
-		incoming, err := tableColumns(ctx, conn, "foxos_restore", table)
+		incoming, err := tableColumns(ctx, conn, schema, table)
 		if err != nil {
 			return err
 		}
@@ -144,7 +196,7 @@ func validateRestoreSchema(ctx context.Context, conn *sql.Conn) error {
 }
 
 func tableColumns(ctx context.Context, conn *sql.Conn, schema, table string) ([]restoreColumn, error) {
-	if schema != "main" && schema != "foxos_restore" {
+	if schema != "main" && schema != "foxos_restore" && schema != "foxos_compare" {
 		return nil, fmt.Errorf("%w: invalid schema", ErrIncompatibleBackup)
 	}
 	if !slices.Contains(restoredTables, table) {

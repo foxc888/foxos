@@ -36,19 +36,21 @@ type Service struct {
 	Database      Database
 	MihomoPath    string
 	MihomoRestore func(context.Context, []byte) error
+	MihomoHealthy func(context.Context) error
 	Directory     string
 	Retention     int
 	entropy       io.Reader
 }
 
 type Manifest struct {
-	ID        string            `json:"id"`
-	Label     string            `json:"label"`
-	CreatedAt string            `json:"createdAt"`
-	Database  string            `json:"database"`
-	Mihomo    string            `json:"mihomo,omitempty"`
-	FileCount int               `json:"fileCount"`
-	Checksums map[string]string `json:"checksums"`
+	ID          string            `json:"id"`
+	OperationID string            `json:"operationId,omitempty"`
+	Label       string            `json:"label"`
+	CreatedAt   string            `json:"createdAt"`
+	Database    string            `json:"database"`
+	Mihomo      string            `json:"mihomo,omitempty"`
+	FileCount   int               `json:"fileCount"`
+	Checksums   map[string]string `json:"checksums"`
 }
 
 type Preview struct {
@@ -57,8 +59,15 @@ type Preview struct {
 }
 
 func (s Service) Create(ctx context.Context, label string) (Manifest, error) {
+	return s.CreateOperation(ctx, label, "")
+}
+
+func (s Service) CreateOperation(ctx context.Context, label, operationID string) (Manifest, error) {
 	if s.Database == nil || s.Directory == "" {
 		return Manifest{}, errors.New("backup service is not configured")
+	}
+	if operationID != "" && !safeID(operationID) {
+		return Manifest{}, errors.New("backup operation id is invalid")
 	}
 	base, err := safeBase(s.Directory)
 	if err != nil {
@@ -76,28 +85,32 @@ func (s Service) Create(ctx context.Context, label string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, fmt.Errorf("generate backup id: %w", err)
 	}
-	dir := filepath.Join(base, id)
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	finalDir := filepath.Join(base, id)
+	stagingDir := filepath.Join(base, "."+id+".staging")
+	if err := os.Mkdir(stagingDir, 0o700); err != nil {
 		return Manifest{}, err
 	}
-	manifest := Manifest{ID: id, Label: label, CreatedAt: now.Format(time.RFC3339Nano), Database: "database.sqlite", Checksums: make(map[string]string)}
-	if err := s.Database.BackupDatabase(ctx, filepath.Join(dir, manifest.Database)); err != nil {
-		_ = os.RemoveAll(dir)
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(stagingDir)
+		}
+	}()
+	manifest := Manifest{ID: id, OperationID: operationID, Label: label, CreatedAt: now.Format(time.RFC3339Nano), Database: "database.sqlite", Checksums: make(map[string]string)}
+	if err := s.Database.BackupDatabase(ctx, filepath.Join(stagingDir, manifest.Database)); err != nil {
 		return Manifest{}, err
 	}
 	if s.MihomoPath != "" {
 		if _, err := os.Stat(s.MihomoPath); err == nil {
 			manifest.Mihomo = "mihomo-config.yaml"
-			if err := copyFile(s.MihomoPath, filepath.Join(dir, manifest.Mihomo)); err != nil {
-				_ = os.RemoveAll(dir)
+			if err := copyFile(s.MihomoPath, filepath.Join(stagingDir, manifest.Mihomo)); err != nil {
 				return Manifest{}, err
 			}
 		}
 	}
 	for _, name := range manifestFiles(manifest) {
-		digest, err := fileDigest(dir, name)
+		digest, err := fileDigest(stagingDir, name)
 		if err != nil {
-			_ = os.RemoveAll(dir)
 			return Manifest{}, err
 		}
 		manifest.Checksums[name] = digest
@@ -107,7 +120,17 @@ func (s Service) Create(ctx context.Context, label string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), manifestBody, 0o600); err != nil {
+	if err := writeDurableFile(filepath.Join(stagingDir, "manifest.json"), manifestBody, 0o600); err != nil {
+		return Manifest{}, err
+	}
+	if err := syncDirectory(stagingDir); err != nil {
+		return Manifest{}, err
+	}
+	if err := os.Rename(stagingDir, finalDir); err != nil {
+		return Manifest{}, err
+	}
+	published = true
+	if err := syncDirectory(base); err != nil {
 		return Manifest{}, err
 	}
 	if err := s.prune(base); err != nil {
@@ -150,12 +173,19 @@ func (s Service) Inspect(id string) (Preview, error) {
 	if err != nil {
 		return Preview{}, err
 	}
+	return inspectDirectory(base, id, id)
+}
+
+func inspectDirectory(base, directory, id string) (Preview, error) {
+	if !safeID(id) || (directory != id && directory != "."+id+".staging") {
+		return Preview{}, fmt.Errorf("%w: invalid backup directory", ErrInvalidBackup)
+	}
 	root, err := os.OpenRoot(base)
 	if err != nil {
 		return Preview{}, err
 	}
 	defer root.Close()
-	manifestFile, err := root.Open(filepath.Join(id, "manifest.json"))
+	manifestFile, err := root.Open(filepath.Join(directory, "manifest.json"))
 	if err != nil {
 		return Preview{}, fmt.Errorf("%w: manifest unavailable", ErrInvalidBackup)
 	}
@@ -167,7 +197,7 @@ func (s Service) Inspect(id string) (Preview, error) {
 	var manifest Manifest
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil || manifest.ID != id || manifest.Database != "database.sqlite" || (manifest.Mihomo != "" && manifest.Mihomo != "mihomo-config.yaml") {
+	if err := decoder.Decode(&manifest); err != nil || manifest.ID != id || (manifest.OperationID != "" && !safeID(manifest.OperationID)) || manifest.Database != "database.sqlite" || (manifest.Mihomo != "" && manifest.Mihomo != "mihomo-config.yaml") {
 		return Preview{}, fmt.Errorf("%w: manifest mismatch", ErrInvalidBackup)
 	}
 	files := manifestFiles(manifest)
@@ -179,7 +209,7 @@ func (s Service) Inspect(id string) (Preview, error) {
 		if len(want) != sha256.Size*2 {
 			return Preview{}, fmt.Errorf("%w: checksum missing", ErrInvalidBackup)
 		}
-		got, err := fileDigest(filepath.Join(base, id), name)
+		got, err := fileDigest(filepath.Join(base, directory), name)
 		if err != nil || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 			return Preview{}, fmt.Errorf("%w: checksum mismatch", ErrInvalidBackup)
 		}
@@ -189,53 +219,11 @@ func (s Service) Inspect(id string) (Preview, error) {
 }
 
 func (s Service) Restore(ctx context.Context, id, expectedDigest string) error {
-	if !restoreMu.TryLock() {
-		return ErrRestoreInProgress
-	}
-	defer restoreMu.Unlock()
-	preview, err := s.Inspect(id)
+	operationID, err := s.newID("restore")
 	if err != nil {
-		return err
+		return fmt.Errorf("generate restore operation id: %w", err)
 	}
-	if len(expectedDigest) != sha256.Size*2 || subtle.ConstantTimeCompare([]byte(preview.Digest), []byte(expectedDigest)) != 1 {
-		return ErrBackupChanged
-	}
-	base, err := safeBase(s.Directory)
-	if err != nil {
-		return err
-	}
-	var mihomoBody []byte
-	if preview.Manifest.Mihomo != "" {
-		if s.MihomoRestore == nil {
-			return errors.New("Mihomo restore runtime is unavailable")
-		}
-		mihomoBody, err = readBackupFile(filepath.Join(base, id), preview.Manifest.Mihomo)
-		if err != nil {
-			return err
-		}
-	}
-	rollbackID, err := s.newID("restore-rollback")
-	if err != nil {
-		return fmt.Errorf("generate restore rollback id: %w", err)
-	}
-	rollbackPath := filepath.Join(base, "."+rollbackID+".sqlite")
-	if err := s.Database.BackupDatabase(ctx, rollbackPath); err != nil {
-		return fmt.Errorf("create restore rollback point: %w", err)
-	}
-	defer os.Remove(rollbackPath)
-	databasePath := filepath.Join(base, id, preview.Manifest.Database)
-	if err := s.Database.RestoreDatabase(ctx, databasePath); err != nil {
-		return err
-	}
-	if len(mihomoBody) > 0 {
-		if err := s.MihomoRestore(ctx, mihomoBody); err != nil {
-			if rollbackErr := s.Database.RestoreDatabase(ctx, rollbackPath); rollbackErr != nil {
-				return fmt.Errorf("Mihomo restore failed: %v; database rollback failed: %w", err, rollbackErr)
-			}
-			return fmt.Errorf("Mihomo restore failed and database was rolled back: %w", err)
-		}
-	}
-	return nil
+	return s.RestoreOperation(ctx, id, expectedDigest, operationID)
 }
 
 func (s Service) Path(id string) string {

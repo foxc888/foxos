@@ -7,7 +7,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/foxc888/foxos/internal/domain"
@@ -15,6 +18,14 @@ import (
 )
 
 var ErrContentChanged = errors.New("subscription content changed after preview")
+
+type RecoveryState string
+
+const (
+	RecoveryCompleted RecoveryState = "completed"
+	RecoveryPreState  RecoveryState = "prestate"
+	RecoveryPartial   RecoveryState = "partial"
+)
 
 type SourceStore interface {
 	Subscription(context.Context, string) (domain.Subscription, error)
@@ -87,6 +98,10 @@ func (u Updater) Preview(ctx context.Context, id string) (UpdatePreview, error) 
 }
 
 func (u Updater) Apply(ctx context.Context, id string, expected *UpdatePlan) (UpdatePreview, error) {
+	return u.ApplyWithCheckpoint(ctx, id, expected, nil)
+}
+
+func (u Updater) ApplyWithCheckpoint(ctx context.Context, id string, expected *UpdatePlan, checkpoint func(string, UpdatePreview) error) (UpdatePreview, error) {
 	preview, err := u.Preview(ctx, id)
 	if err != nil {
 		u.recordFailure(ctx, id, err)
@@ -96,14 +111,68 @@ func (u Updater) Apply(ctx context.Context, id string, expected *UpdatePlan) (Up
 		u.recordFailure(ctx, id, ErrContentChanged)
 		return UpdatePreview{}, ErrContentChanged
 	}
+	if checkpoint != nil {
+		if err := checkpoint("preview_verified", preview); err != nil {
+			return UpdatePreview{}, err
+		}
+	}
 	if err := u.Nodes.ReplaceSubscriptionNodes(ctx, id, preview.Nodes); err != nil {
 		u.recordFailure(ctx, id, err)
 		return UpdatePreview{}, err
 	}
+	if checkpoint != nil {
+		if err := checkpoint("nodes_replaced", preview); err != nil {
+			return UpdatePreview{}, err
+		}
+	}
 	if err := u.Sources.UpdateSubscriptionResult(ctx, id, preview.Plan.Digest, "", true); err != nil {
 		return UpdatePreview{}, err
 	}
+	if checkpoint != nil {
+		if err := checkpoint("source_recorded", preview); err != nil {
+			return UpdatePreview{}, err
+		}
+	}
 	return preview, nil
+}
+
+// Reconcile proves which side of the subscription replacement transaction is
+// visible after a crash. It may only repair the source result after proving
+// that the complete desired node set is already present.
+func (u Updater) Reconcile(ctx context.Context, id, expectedDigest, expectedPlanDigest string) (RecoveryState, UpdatePreview, error) {
+	if expectedDigest == "" || expectedPlanDigest == "" {
+		return RecoveryPartial, UpdatePreview{}, nil
+	}
+	preview, err := u.Preview(ctx, id)
+	if err != nil {
+		return RecoveryPartial, UpdatePreview{}, err
+	}
+	if !strings.EqualFold(preview.Plan.Digest, expectedDigest) {
+		return RecoveryPartial, preview, nil
+	}
+	current, err := u.Nodes.SubscriptionNodes(ctx, id)
+	if err != nil {
+		return RecoveryPartial, preview, err
+	}
+	item, err := u.Sources.Subscription(ctx, id)
+	if err != nil {
+		return RecoveryPartial, preview, err
+	}
+	if equalNodeSets(current, preview.Nodes) {
+		if !strings.EqualFold(item.LastDigest, expectedDigest) || item.LastError != "" {
+			if err := u.Sources.UpdateSubscriptionResult(ctx, id, expectedDigest, "", true); err != nil {
+				return RecoveryPartial, preview, err
+			}
+		}
+		return RecoveryCompleted, preview, nil
+	}
+	if strings.EqualFold(item.LastDigest, expectedDigest) {
+		return RecoveryPartial, preview, nil
+	}
+	if subtle.ConstantTimeCompare([]byte(UpdatePlanDigest(preview.Plan)), []byte(expectedPlanDigest)) == 1 {
+		return RecoveryPreState, preview, nil
+	}
+	return RecoveryPartial, preview, nil
 }
 
 func EqualUpdatePlans(left, right UpdatePlan) bool {
@@ -113,6 +182,31 @@ func EqualUpdatePlans(left, right UpdatePlan) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare(leftBody, rightBody) == 1
+}
+
+func UpdatePlanDigest(plan UpdatePlan) string {
+	body, err := json.Marshal(plan)
+	if err != nil {
+		panic("subscription update plan contains unsupported data")
+	}
+	digest := sha256.Sum256(body)
+	return hex.EncodeToString(digest[:])
+}
+
+func equalNodeSets(left, right []domain.Node) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	left = append([]domain.Node(nil), left...)
+	right = append([]domain.Node(nil), right...)
+	sort.Slice(left, func(i, j int) bool { return left[i].ID < left[j].ID })
+	sort.Slice(right, func(i, j int) bool { return right[i].ID < right[j].ID })
+	for index := range left {
+		if !reflect.DeepEqual(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (u Updater) recordFailure(ctx context.Context, id string, cause error) {
@@ -132,8 +226,12 @@ func parseNodes(body []byte) ([]domain.Node, error) {
 }
 
 func prepareNodes(item domain.Subscription, parsed []domain.Node) ([]domain.Node, error) {
+	const maxSubscriptionNodes = 4096
+	if len(parsed) > maxSubscriptionNodes {
+		return nil, fmt.Errorf("subscription exceeds %d nodes", maxSubscriptionNodes)
+	}
 	prepared := make([]domain.Node, 0, len(parsed))
-	seen := make(map[string]struct{}, len(parsed))
+	seen := make(map[string][]domain.Node, len(parsed))
 	names := make(map[string]struct{}, len(parsed))
 	for _, node := range parsed {
 		remoteName := strings.TrimSpace(node.Name)
@@ -144,19 +242,37 @@ func prepareNodes(item domain.Subscription, parsed []domain.Node) ([]domain.Node
 		node.Name = ""
 		node.SubscriptionID = ""
 		body, err := json.Marshal(struct {
-			SubscriptionID string      `json:"subscriptionId"`
-			Node           domain.Node `json:"node"`
-		}{SubscriptionID: item.ID, Node: node})
+			SubscriptionID string `json:"subscriptionId"`
+			Type           string `json:"type"`
+			Server         string `json:"server"`
+			Port           int    `json:"port"`
+			Cipher         string `json:"cipher,omitempty"`
+			Network        string `json:"network,omitempty"`
+			SNI            string `json:"sni,omitempty"`
+			Path           string `json:"path,omitempty"`
+			Host           string `json:"host,omitempty"`
+			TLS            bool   `json:"tls,omitempty"`
+		}{SubscriptionID: item.ID, Type: node.Type, Server: node.Server, Port: node.Port, Cipher: node.Cipher, Network: node.Network, SNI: node.SNI, Path: node.Path, Host: node.Host, TLS: node.TLS})
 		if err != nil {
 			return nil, err
 		}
 		digest := sha256.Sum256(body)
 		fingerprint := hex.EncodeToString(digest[:])
-		if _, duplicate := seen[fingerprint]; duplicate {
+		duplicate := false
+		for _, previous := range seen[fingerprint] {
+			if equivalentSubscriptionNode(previous, node) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
 			continue
 		}
-		seen[fingerprint] = struct{}{}
+		seen[fingerprint] = append(seen[fingerprint], node)
 		node.ID = "sub-" + fingerprint[:24]
+		if occurrence := len(seen[fingerprint]); occurrence > 1 {
+			node.ID += "-" + strconv.Itoa(occurrence)
+		}
 		node.SubscriptionID = item.ID
 		node.Name = strings.TrimSpace(item.Name) + " / " + remoteName
 		nameKey := strings.ToLower(node.Name)
@@ -175,6 +291,13 @@ func prepareNodes(item domain.Subscription, parsed []domain.Node) ([]domain.Node
 	}
 	sort.Slice(prepared, func(i, j int) bool { return prepared[i].ID < prepared[j].ID })
 	return prepared, nil
+}
+
+func equivalentSubscriptionNode(left, right domain.Node) bool {
+	left.ID, right.ID = "", ""
+	left.Name, right.Name = "", ""
+	left.SubscriptionID, right.SubscriptionID = "", ""
+	return reflect.DeepEqual(left, right)
 }
 
 func buildUpdatePlan(subscriptionID, digest string, existing, desired []domain.Node) UpdatePlan {

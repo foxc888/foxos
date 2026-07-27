@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -198,6 +200,74 @@ func (s *Service) Restore(ctx context.Context, id, label string) (ApplyResult, d
 		return result, snapshot, err
 	}
 	return result, snapshot, nil
+}
+
+// ReconcileApplied closes the crash window between an atomic config replace
+// and the task's terminal database update. It performs only readback, health
+// verification and idempotent snapshot persistence.
+func (s *Service) ReconcileApplied(ctx context.Context, expectedDigest, label string) (domain.MihomoSnapshot, bool, error) {
+	if s == nil || s.Store == nil || s.Applier == nil || s.Applier.Runtime == nil {
+		return domain.MihomoSnapshot{}, false, ErrMihomoUnavailable
+	}
+	body, err := readCurrentConfig(s.Applier.ConfigPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return domain.MihomoSnapshot{}, false, nil
+	}
+	if err != nil {
+		return domain.MihomoSnapshot{}, false, err
+	}
+	actual, _ := digest(body)
+	if !validDigest(expectedDigest) || !strings.EqualFold(actual, expectedDigest) {
+		return domain.MihomoSnapshot{}, false, nil
+	}
+	if err := s.Applier.Runtime.Healthy(ctx); err != nil {
+		return domain.MihomoSnapshot{}, false, err
+	}
+	id, err := snapshotID(actual)
+	if err != nil {
+		return domain.MihomoSnapshot{}, false, err
+	}
+	snapshot := domain.MihomoSnapshot{ID: id, Digest: actual, Label: label, Body: body, CreatedAt: nowUTC(s.Now)}
+	if err := s.Store.SaveMihomoSnapshot(ctx, snapshot); err != nil {
+		return domain.MihomoSnapshot{}, false, err
+	}
+	return snapshot, true, nil
+}
+
+func (s *Service) ReconcileRestore(ctx context.Context, id string) (domain.MihomoSnapshot, bool, error) {
+	if s == nil || s.Store == nil {
+		return domain.MihomoSnapshot{}, false, ErrMihomoUnavailable
+	}
+	snapshot, err := s.Store.MihomoSnapshot(ctx, id)
+	if err != nil {
+		return domain.MihomoSnapshot{}, false, err
+	}
+	actual := sha256.Sum256(snapshot.Body)
+	if !strings.EqualFold(hex.EncodeToString(actual[:]), snapshot.Digest) {
+		return domain.MihomoSnapshot{}, false, ErrMihomoSnapshotCorrupt
+	}
+	return s.ReconcileApplied(ctx, snapshot.Digest, snapshot.Label)
+}
+
+func readCurrentConfig(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 16<<20 {
+		return nil, errors.New("invalid live Mihomo configuration")
+	}
+	return io.ReadAll(io.LimitReader(file, 16<<20+1))
+}
+
+func validDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func ValidateYAML(body []byte) error {

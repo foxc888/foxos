@@ -364,11 +364,24 @@ func (s *egressJobPolicies) snapshot() (*domain.DevicePolicy, int) {
 }
 
 type egressJobPlanner struct {
-	state routeros.EgressState
+	mu      sync.Mutex
+	state   routeros.EgressState
+	applied bool
 }
 
-func (p egressJobPlanner) PlanDeviceEgress(_ context.Context, policy domain.DevicePolicy) (routeros.EgressPlan, error) {
+func (p *egressJobPlanner) PlanDeviceEgress(_ context.Context, policy domain.DevicePolicy) (routeros.EgressPlan, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.applied {
+		return routeros.EgressPlan{PolicyID: policy.ID, StaticIP: policy.StaticIP, Egress: policy.Egress, TargetID: policy.TargetID, Policy: policy, StateDigest: routeros.EgressStateDigest(p.state)}, nil
+	}
 	return routeros.PlanDeviceEgress(policy, p.state)
+}
+
+func (p *egressJobPlanner) setApplied(applied bool) {
+	p.mu.Lock()
+	p.applied = applied
+	p.mu.Unlock()
 }
 
 type egressJobExecutor struct {
@@ -376,15 +389,22 @@ type egressJobExecutor struct {
 	compensateCalls atomic.Int32
 	executeErr      error
 	compensateErr   error
+	planner         *egressJobPlanner
 }
 
 func (e *egressJobExecutor) Execute(context.Context, routeros.EgressPlan) error {
 	e.executeCalls.Add(1)
+	if e.executeErr == nil && e.planner != nil {
+		e.planner.setApplied(true)
+	}
 	return e.executeErr
 }
 
 func (e *egressJobExecutor) Compensate(context.Context, routeros.EgressPlan) error {
 	e.compensateCalls.Add(1)
+	if e.compensateErr == nil && e.planner != nil {
+		e.planner.setApplied(false)
+	}
 	return e.compensateErr
 }
 
@@ -427,13 +447,14 @@ func TestEgressJobPersistsOnlyAfterExecutionAndCompensatesPersistFailure(t *test
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			policies := &egressJobPolicies{current: clonePolicy(test.current), saveErr: test.saveErr}
-			executor := &egressJobExecutor{compensateErr: test.compensateErr}
+			planner := &egressJobPlanner{state: test.state}
+			executor := &egressJobExecutor{compensateErr: test.compensateErr, planner: planner}
 			manager, err := task.New(context.Background(), store)
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = manager.Close() })
-			registerEgressJobs(manager, policies, egressJobPlanner{state: test.state}, executor, store)
+			registerEgressJobs(manager, policies, planner, executor, store)
 			job, err := manager.Submit(context.Background(), "routeros.egress", test.name, map[string]any{"plan": plan, "actor": "test", "source": "127.0.0.1"})
 			if err != nil {
 				t.Fatal(err)
@@ -452,6 +473,63 @@ func TestEgressJobPersistsOnlyAfterExecutionAndCompensatesPersistFailure(t *test
 			events, err := store.AuditEvents(context.Background(), 10)
 			if err != nil || len(events) != 1 || events[0].Outcome == domain.AuditStarted {
 				t.Fatalf("audit=%+v err=%v", events, err)
+			}
+		})
+	}
+}
+
+func TestEgressJobRecoveryReconcilesOnlyProvenStates(t *testing.T) {
+	t.Parallel()
+	direct := domain.DevicePolicy{ID: "phone", Name: "Phone", MACAddress: "AA:BB:CC:DD:EE:FF", StaticIP: "192.168.1.20", DHCPServer: "dhcp-lan", Egress: domain.EgressDirect}
+	blocked := direct
+	blocked.Egress = domain.EgressBlocked
+	ready := routeros.EgressState{FilterRules: []map[string]string{{".id": "*f1", "chain": "forward", "action": "jump", "jump-target": "foxos-forward", "comment": "foxos:anchor:forward", "disabled": "false"}}}
+	raw, err := routeros.PlanDeviceEgress(blocked, ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := api.FinalizeEgressPlan(raw, &direct)
+	tests := []struct {
+		name           string
+		current        domain.DevicePolicy
+		routerApplied  bool
+		wantStatus     domain.JobStatus
+		wantExecutions int32
+		wantPersisted  domain.EgressType
+		wantErrorClass string
+	}{
+		{name: "external state is complete and SQLite is reconciled", current: direct, routerApplied: true, wantStatus: domain.JobSucceeded, wantPersisted: domain.EgressBlocked},
+		{name: "exact prestate is requeued", current: direct, wantStatus: domain.JobSucceeded, wantExecutions: 1, wantPersisted: domain.EgressBlocked},
+		{name: "partial state fails closed", current: blocked, wantStatus: domain.JobFailed, wantPersisted: domain.EgressBlocked, wantErrorClass: "egress_recovery_partial_state"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store, err := sqlite.Open(filepath.Join(t.TempDir(), "jobs.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			job := domain.Job{ID: "interrupted-egress", Kind: "routeros.egress", Status: domain.JobVerifying, Progress: 70, Request: map[string]any{"plan": plan, "actor": "test", "source": "local"}, Result: map[string]any{"phase": "external_applied"}}
+			if _, _, err := store.CreateJob(context.Background(), job); err != nil {
+				t.Fatal(err)
+			}
+			manager, err := task.New(context.Background(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Close()
+			policies := &egressJobPolicies{current: clonePolicy(&test.current)}
+			planner := &egressJobPlanner{state: ready, applied: test.routerApplied}
+			executor := &egressJobExecutor{planner: planner}
+			registerEgressJobs(manager, policies, planner, executor, store)
+			completed := waitForStoredJob(t, manager, job.ID, test.wantStatus)
+			if completed.ErrorClass != test.wantErrorClass || executor.executeCalls.Load() != test.wantExecutions {
+				t.Fatalf("job=%+v executions=%d", completed, executor.executeCalls.Load())
+			}
+			persisted, _ := policies.snapshot()
+			if persisted == nil || persisted.Egress != test.wantPersisted {
+				t.Fatalf("persisted=%+v", persisted)
 			}
 		})
 	}

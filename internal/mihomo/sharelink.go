@@ -182,7 +182,10 @@ func ssNode(credential, address, fragment string) (domain.Node, error) {
 	return finalizeImportedNode(node)
 }
 func finalizeImportedNode(node domain.Node) (domain.Node, error) {
-	material := fmt.Sprintf("%s|%s|%s|%d|%s|%s|%s", node.Type, node.Name, node.Server, node.Port, node.Username, node.UUID, node.Password)
+	// IDs are returned by parsing APIs, so they must not be a verifier for a
+	// password or UUID. The import endpoint replaces this provisional ID with
+	// cryptographic randomness before persistence.
+	material := fmt.Sprintf("%s|%s|%s|%d|%s|%s|%s|%s|%t", node.Type, node.Name, node.Server, node.Port, node.Network, node.SNI, node.Path, node.Host, node.TLS)
 	sum := sha256.Sum256([]byte(material))
 	node.ID = fmt.Sprintf("node-%x", sum[:8])
 	if err := node.Validate(); err != nil {

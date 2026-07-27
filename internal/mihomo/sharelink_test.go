@@ -46,3 +46,18 @@ func TestBatchRejectsPartialFailure(t *testing.T) {
 		t.Fatal("expected atomic batch failure")
 	}
 }
+
+func TestProvisionalNodeIDDoesNotDependOnCredential(t *testing.T) {
+	t.Parallel()
+	first, err := ParseShareLink("vless://00000000-0000-0000-0000-000000000001@example.com:443?security=tls#node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ParseShareLink("vless://00000000-0000-0000-0000-000000000002@example.com:443?security=tls#node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("credential affected externally visible ID: %s != %s", first.ID, second.ID)
+	}
+}
