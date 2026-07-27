@@ -65,6 +65,7 @@ func main() {
 	var egressPlanner api.EgressPlanner
 	var egressExecutor api.EgressExecutor
 	var dhcpExpansionExecutor api.DHCPExpansionExecutor
+	var containerCommands containerCommandService
 	var routerMonitor alerting.RouterReader
 	if runtimeConfig.RouterOS.URL != "" {
 		client, err := routeros.NewClient(runtimeConfig.RouterOS.URL, runtimeConfig.RouterOS.Username, runtimeConfig.RouterOS.Password)
@@ -83,6 +84,7 @@ func main() {
 		egressPlanner = client
 		egressExecutor = routeros.EgressExecutor{Writer: client}
 		dhcpExpansionExecutor = routeros.DHCPExpansionExecutor{Writer: client}
+		containerCommands = client
 	}
 	var clash api.MihomoReader
 	var mihomoService api.MihomoService
@@ -152,6 +154,7 @@ func main() {
 	app.RegisterDevicePolicies(mux, store)
 	app.RegisterAudit(mux, store)
 	app.RegisterStatus(mux, ros, clash)
+	app.RegisterContainerCommands(mux, containerCommands, jobManager)
 	app.RegisterDevices(mux, ros, store, store)
 	app.RegisterMosDNS(mux, mosdnsReader)
 	app.RegisterL2TP(mux, l2tp)
@@ -183,6 +186,7 @@ func main() {
 	registerEgressJobs(jobManager, store, egressPlanner, egressExecutor, store)
 	registerBackupJobs(jobManager, backupService, store)
 	registerSubscriptionJobs(jobManager, subscriptionUpdater, store)
+	registerContainerCommandJobs(jobManager, containerCommands, store)
 	alertMonitor, err := alerting.Start(context.Background(), alerting.Evaluator{Store: store, RouterOS: routerMonitor, Mihomo: mihomoMonitor, MosDNS: mosdnsReader}, time.Minute, func(err error) {
 		log.Printf("alert evaluation incomplete: %v", err)
 	})
@@ -610,6 +614,255 @@ func egressJobErrorClass(err error) string {
 	default:
 		return "egress_apply_failed"
 	}
+}
+
+type containerCommandService interface {
+	ManagedContainer(context.Context, string, string) (routeros.Container, error)
+	StartContainer(context.Context, string, string) error
+	StopContainer(context.Context, string, string) error
+}
+
+type containerCommandRequest struct {
+	ID      string
+	Owner   string
+	Command string
+}
+
+func registerContainerCommandJobs(manager *task.Manager, service containerCommandService, audit api.AuditStore) {
+	if manager == nil || service == nil {
+		return
+	}
+	_ = manager.RegisterWithRecovery("routeros.container-command", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+		request, err := decodeContainerCommandRequest(job.Request)
+		if err != nil {
+			return map[string]any{"errorClass": "container_command_request_invalid"}, domain.JobFailed, err
+		}
+		event := containerCommandAuditEvent(job, request)
+		if audit == nil {
+			return map[string]any{"errorClass": "container_command_audit_unavailable"}, domain.JobFailed, errors.New("container command audit store is unavailable")
+		}
+		if err := audit.SaveAudit(ctx, event); err != nil {
+			return map[string]any{"errorClass": "container_command_audit_failed"}, domain.JobFailed, errors.New("container command audit start failed")
+		}
+
+		current, err := service.ManagedContainer(ctx, request.ID, request.Owner)
+		if err != nil {
+			return failContainerCommand(ctx, audit, event, "container_command_readback_failed", false, err)
+		}
+		initialStatus, _ := job.Result["initialStatus"].(string)
+		initialStatus = normalizedContainerStatus(initialStatus)
+		currentStatus := normalizedContainerStatus(current.Status)
+		if initialStatus == "" {
+			initialStatus = currentStatus
+		}
+		if !containerCommandPrecondition(request.Command, initialStatus, currentStatus) {
+			return failContainerCommand(ctx, audit, event, "container_command_state_invalid", false, routeros.ErrContainerState)
+		}
+		if err := task.Checkpoint(ctx, "preconditions_verified", map[string]any{"containerId": request.ID, "owner": request.Owner, "command": request.Command, "initialStatus": initialStatus}); err != nil {
+			return failContainerCommand(ctx, audit, event, "container_command_checkpoint_failed", false, err)
+		}
+		progress(domain.JobRunning, 25)
+
+		rolledBack := false
+		switch request.Command {
+		case "start":
+			err = service.StartContainer(ctx, request.ID, request.Owner)
+		case "stop":
+			err = service.StopContainer(ctx, request.ID, request.Owner)
+		case "restart":
+			if currentStatus == "running" {
+				err = service.StopContainer(ctx, request.ID, request.Owner)
+				if err == nil {
+					err = requireContainerStatus(ctx, service, request, "stopped")
+				}
+				if err == nil {
+					err = task.Checkpoint(ctx, "restart_stopped", map[string]any{"containerId": request.ID, "initialStatus": initialStatus})
+				}
+			}
+			if err == nil {
+				progress(domain.JobVerifying, 60)
+				err = service.StartContainer(ctx, request.ID, request.Owner)
+			}
+			if err != nil {
+				compensationErr := service.StartContainer(ctx, request.ID, request.Owner)
+				if compensationErr == nil {
+					compensationErr = requireContainerStatus(ctx, service, request, "running")
+				}
+				if compensationErr != nil {
+					return failContainerCommand(ctx, audit, event, "container_restart_rollback_failed", false, errors.Join(err, compensationErr))
+				}
+				rolledBack = true
+			}
+		}
+		if rolledBack {
+			return failContainerCommand(ctx, audit, event, "container_restart_rolled_back", true, errors.New("container restart failed and the original running state was restored"))
+		}
+		if err != nil {
+			return failContainerCommand(ctx, audit, event, "container_command_apply_failed", false, err)
+		}
+
+		progress(domain.JobVerifying, 80)
+		desiredStatus := "running"
+		if request.Command == "stop" {
+			desiredStatus = "stopped"
+		}
+		if err := requireContainerStatus(ctx, service, request, desiredStatus); err != nil {
+			if request.Command == "restart" {
+				compensationErr := service.StartContainer(ctx, request.ID, request.Owner)
+				if compensationErr == nil {
+					compensationErr = requireContainerStatus(ctx, service, request, "running")
+				}
+				if compensationErr == nil {
+					return failContainerCommand(ctx, audit, event, "container_restart_rolled_back", true, err)
+				}
+				return failContainerCommand(ctx, audit, event, "container_restart_rollback_failed", false, errors.Join(err, compensationErr))
+			}
+			return failContainerCommand(ctx, audit, event, "container_command_verification_failed", false, err)
+		}
+		if err := task.Checkpoint(ctx, "external_applied", map[string]any{"containerId": request.ID, "command": request.Command, "status": desiredStatus}); err != nil {
+			return failContainerCommand(ctx, audit, event, "container_command_checkpoint_failed", false, err)
+		}
+		event.Outcome = domain.AuditSucceeded
+		event.Details["status"] = desiredStatus
+		if err := audit.SaveAudit(ctx, event); err != nil {
+			return map[string]any{"containerId": request.ID, "errorClass": "container_command_audit_finalize_failed"}, domain.JobFailed, errors.New("container command audit finalization failed")
+		}
+		return map[string]any{"containerId": request.ID, "owner": request.Owner, "command": request.Command, "status": desiredStatus, "auditId": event.ID}, domain.JobSucceeded, nil
+	}, recoverContainerCommand(service, audit))
+}
+
+func recoverContainerCommand(service containerCommandService, audit api.AuditStore) task.Recoverer {
+	return func(ctx context.Context, job domain.Job) (task.RecoveryDecision, error) {
+		request, err := decodeContainerCommandRequest(job.Request)
+		if err != nil {
+			return containerRecoveryFailure(ctx, job, request, audit, "container_command_recovery_request_invalid"), nil
+		}
+		current, err := service.ManagedContainer(ctx, request.ID, request.Owner)
+		if err != nil {
+			return task.RecoveryDecision{}, err
+		}
+		status := normalizedContainerStatus(current.Status)
+		phase, _ := job.Result["phase"].(string)
+		initialStatus, _ := job.Result["initialStatus"].(string)
+		initialStatus = normalizedContainerStatus(initialStatus)
+		desiredStatus := "running"
+		if request.Command == "stop" {
+			desiredStatus = "stopped"
+		}
+
+		completed := status == desiredStatus
+		if request.Command == "restart" && completed && phase != "restart_stopped" && phase != "external_applied" {
+			completed = false
+		}
+		if completed {
+			if audit != nil {
+				event := containerCommandAuditEvent(job, request)
+				event.Outcome = domain.AuditSucceeded
+				event.Details["status"] = desiredStatus
+				event.Details["recovered"] = true
+				_ = audit.SaveAudit(ctx, event)
+			}
+			return task.RecoveryDecision{Status: domain.JobSucceeded, Result: map[string]any{"phase": "readback_succeeded", "containerId": request.ID, "command": request.Command, "status": desiredStatus, "readback": true}}, nil
+		}
+
+		canResume := false
+		switch request.Command {
+		case "start":
+			canResume = status == "stopped" && (initialStatus == "" || initialStatus == "stopped")
+		case "stop":
+			canResume = status == "running" && (initialStatus == "" || initialStatus == "running")
+		case "restart":
+			canResume = initialStatus == "running" && (status == "running" || status == "stopped")
+		}
+		if canResume {
+			return task.RecoveryDecision{Status: domain.JobQueued, Result: map[string]any{"phase": "resume_verified", "containerId": request.ID, "command": request.Command, "initialStatus": initialStatus, "readback": true}}, nil
+		}
+		decision := containerRecoveryFailure(ctx, job, request, audit, "container_command_recovery_partial_state")
+		decision.Result["status"] = status
+		decision.Result["readback"] = true
+		return decision, nil
+	}
+}
+
+func decodeContainerCommandRequest(values map[string]any) (containerCommandRequest, error) {
+	request := containerCommandRequest{}
+	request.ID, _ = values["containerId"].(string)
+	request.Owner, _ = values["owner"].(string)
+	request.Command, _ = values["command"].(string)
+	request.ID = strings.TrimSpace(request.ID)
+	request.Owner = strings.TrimSpace(request.Owner)
+	request.Command = strings.ToLower(strings.TrimSpace(request.Command))
+	if request.ID == "" || request.Owner == "" || (request.Command != "start" && request.Command != "stop" && request.Command != "restart") {
+		return containerCommandRequest{}, errors.New("invalid container command request")
+	}
+	return request, nil
+}
+
+func normalizedContainerStatus(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func containerCommandPrecondition(command, initialStatus, currentStatus string) bool {
+	if initialStatus != "running" && initialStatus != "stopped" {
+		return false
+	}
+	switch command {
+	case "start", "stop":
+		return currentStatus == "running" || currentStatus == "stopped"
+	case "restart":
+		return initialStatus == "running" && (currentStatus == "running" || currentStatus == "stopped")
+	default:
+		return false
+	}
+}
+
+func requireContainerStatus(ctx context.Context, service containerCommandService, request containerCommandRequest, desired string) error {
+	container, err := service.ManagedContainer(ctx, request.ID, request.Owner)
+	if err != nil {
+		return err
+	}
+	if normalizedContainerStatus(container.Status) != desired {
+		return routeros.ErrContainerState
+	}
+	return nil
+}
+
+func containerCommandAuditEvent(job domain.Job, request containerCommandRequest) domain.AuditEvent {
+	return domain.AuditEvent{
+		ID:       job.ID + "-audit",
+		Action:   "routeros.container." + request.Command,
+		TargetID: request.ID,
+		Outcome:  domain.AuditStarted,
+		Details: map[string]any{
+			"jobId": job.ID, "owner": request.Owner, "command": request.Command,
+			"actor": job.Request["actor"], "source": job.Request["source"],
+		},
+	}
+}
+
+func failContainerCommand(ctx context.Context, audit api.AuditStore, event domain.AuditEvent, errorClass string, rolledBack bool, cause error) (map[string]any, domain.JobStatus, error) {
+	event.Outcome = domain.AuditFailed
+	event.Details["errorClass"] = errorClass
+	event.Details["rolledBack"] = rolledBack
+	if audit != nil {
+		_ = audit.SaveAudit(ctx, event)
+	}
+	status := domain.JobFailed
+	if rolledBack {
+		status = domain.JobRolledBack
+	}
+	return map[string]any{"containerId": event.TargetID, "auditId": event.ID, "rolledBack": rolledBack, "errorClass": errorClass}, status, cause
+}
+
+func containerRecoveryFailure(ctx context.Context, job domain.Job, request containerCommandRequest, audit api.AuditStore, errorClass string) task.RecoveryDecision {
+	if audit != nil {
+		event := containerCommandAuditEvent(job, request)
+		event.Outcome = domain.AuditFailed
+		event.Details["errorClass"] = errorClass
+		event.Details["recovered"] = true
+		_ = audit.SaveAudit(ctx, event)
+	}
+	return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: errorClass, ErrorMessage: "operation recovery requires manual reconciliation", Result: map[string]any{"phase": "recovery_partial_state", "containerId": request.ID, "command": request.Command}}
 }
 
 func registerBackupJobs(manager *task.Manager, service api.BackupService, audit api.AuditStore) {

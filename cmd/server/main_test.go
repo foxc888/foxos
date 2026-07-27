@@ -535,6 +535,179 @@ func TestEgressJobRecoveryReconcilesOnlyProvenStates(t *testing.T) {
 	}
 }
 
+type containerCommandJobService struct {
+	mu          sync.Mutex
+	status      string
+	startErrors []error
+	stopError   error
+	startCalls  int
+	stopCalls   int
+}
+
+func (s *containerCommandJobService) ManagedContainer(_ context.Context, id, owner string) (routeros.Container, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id != "*c1" || owner != "foxos:active" {
+		return routeros.Container{}, routeros.ErrContainerNotManaged
+	}
+	return routeros.Container{ID: id, Name: "foxos", Comment: owner, Status: s.status}, nil
+}
+
+func (s *containerCommandJobService) StartContainer(_ context.Context, id, owner string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id != "*c1" || owner != "foxos:active" {
+		return routeros.ErrContainerNotManaged
+	}
+	s.startCalls++
+	if len(s.startErrors) > 0 {
+		err := s.startErrors[0]
+		s.startErrors = s.startErrors[1:]
+		if err != nil {
+			return err
+		}
+	}
+	s.status = "running"
+	return nil
+}
+
+func (s *containerCommandJobService) StopContainer(_ context.Context, id, owner string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id != "*c1" || owner != "foxos:active" {
+		return routeros.ErrContainerNotManaged
+	}
+	s.stopCalls++
+	if s.stopError != nil {
+		return s.stopError
+	}
+	s.status = "stopped"
+	return nil
+}
+
+func (s *containerCommandJobService) snapshot() (string, int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.status, s.startCalls, s.stopCalls
+}
+
+func TestContainerCommandJobsAreVerifiedAndAudited(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		command    string
+		initial    string
+		wantStatus string
+		wantStarts int
+		wantStops  int
+	}{
+		{name: "start", command: "start", initial: "stopped", wantStatus: "running", wantStarts: 1},
+		{name: "stop", command: "stop", initial: "running", wantStatus: "stopped", wantStops: 1},
+		{name: "restart", command: "restart", initial: "running", wantStatus: "running", wantStarts: 1, wantStops: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store, err := sqlite.Open(filepath.Join(t.TempDir(), "jobs.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			manager, err := task.New(context.Background(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = manager.Close() })
+			service := &containerCommandJobService{status: test.initial}
+			registerContainerCommandJobs(manager, service, store)
+			job, err := manager.Submit(context.Background(), "routeros.container-command", t.Name(), map[string]any{"containerId": "*c1", "owner": "foxos:active", "command": test.command, "actor": "test", "source": "local"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			completed := waitForStoredJob(t, manager, job.ID, domain.JobSucceeded)
+			status, starts, stops := service.snapshot()
+			if status != test.wantStatus || starts != test.wantStarts || stops != test.wantStops || completed.Result["status"] != test.wantStatus {
+				t.Fatalf("job=%+v container=%s starts=%d stops=%d", completed, status, starts, stops)
+			}
+			events, err := store.AuditEvents(context.Background(), 10)
+			if err != nil || len(events) != 1 || events[0].Outcome != domain.AuditSucceeded {
+				t.Fatalf("audit=%+v err=%v", events, err)
+			}
+		})
+	}
+}
+
+func TestContainerRestartRestoresOriginalStateWhenStartFails(t *testing.T) {
+	t.Parallel()
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager, err := task.New(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	service := &containerCommandJobService{status: "running", startErrors: []error{errors.New("start failed"), nil}}
+	registerContainerCommandJobs(manager, service, store)
+	job, err := manager.Submit(context.Background(), "routeros.container-command", t.Name(), map[string]any{"containerId": "*c1", "owner": "foxos:active", "command": "restart", "actor": "test", "source": "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitForStoredJob(t, manager, job.ID, domain.JobRolledBack)
+	status, starts, stops := service.snapshot()
+	if status != "running" || starts != 2 || stops != 1 || completed.ErrorClass != "container_restart_rolled_back" {
+		t.Fatalf("job=%+v container=%s starts=%d stops=%d", completed, status, starts, stops)
+	}
+}
+
+func TestContainerCommandRecoveryReadsBackExternalWrites(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		command    string
+		phase      string
+		initial    string
+		current    string
+		wantStatus domain.JobStatus
+		wantStarts int
+		wantStops  int
+		wantClass  string
+	}{
+		{name: "start succeeded before checkpoint", command: "start", phase: "preconditions_verified", initial: "stopped", current: "running", wantStatus: domain.JobSucceeded},
+		{name: "restart resumes after stop before checkpoint", command: "restart", phase: "preconditions_verified", initial: "running", current: "stopped", wantStatus: domain.JobSucceeded, wantStarts: 1},
+		{name: "restart is replayed when stop never happened", command: "restart", phase: "preconditions_verified", initial: "running", current: "running", wantStatus: domain.JobSucceeded, wantStarts: 1, wantStops: 1},
+		{name: "unknown external state fails closed", command: "stop", phase: "preconditions_verified", initial: "running", current: "error", wantStatus: domain.JobFailed, wantClass: "container_command_recovery_partial_state"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store, err := sqlite.Open(filepath.Join(t.TempDir(), "jobs.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			seed := domain.Job{ID: "interrupted-container-command", Kind: "routeros.container-command", Status: domain.JobVerifying, Progress: 60, Request: map[string]any{"containerId": "*c1", "owner": "foxos:active", "command": test.command, "actor": "test", "source": "local"}, Result: map[string]any{"phase": test.phase, "initialStatus": test.initial}}
+			if _, _, err := store.CreateJob(context.Background(), seed); err != nil {
+				t.Fatal(err)
+			}
+			manager, err := task.New(context.Background(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Close()
+			service := &containerCommandJobService{status: test.current}
+			registerContainerCommandJobs(manager, service, store)
+			completed := waitForStoredJob(t, manager, seed.ID, test.wantStatus)
+			_, starts, stops := service.snapshot()
+			if starts != test.wantStarts || stops != test.wantStops || completed.ErrorClass != test.wantClass {
+				t.Fatalf("job=%+v starts=%d stops=%d", completed, starts, stops)
+			}
+		})
+	}
+}
+
 func clonePolicy(policy *domain.DevicePolicy) *domain.DevicePolicy {
 	if policy == nil {
 		return nil

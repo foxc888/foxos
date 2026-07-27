@@ -156,12 +156,13 @@ type BindingState struct {
 }
 
 type Container struct {
-	ID        string `json:".id"`
-	Name      string `json:"name"`
-	Comment   string `json:"comment"`
-	Status    string `json:"status"`
-	RootDir   string `json:"root-dir"`
-	Interface string `json:"interface"`
+	ID          string `json:".id"`
+	Name        string `json:"name"`
+	Comment     string `json:"comment"`
+	Status      string `json:"status"`
+	RootDir     string `json:"root-dir"`
+	Interface   string `json:"interface"`
+	StartOnBoot string `json:"start-on-boot"`
 }
 
 func (c *Client) Resource(ctx context.Context) (Resource, error) {
