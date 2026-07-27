@@ -10,9 +10,19 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    name: Required quality gates
+    uses: ./.github/workflows/core-ci.yml
+    permissions:
+      contents: read
+
   binaries:
+    name: Build FoxOS binary (${{ matrix.goarch }})
+    needs: quality
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         include:
           - goarch: amd64
@@ -20,68 +30,96 @@ jobs:
           - goarch: arm64
             artifact: foxos-linux-arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.24.x"
           cache: true
-      - name: Test
-        run: |
-          go mod tidy
-          go mod verify
-          go test ./...
-      - name: Build
+      - name: Build binary
         env:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o "${{ matrix.artifact }}" ./cmd/server
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 30
 
   routeros-images:
+    name: Build RouterOS image (${{ matrix.platform }})
+    needs: quality
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        platform:
-          - linux/amd64
-          - linux/arm64
         include:
           - platform: linux/amd64
             name: foxos-amd64.tar
           - platform: linux/arm64
             name: foxos-arm64.tar
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - uses: docker/setup-buildx-action@v4
       - name: Build RouterOS image archive
-        run: docker buildx build --platform "${{ matrix.platform }}" --output "type=docker,dest=${{ matrix.name }}" .
+        run: docker buildx build --platform "${{ matrix.platform }}" --build-arg FOXOS_VERSION="${GITHUB_REF_NAME}" --output "type=docker,dest=${{ matrix.name }}" .
       - name: Assemble amd64 full-stack bundle
         if: matrix.platform == 'linux/amd64'
+        env:
+          FOXOS_IMAGE: ${{ github.workspace }}/foxos-amd64.tar
         run: |
-          mkdir -p foxos-full-amd64
-          cp foxos-amd64.tar foxos-full-amd64/
-          cp mihomo/install/mihomo_amd64.tar foxos-full-amd64/
-          cp mihomo/install/mosdns-v0.6.4-2ac30e8-amd64.tar foxos-full-amd64/mosdns-amd64.tar
-          cp -a mihomo/config foxos-full-amd64/mihomo-config
-          cp -a mosdns-config foxos-full-amd64/mosdns-config
-          sed -i -E 's/^secret:.*/secret: ""/' foxos-full-amd64/mihomo-config/config.yaml
-          cp deploy/routeros/foxos-full-install.rsc foxos-full-amd64/
-          cp deploy/routeros/foxos-start-all.rsc foxos-full-amd64/
-          cp deploy/routeros/QUICK-INSTALL.md foxos-full-amd64/
-          find foxos-full-amd64 -name .DS_Store -delete
-          test -s foxos-full-amd64/mihomo-config/config.yaml
-          test -s foxos-full-amd64/mosdns-config/config_custom.yaml
-          grep -Fxq 'secret: ""' foxos-full-amd64/mihomo-config/config.yaml
-      - uses: actions/upload-artifact@v4
+          release_id="${GITHUB_REF_NAME//[^A-Za-z0-9._-]/-}"
+          scripts/build-routeros-bundle.sh dist "$release_id"
+          test -s "dist/foxos-full-amd64-${release_id}.tar.gz"
+          test -s "dist/foxos-full-amd64-${release_id}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
-      - uses: actions/upload-artifact@v4
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v7
         if: matrix.platform == 'linux/amd64'
         with:
-          name: foxos-full-amd64-${{ github.sha }}
-          path: foxos-full-amd64/
-          retention-days: 14
+          name: foxos-full-routeros-bundle
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [binaries, routeros-images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Verify release assets
+        working-directory: release-assets
+        run: |
+          test -s foxos-linux-amd64
+          test -s foxos-linux-arm64
+          test -s foxos-amd64.tar
+          test -s foxos-arm64.tar
+          bundle=$(find . -maxdepth 1 -name 'foxos-full-amd64-*.tar.gz' -print -quit)
+          test -n "$bundle"
+          test -s "$bundle.sha256"
+          sha256sum --check "$(basename "$bundle.sha256")"
+      - name: Create or update release
+        uses: softprops/action-gh-release@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          generate_release_notes: true
+          files: release-assets/*

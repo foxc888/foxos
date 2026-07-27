@@ -1,0 +1,10 @@
+node_modules/
+web/node_modules/
+/coverage.out
+dist/
+web/dist/
+web/.vitest/
+web/playwright-report/
+web/test-results/
+web/pnpm-lock.yaml
+web/pnpm-workspace.yaml

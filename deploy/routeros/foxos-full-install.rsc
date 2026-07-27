@@ -1,150 +1,307 @@
-# FoxOS 全栈安装脚本（RouterOS x86_64）
-# 适配用户环境：bridge-lan / 10.0.0.0/24
-# 不修改 DNS、DHCP、NAT、默认路由、Mangle 或现有防火墙。
-# 每次首次安装自动生成新的随机凭据。
-# 凭据会在三个容器首次启动后统一打印。
-
-:local randomCharacters "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-:local foxosRouterPassword [:rndstr from=$randomCharacters length=32]
-:local foxosMihomoSecret [:rndstr from=$randomCharacters length=48]
-:local foxosApiToken [:rndstr from=$randomCharacters length=64]
-:local foxosConfirmationKey [:rndstr from=$randomCharacters length=64]
+# FoxOS 全栈安装脚本（RouterOS x86_64 / architecture-name=x86）
+# 目标拓扑：RouterOS 10.0.0.1、Mihomo 10.0.0.2、MosDNS 10.0.0.3、FoxOS 10.0.0.4:8090。
+# 只管理带 foxos: 所有权标识的资源，不修改 DNS、DHCP、默认路由、NAT、Mangle 或现有防火墙。
+# 执行前必须先运行 preflight.rsc 和 foxos-plan.rsc，完成 RouterOS export/backup，并由操作者明确确认计划。
+# 目标 RouterOS/container package 版本为 7.21+，x86_64 CPU 的 architecture-name 是 x86。
 
 :local managementBridge "bridge-lan"
+:local storageRoot "disk1"
 :local routerAddress "10.0.0.1"
 :local mihomoAddress "10.0.0.2/24"
 :local mosdnsAddress "10.0.0.3/24"
 :local foxosAddress "10.0.0.4/24"
 :local architecture [/system/resource get architecture-name]
+:local routerVersion [/system/resource get version]
+:local routerVersionBase $routerVersion
+:local routerVersionSpace [:find $routerVersionBase " "]
+:if ([:typeof $routerVersionSpace] != "nil") do={ :set routerVersionBase [:pick $routerVersionBase 0 $routerVersionSpace] }
 
-:put "FoxOS: 开始只读预检..."
-:if ($architecture != "x86_64") do={
-  :error ("此安装包仅支持 x86_64，当前架构: " . $architecture)
+:put "=== FoxOS exact change plan (write phase) ==="
+:put "Create or reuse only: foxos-rest, foxos-service, foxos-env, foxos-* mounts, foxos:* veth/bridge ports/containers."
+:put "Create or reuse addresses: 10.0.0.2/24, 10.0.0.3/24, 10.0.0.4/24 on bridge-lan."
+:put "No DNS, DHCP, default route, NAT, Mangle, or existing firewall changes."
+:put "Rollback: stop FoxOS containers, restore RouterOS backup, and keep disk1/foxos-data plus old image tar files."
+
+:if ($architecture != "x86") do={
+  :error ("此 amd64 安装包仅支持 architecture-name=x86，当前为 " . $architecture)
 }
-:if ([:len [/interface/bridge find where name=$managementBridge]] = 0) do={
-  :error ("未找到管理桥: " . $managementBridge)
+:local firstVersionDot [:find $routerVersionBase "."]
+:if ([:typeof $firstVersionDot] = "nil") do={ :error ("无法解析 RouterOS 版本: " . $routerVersion) }
+:local versionMajor [:tonum [:pick $routerVersionBase 0 $firstVersionDot]]
+:local versionTail [:pick $routerVersionBase ($firstVersionDot + 1) [:len $routerVersionBase]]
+:local versionMinorEnd [:find ($versionTail . ".") "."]
+:local versionMinor [:tonum [:pick $versionTail 0 $versionMinorEnd]]
+:if ($versionMajor < 7 || ($versionMajor = 7 && $versionMinor < 21)) do={
+  :error "RouterOS 7.21 或更高版本才支持本安装器使用的 envlists/mountlists"
 }
-:if ([:len [/ip/address find where address~"10.0.0.1/"]] = 0) do={
-  :error "未找到 RouterOS LAN 地址 10.0.0.1"
+:if ([:len [/interface/bridge find where name=$managementBridge]] != 1) do={
+  :error ("未找到唯一管理桥: " . $managementBridge)
 }
-:if ([/ip/service get [find where name="www"] disabled] = true) do={
-  :error "RouterOS www/REST 服务未启用；请先启用仅限 10.0.0.0/24 的 www 服务"
+:local diskID [/disk find where slot=$storageRoot]
+:if ([:len $diskID] != 1) do={
+  :error ("未找到持久化磁盘: " . $storageRoot)
 }
-:local freeDisk [/system/resource get free-hdd-space]
-:if ($freeDisk < 536870912) do={
-  :put ("警告：可用磁盘空间不足 512 MiB，当前字节数: " . $freeDisk)
-  :error "空间不足；请释放空间或把安装包与 root-dir 调整到足够大的磁盘"
+:local diskFree [/disk get $diskID free]
+:if ($diskFree < 536870912) do={
+  :error ("disk1 可用空间不足 512 MiB: " . $diskFree)
+}
+:local packageID [/system/package find where name="container"]
+:if ([:len $packageID] != 1) do={
+  :error "container package 未安装"
+}
+:if ([/system/package get $packageID disabled] = true) do={
+  :error "container package 已禁用"
+}
+:if ([/system/package get $packageID version] != $routerVersionBase) do={
+  :error "container package 与 RouterOS 版本不一致"
+}
+:local deviceMode [/system/device-mode get container]
+:if ($deviceMode != true && $deviceMode != "yes") do={
+  :error "device-mode container=yes 未启用"
+}
+:local routerManagementIP [/ip/address find where address~"10.0.0.1/"]
+:if ([:len $routerManagementIP] != 1) do={
+  :error "未找到唯一 RouterOS 管理地址 10.0.0.1/24"
+}
+:if ([/ip/address get $routerManagementIP address] != "10.0.0.1/24" || [/ip/address get $routerManagementIP interface] != $managementBridge) do={
+  :error "RouterOS 管理地址必须是 bridge-lan 上的 10.0.0.1/24"
+}
+:local wwwService [/ip/service find where name="www"]
+:if ([:len $wwwService] != 1) do={ :error "未找到唯一 RouterOS www/REST 服务" }
+:local wwwAddresses [/ip/service get $wwwService address]
+:if ([/ip/service get $wwwService disabled] = true || [/ip/service get $wwwService port] != 80) do={
+  :error "FoxOS 需要已启用且端口为 80 的 RouterOS www/REST 服务"
+}
+:if ([:typeof [:find $wwwAddresses "10.0.0.0/24"]] = "nil" && [:typeof [:find $wwwAddresses "10.0.0.4/32"]] = "nil") do={
+  :error "www/REST 必须限制为 10.0.0.0/24 或 10.0.0.4/32"
 }
 
-:foreach requiredFile in={"mihomo_amd64.tar";"mosdns-amd64.tar";"foxos-amd64.tar"} do={
-  :if ([:len [/file find where name=$requiredFile]] = 0) do={
-    :error ("缺少容器镜像: " . $requiredFile)
+:local requiredFiles {"mihomo_amd64.tar";"mosdns-amd64.tar";"foxos-amd64.tar";"preflight.rsc";"foxos-plan.rsc";"foxos-start-all.rsc";"SHA256SUMS"}
+:foreach fileName in=$requiredFiles do={
+  :local fileID [/file find where name=($storageRoot . "/" . $fileName)]
+  :if ([:len $fileID] != 1) do={
+    :error ("缺少或不唯一文件: " . $storageRoot . "/" . $fileName)
   }
 }
-:if ([:len [/file find where name="mihomo-config/config.yaml"]] = 0) do={
-  :error "缺少 mihomo-config/config.yaml；请上传安装包中的完整 mihomo-config 文件夹"
-}
-:if ([:len [/file find where name="mosdns-config/config_custom.yaml"]] = 0) do={
-  :error "缺少 mosdns-config/config_custom.yaml；请上传安装包中的完整 mosdns-config 文件夹"
+:foreach configFile in={"mihomo-config/config.yaml";"mosdns-config/config_custom.yaml"} do={
+  :local configID [/file find where name=($storageRoot . "/" . $configFile)]
+  :if ([:len $configID] != 1) do={
+    :error ("缺少或不唯一配置: " . $storageRoot . "/" . $configFile)
+  }
 }
 
-:put "FoxOS: 更新 Mihomo Controller Secret..."
-:local mihomoConfigFile [/file find where name="mihomo-config/config.yaml"]
-:if ([:len $mihomoConfigFile] != 1) do={
-  :error "未找到唯一文件 mihomo-config/config.yaml"
+:local randomCharacters "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+:local envMarker [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER" value="foxos"]
+:local existingInstall false
+:local foxosRouterPassword ""
+:local foxosMihomoSecret ""
+:local foxosApiToken ""
+:local foxosConfirmationKey ""
+:if ([:len $envMarker] > 1) do={ :error "FOXOS_INSTALL_MARKER 不唯一，拒绝继续" }
+:if ([:len $envMarker] = 0 && [:len [/user/group find where name="foxos-rest"]] > 0) do={
+  :error "同名 foxos-rest 用户组已存在且没有 FoxOS 安装标记，拒绝在写入前继续"
 }
+:if ([:len $envMarker] = 1) do={
+  :set existingInstall true
+} else={
+  :if ([:len [/container/envs find where list="foxos-env"]] > 0) do={
+    :error "同名 foxos-env 已存在但没有 FOXOS_INSTALL_MARKER=foxos，拒绝覆盖"
+  }
+  /container/envs add list=foxos-env key=FOXOS_INSTALL_MARKER value="foxos"
+}
+
+:local routerPasswordID [/container/envs find where list="foxos-env" key="FOXOS_ROUTEROS_PASSWORD"]
+:if ([:len $routerPasswordID] > 1) do={ :error "FOXOS_ROUTEROS_PASSWORD 不唯一" }
+:if ([:len $routerPasswordID] = 0) do={
+  :set foxosRouterPassword [:rndstr from=$randomCharacters length=32]
+  /container/envs add list=foxos-env key=FOXOS_ROUTEROS_PASSWORD value=$foxosRouterPassword
+} else={
+  :set foxosRouterPassword [/container/envs get $routerPasswordID value]
+  :if ([:len $foxosRouterPassword] < 32) do={ :error "现有 RouterOS 服务密码不足 32 字符，拒绝自动覆盖" }
+}
+
+:local mihomoSecretID [/container/envs find where list="foxos-env" key="FOXOS_MIHOMO_SECRET"]
+:if ([:len $mihomoSecretID] > 1) do={ :error "FOXOS_MIHOMO_SECRET 不唯一" }
+:if ([:len $mihomoSecretID] = 0) do={
+  :set foxosMihomoSecret [:rndstr from=$randomCharacters length=48]
+  /container/envs add list=foxos-env key=FOXOS_MIHOMO_SECRET value=$foxosMihomoSecret
+} else={
+  :set foxosMihomoSecret [/container/envs get $mihomoSecretID value]
+  :if ([:len $foxosMihomoSecret] < 32) do={ :error "现有 Mihomo Secret 不足 32 字符，拒绝自动覆盖" }
+}
+
+:local apiTokenID [/container/envs find where list="foxos-env" key="FOXOS_API_TOKEN"]
+:if ([:len $apiTokenID] > 1) do={ :error "FOXOS_API_TOKEN 不唯一" }
+:if ([:len $apiTokenID] = 0) do={
+  :set foxosApiToken [:rndstr from=$randomCharacters length=64]
+  /container/envs add list=foxos-env key=FOXOS_API_TOKEN value=$foxosApiToken
+} else={
+  :set foxosApiToken [/container/envs get $apiTokenID value]
+  :if ([:len $foxosApiToken] < 32) do={ :error "现有 FoxOS API Token 不足 32 字符，拒绝自动覆盖" }
+}
+
+:local confirmationKeyID [/container/envs find where list="foxos-env" key="FOXOS_CONFIRMATION_KEY"]
+:if ([:len $confirmationKeyID] > 1) do={ :error "FOXOS_CONFIRMATION_KEY 不唯一" }
+:if ([:len $confirmationKeyID] = 0) do={
+  :set foxosConfirmationKey [:rndstr from=$randomCharacters length=64]
+  /container/envs add list=foxos-env key=FOXOS_CONFIRMATION_KEY value=$foxosConfirmationKey
+} else={
+  :set foxosConfirmationKey [/container/envs get $confirmationKeyID value]
+  :if ([:len $foxosConfirmationKey] < 32) do={ :error "现有确认密钥不足 32 字符，拒绝自动覆盖" }
+}
+
+:local fixedEnvDefinitions {"FOXOS_ROUTEROS_URL|http://10.0.0.1";"FOXOS_ROUTEROS_USERNAME|foxos-service";"FOXOS_MIHOMO_URL|http://10.0.0.2:9090";"FOXOS_MIHOMO_PROXY_URL|http://10.0.0.2:7890";"FOXOS_MIHOMO_LOCAL_CONFIG|/data/mihomo/config.yaml";"FOXOS_MIHOMO_RUNTIME_CONFIG|/root/.config/mihomo/config.yaml";"FOXOS_MIHOMO_BACKUP_DIR|/backups/mihomo";"FOXOS_MOSDNS_URL|http://10.0.0.3:53";"FOXOS_BACKUP_DIR|/backups/foxos"}
+:foreach definition in=$fixedEnvDefinitions do={
+  :local separator [:find $definition "|"]
+  :local envKey [:pick $definition 0 $separator]
+  :local expectedValue [:pick $definition ($separator + 1) [:len $definition]]
+  :local envID [/container/envs find where list="foxos-env" key=$envKey]
+  :if ([:len $envID] > 1) do={ :error ("FoxOS env 键不唯一: " . $envKey) }
+  :if ([:len $envID] = 0) do={
+    /container/envs add list=foxos-env key=$envKey value=$expectedValue
+  } else={
+    :if ([/container/envs get $envID value] != $expectedValue) do={
+      :error ("现有 FoxOS env 值与固定部署计划不一致: " . $envKey)
+    }
+  }
+}
+:if ([:len [/container/envs find where list="foxos-env"]] != 14) do={
+  :error "foxos-env 包含安全基线之外的键，拒绝继续"
+}
+:if ($existingInstall) do={
+  :put "复用或补齐现有 FoxOS 凭据，不在重复执行时轮换有效密钥。"
+} else={
+  :put "已生成新的随机 FoxOS 凭据。"
+}
+
+:local mihomoConfigFile [/file find where name=($storageRoot . "/mihomo-config/config.yaml")]
 :local mihomoConfig [/file get $mihomoConfigFile contents]
 :local secretStart [:find $mihomoConfig "\nsecret:"]
 :if ([:typeof $secretStart] = "nil") do={
-  :if ([:find $mihomoConfig "secret:"] = 0) do={
-    :set secretStart 0
-  } else={
-    :error "mihomo-config/config.yaml 中没有找到顶层 secret 字段"
-  }
-} else={
-  :set secretStart ($secretStart + 1)
-}
+  :if ([:find $mihomoConfig "secret:"] = 0) do={ :set secretStart 0 } else={ :error "mihomo config 缺少顶层 secret 字段" }
+} else={ :set secretStart ($secretStart + 1) }
 :local secretEnd [:find $mihomoConfig "\n" $secretStart]
-:if ([:typeof $secretEnd] = "nil") do={
-  :set secretEnd [:len $mihomoConfig]
-}
+:if ([:typeof $secretEnd] = "nil") do={ :set secretEnd [:len $mihomoConfig] }
 :local updatedMihomoConfig (([:pick $mihomoConfig 0 $secretStart]) . "secret: \"" . $foxosMihomoSecret . "\"" . ([:pick $mihomoConfig $secretEnd [:len $mihomoConfig]]))
 /file set $mihomoConfigFile contents=$updatedMihomoConfig
 :if ([:typeof [:find [/file get $mihomoConfigFile contents] ("secret: \"" . $foxosMihomoSecret . "\"")]] = "nil") do={
   :error "Mihomo Secret 写入后验证失败"
 }
 
-:foreach ownedVeth in={"veth-mihomo";"veth-mosdns";"veth-foxos"} do={
-  :if ([:len [/interface/veth find where name=$ownedVeth]] > 0) do={
-    :error ("发现已有接口 " . $ownedVeth . "；请先检查是否为未完成的旧安装")
-  }
-}
-:foreach ownedContainer in={"foxos:mihomo";"foxos:mosdns";"foxos:admin"} do={
-  :if ([:len [/container find where comment=$ownedContainer]] > 0) do={
-    :error ("发现已有容器 " . $ownedContainer . "；请先检查是否为未完成的旧安装")
-  }
-}
-:foreach reservedAddress in={"10.0.0.2/";"10.0.0.3/";"10.0.0.4/"} do={
-  :if ([:len [/ip/address find where address~$reservedAddress]] > 0) do={
-    :error ("RouterOS 已占用保留地址: " . $reservedAddress)
+:local mountDefinitions {"foxos-mihomo-runtime|mihomo-config|/root/.config/mihomo";"foxos-mihomo-config|mihomo-config|/data/mihomo";"foxos-mosdns-runtime|mosdns-config|/cus/mosdns";"foxos-data|foxos-data|/data";"foxos-backups|foxos-backups|/backups"}
+:foreach definition in=$mountDefinitions do={
+  :local first [:find $definition "|"]
+  :local second [:find $definition "|" ($first + 1)]
+  :local mountName [:pick $definition 0 $first]
+  :local sourceName [:pick $definition ($first + 1) $second]
+  :local destination [:pick $definition ($second + 1) [:len $definition]]
+  :local mountID [/container/mounts find where name=$mountName]
+  :local sourcePath ($storageRoot . "/" . $sourceName)
+  :if ([:len $mountID] = 0) do={
+    /container/mounts add name=$mountName src=$sourcePath dst=$destination
+  } else={
+    :if ([:len $mountID] != 1) do={ :error ("挂载名不唯一: " . $mountName) }
+    :if ([/container/mounts get $mountID src] != $sourcePath || [/container/mounts get $mountID dst] != $destination) do={
+      :error ("已有挂载内容不匹配，拒绝覆盖: " . $mountName)
+    }
   }
 }
 
-:put "FoxOS: 配置专用 REST 用户..."
-:if ([:len [/user/group find where name="foxos-rest"]] = 0) do={
+:local serviceGroup [/user/group find where name="foxos-rest"]
+:if ([:len $serviceGroup] = 0) do={
   /user/group add name=foxos-rest policy=read,write,rest-api
 } else={
-  /user/group set [find where name="foxos-rest"] policy=read,write,rest-api
+  :if ([:len $serviceGroup] != 1) do={ :error "foxos-rest 用户组不唯一" }
+  :if ($existingInstall = false) do={ :error "同名 foxos-rest 用户组已存在且没有 FoxOS 安装标记，拒绝复用" }
+  :if ([/user/group get $serviceGroup policy] != "read,write,rest-api") do={
+    :error "现有 foxos-rest 权限与安全基线不一致，拒绝自动扩大或缩小权限"
+  }
 }
-:if ([:len [/user find where name="foxos-service"]] = 0) do={
+:local serviceUser [/user find where name="foxos-service"]
+:if ([:len $serviceUser] = 0) do={
   /user add name=foxos-service group=foxos-rest address=10.0.0.4/32 password=$foxosRouterPassword comment="foxos:service"
 } else={
-  :if ([/user get [find where name="foxos-service"] comment] != "foxos:service") do={
-    :error "同名用户 foxos-service 不是 FoxOS 创建，拒绝覆盖"
+  :if ([:len $serviceUser] != 1) do={ :error "foxos-service 用户不唯一" }
+  :if ([/user get $serviceUser comment] != "foxos:service") do={ :error "同名 RouterOS 用户不是 FoxOS 创建，拒绝覆盖" }
+  /user set $serviceUser group=foxos-rest address=10.0.0.4/32 password=$foxosRouterPassword
+}
+
+:local vethDefinitions {"veth-mihomo|" . $mihomoAddress . "|foxos:mihomo";"veth-mosdns|" . $mosdnsAddress . "|foxos:mosdns";"veth-foxos|" . $foxosAddress . "|foxos:admin"}
+:foreach definition in=$vethDefinitions do={
+  :local first [:find $definition "|"]
+  :local second [:find $definition "|" ($first + 1)]
+  :local vethName [:pick $definition 0 $first]
+  :local vethAddress [:pick $definition ($first + 1) $second]
+  :local owner [:pick $definition ($second + 1) [:len $definition]]
+  :local addressOnly [:pick $vethAddress 0 [:find $vethAddress "/"]]
+  :local vethID [/interface/veth find where name=$vethName]
+  :local addressVeth [/interface/veth find where address=$vethAddress]
+  :if ([:len [/ip/address find where address~($addressOnly . "/")]] > 0) do={ :error ("保留地址已配置在 RouterOS: " . $addressOnly) }
+  :if ([:len [/ip/dhcp-server/lease find where address=$addressOnly]] > 0) do={ :error ("保留地址已被 DHCP Lease 使用: " . $addressOnly) }
+  :if ([:len $addressVeth] > 0 && [:len $vethID] = 0) do={ :error ("保留地址已被其他 veth 使用: " . $vethAddress) }
+  :if ([:len $vethID] = 0) do={
+    :if ([:len [/ip/arp find where address=$addressOnly]] > 0 || [/ping address=$addressOnly count=2 interval=200ms] > 0) do={
+      :error ("保留地址已出现在 ARP 或可达，拒绝创建: " . $addressOnly)
+    }
+    /interface/veth add name=$vethName address=$vethAddress gateway=$routerAddress comment=$owner
+  } else={
+    :if ([:len $vethID] != 1) do={ :error ("veth 名不唯一: " . $vethName) }
+    :if ([/interface/veth get $vethID comment] != $owner) do={ :error ("同名 veth 不属于 FoxOS: " . $vethName) }
+    :if ([/interface/veth get $vethID address] != $vethAddress || [/interface/veth get $vethID gateway] != $routerAddress) do={
+      :error ("已有 FoxOS veth 地址或网关不匹配: " . $vethName)
+    }
+    :if ([:len $addressVeth] != 1 || [/interface/veth get $addressVeth name] != $vethName) do={
+      :error ("保留地址同时被其他 veth 使用: " . $vethAddress)
+    }
   }
-  /user set [find where name="foxos-service"] group=foxos-rest address=10.0.0.4/32 password=$foxosRouterPassword
+  :local portID [/interface/bridge/port find where interface=$vethName]
+  :if ([:len $portID] = 0) do={
+    /interface/bridge/port add bridge=$managementBridge interface=$vethName comment=$owner
+  } else={
+    :foreach port in=$portID do={
+      :if ([/interface/bridge/port get $port bridge] != $managementBridge) do={ :error ("veth 已加入其他 bridge: " . $vethName) }
+      :if ([/interface/bridge/port get $port comment] != $owner) do={ :error ("bridge port 没有匹配的 FoxOS 所有权标记: " . $vethName) }
+    }
+  }
 }
 
-:put "FoxOS: 写入容器环境变量..."
-/container/envs remove [find where list="foxos-env"]
-/container/envs add list=foxos-env key=FOXOS_API_TOKEN value=$foxosApiToken
-/container/envs add list=foxos-env key=FOXOS_CONFIRMATION_KEY value=$foxosConfirmationKey
-/container/envs add list=foxos-env key=FOXOS_ROUTEROS_URL value="http://10.0.0.1"
-/container/envs add list=foxos-env key=FOXOS_ROUTEROS_USERNAME value="foxos-service"
-/container/envs add list=foxos-env key=FOXOS_ROUTEROS_PASSWORD value=$foxosRouterPassword
-/container/envs add list=foxos-env key=FOXOS_MIHOMO_URL value="http://10.0.0.2:9090"
-/container/envs add list=foxos-env key=FOXOS_MIHOMO_SECRET value=$foxosMihomoSecret
-/container/envs add list=foxos-env key=FOXOS_MIHOMO_LOCAL_CONFIG value="/data/mihomo/config.yaml"
-/container/envs add list=foxos-env key=FOXOS_MIHOMO_RUNTIME_CONFIG value="/root/.config/mihomo/config.yaml"
-/container/envs add list=foxos-env key=FOXOS_MIHOMO_BACKUP_DIR value="/backups/mihomo"
-
-:put "FoxOS: 创建持久化挂载..."
-:if ([:len [/container/mounts find where list="mount-mihomo"]] = 0) do={
-  /container/mounts add list=mount-mihomo src=mihomo-config dst=/root/.config/mihomo
-}
-:if ([:len [/container/mounts find where list="mount-mosdns"]] = 0) do={
-  /container/mounts add list=mount-mosdns src=mosdns-config dst=/cus/mosdns
-}
-:if ([:len [/container/mounts find where list="foxos-data"]] = 0) do={
-  /container/mounts add list=foxos-data src=foxos-data dst=/data
-}
-:if ([:len [/container/mounts find where list="foxos-backups"]] = 0) do={
-  /container/mounts add list=foxos-backups src=foxos-backups dst=/backups
+:local mihomoContainer [/container find where comment="foxos:mihomo"]
+:local mihomoByName [/container find where name="foxos-mihomo"]
+:if ([:len $mihomoContainer] = 0) do={
+  :if ([:len $mihomoByName] > 0) do={ :error "foxos-mihomo 同名容器没有 FoxOS 所有权标记" }
+  /container/add name=foxos-mihomo file=($storageRoot . "/mihomo_amd64.tar") interface=veth-mihomo root-dir=($storageRoot . "/containers/mihomo") mountlists=foxos-mihomo-runtime logging=yes start-on-boot=yes comment="foxos:mihomo"
+} else={
+  :if ([:len $mihomoContainer] != 1 || [:len $mihomoByName] != 1) do={ :error "Mihomo 容器不唯一" }
+  :if ([/container get $mihomoContainer name] != "foxos-mihomo" || [/container get $mihomoContainer interface] != "veth-mihomo") do={ :error "已有 Mihomo 容器属性不匹配" }
+  :if ([/container get $mihomoContainer envlists] != "") do={ :error "Mihomo 容器不应继承 FoxOS 密钥环境变量" }
+  :if ([/container get $mihomoContainer mountlists] != "foxos-mihomo-runtime") do={ :error "Mihomo 容器挂载不匹配" }
 }
 
-:put "FoxOS: 创建容器网络..."
-/interface/veth add name=veth-mihomo address=$mihomoAddress gateway=$routerAddress comment="foxos:mihomo"
-/interface/veth add name=veth-mosdns address=$mosdnsAddress gateway=$routerAddress comment="foxos:mosdns"
-/interface/veth add name=veth-foxos address=$foxosAddress gateway=$routerAddress comment="foxos:admin"
-/interface/bridge/port add bridge=$managementBridge interface=veth-mihomo comment="foxos:mihomo"
-/interface/bridge/port add bridge=$managementBridge interface=veth-mosdns comment="foxos:mosdns"
-/interface/bridge/port add bridge=$managementBridge interface=veth-foxos comment="foxos:admin"
+:local mosdnsContainer [/container find where comment="foxos:mosdns"]
+:local mosdnsByName [/container find where name="foxos-mosdns"]
+:if ([:len $mosdnsContainer] = 0) do={
+  :if ([:len $mosdnsByName] > 0) do={ :error "foxos-mosdns 同名容器没有 FoxOS 所有权标记" }
+  /container/add name=foxos-mosdns file=($storageRoot . "/mosdns-amd64.tar") interface=veth-mosdns root-dir=($storageRoot . "/containers/mosdns") env="MOSDNS_AUTO_INIT=0" mountlists=foxos-mosdns-runtime logging=yes start-on-boot=yes comment="foxos:mosdns"
+} else={
+  :if ([:len $mosdnsContainer] != 1 || [:len $mosdnsByName] != 1) do={ :error "MosDNS 容器不唯一" }
+  :if ([/container get $mosdnsContainer name] != "foxos-mosdns" || [/container get $mosdnsContainer interface] != "veth-mosdns") do={ :error "已有 MosDNS 容器属性不匹配" }
+  :if ([/container get $mosdnsContainer envlists] != "") do={ :error "MosDNS 容器不应继承 FoxOS 密钥环境变量" }
+  :if ([/container get $mosdnsContainer env] != "MOSDNS_AUTO_INIT=0") do={ :error "MosDNS 容器必须禁用外部自动初始化" }
+  :if ([/container get $mosdnsContainer mountlists] != "foxos-mosdns-runtime") do={ :error "MosDNS 容器挂载不匹配" }
+}
 
-:put "FoxOS: 导入 Mihomo、MosDNS 和 FoxOS 镜像；此过程可能需要数分钟..."
-/container/add file=mihomo_amd64.tar interface=veth-mihomo root-dir=containers/mihomo mountlists=mount-mihomo logging=yes start-on-boot=yes comment="foxos:mihomo"
-/container/add file=mosdns-amd64.tar interface=veth-mosdns root-dir=containers/mosdns mountlists=mount-mosdns logging=yes start-on-boot=yes comment="foxos:mosdns"
-/container/add file=foxos-amd64.tar interface=veth-foxos root-dir=containers/foxos envlist=foxos-env mountlists=foxos-data,foxos-backups logging=yes start-on-boot=yes comment="foxos:admin"
+:local foxosContainer [/container find where comment="foxos:active"]
+:local foxosByName [/container find where name="foxos-active"]
+:if ([:len $foxosContainer] = 0) do={
+  :if ([:len $foxosByName] > 0) do={ :error "foxos-active 同名容器没有 FoxOS 所有权标记" }
+  /container/add name=foxos-active file=($storageRoot . "/foxos-amd64.tar") interface=veth-foxos root-dir=($storageRoot . "/containers/foxos") envlists=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=yes start-on-boot=yes comment="foxos:active"
+} else={
+  :if ([:len $foxosContainer] != 1 || [:len $foxosByName] != 1) do={ :error "FoxOS active 容器不唯一" }
+  :if ([/container get $foxosContainer name] != "foxos-active" || [/container get $foxosContainer interface] != "veth-foxos") do={ :error "已有 FoxOS 容器属性不匹配" }
+  :if ([/container get $foxosContainer envlists] != "foxos-env") do={ :error "FoxOS 容器环境变量列表不匹配" }
+  :if ([/container get $foxosContainer mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups") do={ :error "FoxOS 容器挂载不匹配" }
+}
 
-:put "FoxOS: 镜像导入已排队。"
-:put "下一步：反复执行 /container/print，等待三个容器全部 status=stopped。"
-:put "然后执行：/import file-name=foxos-start-all.rsc"
+:put "FoxOS 全栈资源已创建或复用，镜像导入为异步操作。"
+:put "等待 Mihomo、MosDNS、FoxOS 三个容器均为 status=stopped，再执行 /import file-name=disk1/foxos-start-all.rsc。"
+:put "安装完成后凭据只从 env list 读取一次并保存到离线密码库。"

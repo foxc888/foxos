@@ -1,14 +1,31 @@
-# 低风险升级模板：保留旧 root-dir 作为回滚槽位，不修改 DNS/路由。
+# FoxOS two-phase upgrade, phase 1: import a pending image without stopping active.
+# This script does not change DNS, DHCP, routes, NAT, Mangle, or firewall rules.
+
 :local architecture [/system/resource get architecture-name]
+:local storageRoot "disk1"
 :local imageFile ""
-:if ($architecture = "x86_64") do={ :set imageFile "foxos-amd64.tar" }
+:if ($architecture = "x86") do={ :set imageFile "foxos-amd64.tar" }
 :if ($architecture = "arm64") do={ :set imageFile "foxos-arm64.tar" }
 :if ($imageFile = "") do={ :error ("不支持的架构: " . $architecture) }
+
+:local imagePath ($storageRoot . "/" . $imageFile)
 :local active [/container find where comment="foxos:active"]
+:local rollback [/container find where comment="foxos:rollback"]
+:local pending [/container find where comment="foxos:pending"]
 :if ([:len $active] != 1) do={ :error "必须且只能存在一个 foxos:active 容器" }
-:if ([:len [/file find where name=$imageFile]] = 0) do={ :error ("镜像文件不存在: " . $imageFile) }
-/container/stop $active
-:delay 3s
-/container/set $active comment="foxos:rollback"
-/container/add file=$imageFile interface=veth-foxos root-dir=containers/foxos-next envlist=foxos-env mountlists=foxos-data,foxos-backups logging=yes start-on-boot=yes comment="foxos:active"
-:put "新镜像导入完成后启动 foxos:active，验证 /api/v1/health/ready；确认正常后再删除旧回滚槽位。"
+:if ([:len $rollback] > 0) do={ :error "已有 foxos:rollback；完成清理或回滚后才能再次升级" }
+:if ([:len $pending] > 0) do={ :error "已有 foxos:pending；拒绝覆盖未完成升级" }
+:if ([:len [/container find where name="foxos-next"]] > 0) do={ :error "同名 foxos-next 容器已存在，拒绝覆盖" }
+:if ([:len [/file find where name=$imagePath]] != 1) do={ :error ("镜像文件不存在或不唯一: " . $imagePath) }
+:if ([:len [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER" value="foxos"]] != 1) do={ :error "foxos-env 所有权标记缺失" }
+:local foxosVeth [/interface/veth find where name="veth-foxos"]
+:if ([:len $foxosVeth] != 1) do={ :error "veth-foxos 缺失或不唯一" }
+:if ([/interface/veth get $foxosVeth comment] != "foxos:admin") do={ :error "veth-foxos 所有权标记缺失" }
+:foreach mountName in={"foxos-mihomo-config";"foxos-data";"foxos-backups"} do={
+  :if ([:len [/container/mounts find where name=$mountName]] != 1) do={ :error ("升级所需挂载缺失: " . $mountName) }
+}
+
+:put "升级阶段 1：active 容器保持运行，仅导入 disk1 中的新镜像到 foxos:pending。"
+:put "新 root-dir: disk1/containers/foxos-next；回滚仍使用当前 active root-dir。"
+/container/add name=foxos-next file=$imagePath interface=veth-foxos root-dir=($storageRoot . "/containers/foxos-next") envlists=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=yes start-on-boot=no comment="foxos:pending"
+:put "镜像导入已排队，当前 FoxOS 未停止。等待 foxos:pending status=stopped 后执行 disk1/upgrade-promote.rsc。"

@@ -4,7 +4,7 @@
 :local expected 0
 :local ready 0
 
-:foreach containerComment in={"foxos:mihomo";"foxos:mosdns";"foxos:admin"} do={
+:foreach containerComment in={"foxos:mihomo";"foxos:mosdns";"foxos:active"} do={
   :local ids [/container find where comment=$containerComment]
   :if ([:len $ids] != 1) do={
     :error ("未找到唯一容器: " . $containerComment)
@@ -23,17 +23,31 @@
 :put "FoxOS: 启动 Mihomo..."
 /container/start [find where comment="foxos:mihomo"]
 :delay 3s
+:if ([/container get [find where comment="foxos:mihomo"] status] != "running") do={
+  :error "Mihomo 未进入 running；未继续启动其他容器，请检查 container 日志"
+}
 :put "FoxOS: 启动 MosDNS..."
 /container/start [find where comment="foxos:mosdns"]
 :delay 3s
+:if ([/container get [find where comment="foxos:mosdns"] status] != "running") do={
+  :error "MosDNS 未进入 running；未启动 FoxOS，请检查 container 日志"
+}
 :put "FoxOS: 启动管理后台..."
-/container/start [find where comment="foxos:admin"]
+/container/start [find where comment="foxos:active"]
 :delay 5s
+:if ([/container get [find where comment="foxos:active"] status] != "running") do={
+  :error "FoxOS 未进入 running，请检查 container 日志"
+}
 
 /container/print
 :put "FoxOS 已提交启动，请访问 http://10.0.0.4:8090"
 :put "若状态不是 running，请执行 /log/print where topics~\"container\""
 
+:foreach requiredKey in={"FOXOS_ROUTEROS_PASSWORD";"FOXOS_MIHOMO_SECRET";"FOXOS_API_TOKEN";"FOXOS_CONFIRMATION_KEY"} do={
+  :if ([:len [/container/envs find where list="foxos-env" key=$requiredKey]] != 1) do={
+    :error ("FoxOS 凭据键缺失或不唯一: " . $requiredKey)
+  }
+}
 :local routerPassword [/container/envs get [find where list="foxos-env" key="FOXOS_ROUTEROS_PASSWORD"] value]
 :local mihomoSecret [/container/envs get [find where list="foxos-env" key="FOXOS_MIHOMO_SECRET"] value]
 :local apiToken [/container/envs get [find where list="foxos-env" key="FOXOS_API_TOKEN"] value]

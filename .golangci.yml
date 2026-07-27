@@ -1,0 +1,37 @@
+version: "2"
+
+run:
+  timeout: 5m
+  relative-path-mode: gomod
+
+linters:
+  default: standard
+  exclusions:
+    warn-unused: true
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+      - linters:
+          - errcheck
+        source: '^\s*defer .*\.Close\(\)$'
+      - linters:
+          - errcheck
+        source: '^\s*defer .*\.Rollback\(\)$'
+      - linters:
+          - errcheck
+        source: '^\s*defer os\.Remove\('
+      - linters:
+          - staticcheck
+        text: "ST1005:"
+      - linters:
+          - staticcheck
+        text: "QF1001:"
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

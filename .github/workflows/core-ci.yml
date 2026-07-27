@@ -4,79 +4,214 @@ on:
   push:
     branches: [main, agent/foxos-core]
   pull_request:
-    branches: [main]
+    branches: [main, agent/foxos-core]
+  workflow_call:
 
 permissions:
   contents: read
 
+concurrency:
+  group: foxos-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   go:
+    name: Go format, vet, test and race
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.24.x"
-          cache: false
-      - name: Prepare and verify modules
+          cache: true
+      - name: Verify module metadata
         run: |
           go mod tidy
           go mod verify
+          git diff --exit-code -- go.mod go.sum
       - name: Check formatting
         run: test -z "$(gofmt -l cmd internal)"
-      - name: Test
-        run: go test ./...
+      - name: Go vet
+        run: go vet ./...
+      - name: Test with coverage
+        run: go test -shuffle=on -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Race test
+        run: go test -race -shuffle=on -count=1 ./...
+      - name: Upload Go coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: foxos-go-coverage-${{ github.sha }}
+          path: coverage.out
+          if-no-files-found: ignore
+          retention-days: 7
+
+  go-lint:
+    name: Go lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # The v2.12 linter binary and its analyzers require Go 1.25 to run.
+          # Application builds and tests remain pinned to Go 1.24.
+          go-version: "1.25.x"
+          cache: true
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+  go-security:
+    name: Go vulnerability and SAST scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # Scanner toolchains require Go >=1.25; they still analyze the
+          # Go 1.24 module built and tested by the application job.
+          go-version: "1.25.x"
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+      - name: govulncheck
+        run: "$(go env GOPATH)/bin/govulncheck ./..."
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
+      - name: gosec
+        run: "$(go env GOPATH)/bin/gosec -fmt sarif -out gosec.sarif ./..."
+      - name: Upload gosec report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: foxos-gosec-${{ github.sha }}
+          path: gosec.sarif
+          if-no-files-found: ignore
+          retention-days: 7
 
   web:
+    name: Web typecheck, Vitest and production build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "22.x"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Install dependencies
         run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: Vitest
+        run: npm run test:unit
+      - name: Dependency audit
+        run: npm audit --audit-level=high
       - name: Build
         run: npm run build
 
-  container:
+  playwright:
+    name: Playwright desktop and mobile E2E
     runs-on: ubuntu-latest
-    needs: [go, web]
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: Build amd64 image
-        run: docker buildx build --platform linux/amd64 --output type=docker,dest=foxos-amd64.tar .
-      - name: Assemble RouterOS full-stack bundle
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run E2E suite
+        run: npm run test:e2e
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: foxos-playwright-${{ github.sha }}
+          path: |
+            web/playwright-report
+            web/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  repository-safety:
+    name: Workflows, RouterOS scripts and repository safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.x"
+          cache: false
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - name: Shell syntax
+        run: bash -n scripts/*.sh
+      - name: RouterOS static checks
+        run: scripts/check-routeros-scripts.sh
+      - name: Sensitive material checks
+        run: scripts/check-sensitive-material.sh
+      - name: Whitespace and generated-file check
         run: |
-          mkdir -p foxos-full-amd64
-          cp foxos-amd64.tar foxos-full-amd64/
-          cp mihomo/install/mihomo_amd64.tar foxos-full-amd64/
-          cp mihomo/install/mosdns-v0.6.4-2ac30e8-amd64.tar foxos-full-amd64/mosdns-amd64.tar
-          cp -a mihomo/config foxos-full-amd64/mihomo-config
-          cp -a mosdns-config foxos-full-amd64/mosdns-config
-          sed -i -E 's/^secret:.*/secret: ""/' foxos-full-amd64/mihomo-config/config.yaml
-          cp deploy/routeros/foxos-full-install.rsc foxos-full-amd64/
-          cp deploy/routeros/foxos-start-all.rsc foxos-full-amd64/
-          cp deploy/routeros/QUICK-INSTALL.md foxos-full-amd64/
-          find foxos-full-amd64 -name .DS_Store -delete
-          test -s foxos-full-amd64/foxos-amd64.tar
-          test -s foxos-full-amd64/mihomo_amd64.tar
-          test -s foxos-full-amd64/mosdns-amd64.tar
-          test -s foxos-full-amd64/mihomo-config/config.yaml
-          test -s foxos-full-amd64/mosdns-config/config_custom.yaml
-          grep -Fxq 'secret: ""' foxos-full-amd64/mihomo-config/config.yaml
-          test -f foxos-full-amd64/foxos-full-install.rsc
-          test -f foxos-full-amd64/foxos-start-all.rsc
-      - uses: actions/upload-artifact@v4
+          git diff --check
+          test ! -d node_modules
+          test ! -d web/node_modules
+          test ! -d web/playwright-report
+          test ! -d web/test-results
+
+  container:
+    name: Build and validate amd64 RouterOS bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [go, go-lint, go-security, web, playwright, repository-safety]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - uses: docker/setup-buildx-action@v4
+      - name: Build FoxOS amd64 image
+        run: docker buildx build --platform linux/amd64 --build-arg FOXOS_VERSION="${GITHUB_SHA}" --output type=docker,dest=foxos-amd64.tar .
+      - name: Scan FoxOS image
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          input: foxos-amd64.tar
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Assemble and validate full bundle
+        env:
+          FOXOS_IMAGE: ${{ github.workspace }}/foxos-amd64.tar
+        run: |
+          scripts/build-routeros-bundle.sh dist "${GITHUB_SHA}"
+          test -s "dist/foxos-full-amd64-${GITHUB_SHA}.tar.gz"
+          test -s "dist/foxos-full-amd64-${GITHUB_SHA}.tar.gz.sha256"
+          tar -tzf "dist/foxos-full-amd64-${GITHUB_SHA}.tar.gz" | grep -Fx "foxos-full-amd64-${GITHUB_SHA}/SHA256SUMS"
+      - uses: actions/upload-artifact@v7
         with:
           name: foxos-full-amd64-${{ github.sha }}
-          path: foxos-full-amd64/
+          path: |
+            dist/foxos-full-amd64-${{ github.sha }}.tar.gz
+            dist/foxos-full-amd64-${{ github.sha }}.tar.gz.sha256
+          if-no-files-found: error
           retention-days: 14
