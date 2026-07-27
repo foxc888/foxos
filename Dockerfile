@@ -20,7 +20,7 @@ RUN go mod tidy \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${FOXOS_VERSION:-dev}" -o /out/foxos ./cmd/server
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates tzdata \
+RUN apk add --no-cache ca-certificates libcap tzdata \
     && addgroup -S -g 10001 foxos \
     && adduser -S -D -H -u 10001 -G foxos foxos \
     && mkdir -p /app/web /data /backups \
@@ -29,8 +29,9 @@ WORKDIR /app
 COPY --from=server /out/foxos /app/foxos
 COPY --from=web /src/web/dist /app/web
 COPY --from=mihomo-validator /mihomo /usr/local/bin/mihomo
+RUN setcap cap_net_bind_service=+ep /app/foxos
 USER 10001:10001
-EXPOSE 8090
+EXPOSE 80 443
 VOLUME ["/data", "/backups"]
 ENTRYPOINT ["/app/foxos"]
-CMD ["-listen", ":8090", "-static", "/app/web", "-database", "/data/foxos.db"]
+CMD ["-static", "/app/web", "-database", "/data/foxos.db"]

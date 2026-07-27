@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -106,6 +107,55 @@ func TestNodeAPIEnforcesJSONBodyLimit(t *testing.T) {
 			}
 			if len(store.nodes) != test.wantSaved {
 				t.Fatalf("saved nodes=%d, want %d", len(store.nodes), test.wantSaved)
+			}
+		})
+	}
+}
+
+func TestBearerAuthenticationRequiresTrustedHTTPSWhenEnabled(t *testing.T) {
+	const (
+		token       = "01234567890123456789012345678901"
+		proxyToken  = "abcdefghijklmnopqrstuvwxyz012345"
+		proxyHeader = "X-Foxos-Internal-Gateway"
+	)
+	app, err := New(&memoryNodes{nodes: map[string]domain.Node{}}, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RequireSecureTransport(proxyHeader, proxyToken); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	app.Register(mux)
+	request := func() *http.Request {
+		result := httptest.NewRequest(http.MethodGet, "/api/v1/nodes", nil)
+		result.Header.Set("Authorization", "Bearer "+token)
+		return result
+	}
+	tests := []struct {
+		name   string
+		mutate func(*http.Request)
+		want   int
+	}{
+		{name: "plain HTTP bearer is rejected", want: http.StatusUpgradeRequired},
+		{name: "forged forwarded proto is rejected", mutate: func(r *http.Request) { r.Header.Set("X-Forwarded-Proto", "https") }, want: http.StatusUpgradeRequired},
+		{name: "trusted loopback proxy is accepted", mutate: func(r *http.Request) {
+			r.RemoteAddr = "127.0.0.1:54321"
+			r.Header.Set("X-Forwarded-Proto", "https")
+			r.Header.Set(proxyHeader, proxyToken)
+		}, want: http.StatusOK},
+		{name: "direct TLS is accepted", mutate: func(r *http.Request) { r.TLS = &tls.ConnectionState{} }, want: http.StatusOK},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r := request()
+			if test.mutate != nil {
+				test.mutate(r)
+			}
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, r)
+			if response.Code != test.want {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
 		})
 	}

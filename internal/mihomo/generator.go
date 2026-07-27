@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/foxc888/foxos/internal/domain"
+	"github.com/foxc888/foxos/internal/site"
 	"gopkg.in/yaml.v3"
 )
 
@@ -24,14 +25,15 @@ type Document struct {
 }
 
 type Input struct {
-	Base      []byte
-	Mode      string
-	MixedPort int
-	AllowLAN  bool
-	Nodes     []domain.Node
-	Groups    []domain.Group
-	Policies  []domain.DevicePolicy
-	Rules     []string
+	Base               []byte
+	Mode               string
+	MixedPort          int
+	AllowLAN           bool
+	Nodes              []domain.Node
+	Groups             []domain.Group
+	Policies           []domain.DevicePolicy
+	ProtectedAddresses []string
+	Rules              []string
 }
 
 func Generate(input Input) ([]byte, error) {
@@ -107,7 +109,7 @@ func Generate(input Input) ([]byte, error) {
 		}
 		groups = append(groups, rendered)
 	}
-	policyRules, err := renderPolicyRules(input.Policies, nodeNames, groupNames)
+	policyRules, err := renderPolicyRules(input.Policies, nodeNames, groupNames, input.ProtectedAddresses)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +159,7 @@ func trustedBaseDocument(body []byte) (map[string]any, error) {
 	return document, nil
 }
 
-func renderPolicyRules(policies []domain.DevicePolicy, nodes, groups map[string]string) ([]string, error) {
+func renderPolicyRules(policies []domain.DevicePolicy, nodes, groups map[string]string, protected []string) ([]string, error) {
 	ordered := append([]domain.DevicePolicy(nil), policies...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
 	rules := make([]string, 0, len(ordered))
@@ -167,7 +169,7 @@ func renderPolicyRules(policies []domain.DevicePolicy, nodes, groups map[string]
 			return nil, err
 		}
 		ip := net.ParseIP(policy.StaticIP)
-		if ip == nil || ip.To4() == nil || isManagementAddress(ip.To4().String()) {
+		if ip == nil || ip.To4() == nil || isManagementAddress(ip.To4().String(), protected) {
 			return nil, fmt.Errorf("%w: invalid or protected device policy address", ErrInvalidConfig)
 		}
 		address := ip.To4().String()
@@ -202,13 +204,16 @@ func renderPolicyRules(policies []domain.DevicePolicy, nodes, groups map[string]
 	return rules, nil
 }
 
-func isManagementAddress(value string) bool {
-	switch value {
-	case "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4":
-		return true
-	default:
-		return false
+func isManagementAddress(value string, protected []string) bool {
+	if len(protected) == 0 {
+		protected = site.Default().ProtectedAddresses()
 	}
+	for _, address := range protected {
+		if value == address {
+			return true
+		}
+	}
+	return false
 }
 
 func renderNode(node domain.Node) map[string]any {

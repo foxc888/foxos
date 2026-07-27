@@ -19,6 +19,7 @@ import (
 	"github.com/foxc888/foxos/internal/config"
 	"github.com/foxc888/foxos/internal/confirmation"
 	"github.com/foxc888/foxos/internal/domain"
+	"github.com/foxc888/foxos/internal/gateway"
 	"github.com/foxc888/foxos/internal/mihomo"
 	"github.com/foxc888/foxos/internal/mosdns"
 	"github.com/foxc888/foxos/internal/routeros"
@@ -67,6 +68,23 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	var httpsAccess api.HTTPSAccess
+	var certificates gateway.Certificates
+	var proxyToken string
+	if runtimeConfig.HTTPS.Enabled {
+		certificates, err = gateway.EnsureCertificates(runtimeConfig.HTTPS.CertDir, runtimeConfig.Site.PublicHostname, runtimeConfig.Site.FoxOSAddress, time.Now())
+		if err != nil {
+			log.Fatal(err)
+		}
+		proxyToken, err = gateway.NewProxyToken()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := app.RequireSecureTransport(gateway.InternalProxyHeader, proxyToken); err != nil {
+			log.Fatal(err)
+		}
+		httpsAccess = api.HTTPSAccess{Enabled: true, CAFingerprint: certificates.CAFingerprint, CACertificate: certificates.CACertificatePEM}
+	}
 
 	var ros api.RouterOSReader
 	var leases api.BindingStateReader
@@ -78,7 +96,7 @@ func main() {
 	var containerCommands containerCommandService
 	var routerMonitor alerting.RouterReader
 	if runtimeConfig.RouterOS.URL != "" {
-		client, err := routeros.NewClient(runtimeConfig.RouterOS.URL, runtimeConfig.RouterOS.Username, runtimeConfig.RouterOS.Password)
+		client, err := routeros.NewClient(runtimeConfig.RouterOS.URL, runtimeConfig.RouterOS.Username, runtimeConfig.RouterOS.Password, runtimeConfig.Site)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -125,7 +143,7 @@ func main() {
 			},
 		}
 		mihomoApplier = &mihomo.Applier{ConfigPath: runtimeConfig.Mihomo.LocalConfigPath, BackupDir: runtimeConfig.Mihomo.BackupDir, Runtime: validatedRuntime}
-		mihomoService = &mihomo.Service{Store: store, Applier: mihomoApplier, BaseConfig: baseConfig}
+		mihomoService = &mihomo.Service{Store: store, Applier: mihomoApplier, BaseConfig: baseConfig, ProtectedAddresses: runtimeConfig.Site.ProtectedAddresses()}
 	}
 	if runtimeConfig.Mihomo.ProxyURL != "" {
 		mihomoExitProbe, err = mihomo.NewExitProbe(runtimeConfig.Mihomo.ProxyURL)
@@ -159,6 +177,7 @@ func main() {
 		paths = append(paths, runtimeConfig.Mihomo.LocalConfigPath, runtimeConfig.Mihomo.BackupDir)
 	}
 	app.RegisterHealth(mux, api.HealthOptions{Store: store, RequiredPaths: paths, Dependencies: dependencies, Version: version})
+	app.RegisterSite(mux, runtimeConfig.Site, httpsAccess)
 	app.Register(mux)
 	app.RegisterGroups(mux, store)
 	app.RegisterDevicePolicies(mux, store)
@@ -215,7 +234,21 @@ func main() {
 		mux.Handle("/", http.FileServer(http.Dir(*staticDir)))
 	}
 
-	server := &http.Server{Addr: *address, Handler: securityHeaders(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
+	handler := securityHeaders(mux)
+	if runtimeConfig.HTTPS.Enabled {
+		log.Printf("FoxOS %s listening on https://%s and redirecting HTTP", version, runtimeConfig.Site.PublicHostname)
+		log.Fatal(gateway.Serve(gateway.ServerConfig{
+			InternalListen:     runtimeConfig.HTTPS.InternalListen,
+			PublicListen:       runtimeConfig.HTTPS.PublicListen,
+			HTTPRedirectListen: runtimeConfig.HTTPS.HTTPRedirectListen,
+			PublicHostname:     runtimeConfig.Site.PublicHostname,
+			CertificatePath:    certificates.CertificatePath,
+			KeyPath:            certificates.KeyPath,
+			ProxyToken:         proxyToken,
+			Backend:            handler,
+		}))
+	}
+	server := &http.Server{Addr: *address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	log.Printf("FoxOS %s listening on %s", version, *address)
 	log.Fatal(server.ListenAndServe())
 }
@@ -226,6 +259,9 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}

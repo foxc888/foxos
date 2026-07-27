@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 
 	"github.com/foxc888/foxos/internal/domain"
+	"github.com/foxc888/foxos/internal/site"
 )
 
 var (
@@ -37,12 +39,14 @@ const (
 // an egress plan. Maps are deliberately string-valued because RouterOS REST
 // serializes even booleans and numbers as strings.
 type EgressState struct {
-	MangleRules   []map[string]string `json:"mangleRules"`
-	FilterRules   []map[string]string `json:"filterRules"`
-	AddressLists  []map[string]string `json:"addressLists"`
-	Routes        []map[string]string `json:"routes"`
-	RoutingTables []map[string]string `json:"routingTables"`
-	L2TPClients   []map[string]string `json:"l2tpClients"`
+	MangleRules        []map[string]string `json:"mangleRules"`
+	FilterRules        []map[string]string `json:"filterRules"`
+	AddressLists       []map[string]string `json:"addressLists"`
+	Routes             []map[string]string `json:"routes"`
+	RoutingTables      []map[string]string `json:"routingTables"`
+	L2TPClients        []map[string]string `json:"l2tpClients"`
+	ProtectedAddresses []string            `json:"protectedAddresses,omitempty"`
+	MihomoAddress      string              `json:"mihomoAddress,omitempty"`
 }
 
 type EgressOperation struct {
@@ -56,6 +60,7 @@ type EgressOperation struct {
 
 type EgressPlan struct {
 	PolicyID             string               `json:"policyId"`
+	ProtectedAddresses   []string             `json:"protectedAddresses"`
 	StaticIP             string               `json:"staticIp"`
 	Egress               domain.EgressType    `json:"egress"`
 	TargetID             string               `json:"targetId,omitempty"`
@@ -89,7 +94,7 @@ func (e EgressExecutor) Execute(ctx context.Context, plan EgressPlan) error {
 		return ErrUnsafeOperation
 	}
 	for _, operation := range plan.Operations {
-		if err := ValidateEgressOperation(operation); err != nil {
+		if err := ValidateEgressOperation(operation, plan.ProtectedAddresses); err != nil {
 			return err
 		}
 	}
@@ -163,7 +168,7 @@ func PlanDeviceEgress(policy domain.DevicePolicy, state EgressState) (EgressPlan
 	if egressResourceCount(state) > maxEgressResources {
 		return EgressPlan{}, fmt.Errorf("%w: RouterOS egress state exceeds the planning limit", ErrEgressPlan)
 	}
-	if isManagementAddress(policy.StaticIP) {
+	if isProtectedAddress(policy.StaticIP, state.ProtectedAddresses) {
 		return EgressPlan{}, fmt.Errorf("%w: management address is protected", ErrEgressPlan)
 	}
 	if err := policy.Validate(); err != nil {
@@ -173,7 +178,7 @@ func PlanDeviceEgress(policy domain.DevicePolicy, state EgressState) (EgressPlan
 		return EgressPlan{}, fmt.Errorf("%w: invalid policy id", ErrEgressPlan)
 	}
 	owner := "foxos:egress:" + policy.ID
-	plan := EgressPlan{PolicyID: policy.ID, StaticIP: policy.StaticIP, Egress: policy.Egress, TargetID: policy.TargetID, Policy: policy, StateDigest: EgressStateDigest(state)}
+	plan := EgressPlan{PolicyID: policy.ID, ProtectedAddresses: normalizedProtectedAddresses(state.ProtectedAddresses), StaticIP: policy.StaticIP, Egress: policy.Egress, TargetID: policy.TargetID, Policy: policy, StateDigest: EgressStateDigest(state)}
 
 	// Remove resources left by a previous mode before installing the desired
 	// shape. Every deletion carries a complete, validated PUT rollback.
@@ -221,7 +226,11 @@ func PlanDeviceEgress(policy domain.DevicePolicy, state EgressState) (EgressPlan
 		plan.Warnings = append(plan.Warnings, "设备流量将在 FoxOS forward 链中拒绝；已有 FastTrack 连接必须先结束")
 
 	case domain.EgressMihomoNode, domain.EgressProxyChain:
-		return EgressPlan{}, fmt.Errorf("%w: Mihomo transparent ingress, return path, management bypass and exit-IP evidence are not verified; a marked route to 10.0.0.2 is not a data plane", ErrEgressPrerequisite)
+		mihomoAddress := state.MihomoAddress
+		if mihomoAddress == "" {
+			mihomoAddress = site.Default().MihomoAddress
+		}
+		return EgressPlan{}, fmt.Errorf("%w: Mihomo transparent ingress, return path, management bypass and exit-IP evidence are not verified; a marked route to %s is not a data plane", ErrEgressPrerequisite, mihomoAddress)
 
 	case domain.EgressL2TP:
 		if err := requireL2TPPrerequisites(state, policy); err != nil {
@@ -233,7 +242,7 @@ func PlanDeviceEgress(policy domain.DevicePolicy, state EgressState) (EgressPlan
 		if err := remove("/rest/ip/firewall/mangle", state.MangleRules); err != nil {
 			return EgressPlan{}, err
 		}
-		bypass, err := ensureManagementBypass(state.AddressLists)
+		bypass, err := ensureManagementBypass(state.AddressLists, state.ProtectedAddresses)
 		if err != nil {
 			return EgressPlan{}, err
 		}
@@ -300,7 +309,7 @@ func (c *Client) PlanDeviceEgress(ctx context.Context, policy domain.DevicePolic
 }
 
 func (c *Client) EgressState(ctx context.Context) (EgressState, error) {
-	state := EgressState{}
+	state := EgressState{ProtectedAddresses: c.site.ProtectedAddresses(), MihomoAddress: c.site.MihomoAddress}
 	queries := []struct {
 		path string
 		out  *[]map[string]string
@@ -330,7 +339,7 @@ func requireManglePrerequisites(state EgressState, policy domain.DevicePolicy) e
 	if !hasFibTable(state.RoutingTables, mihomoTable) {
 		return fmt.Errorf("%w: routing table %s with fib=yes is required", ErrEgressPrerequisite, mihomoTable)
 	}
-	if !hasMihomoGateway(state.Routes) {
+	if !hasMihomoGateway(state.Routes, state.MihomoAddress) {
 		return fmt.Errorf("%w: active foxos Mihomo transparent gateway route is required", ErrEgressPrerequisite)
 	}
 	_ = policy
@@ -407,18 +416,23 @@ func hasFibTable(tables []map[string]string, name string) bool {
 	return false
 }
 
-func hasMihomoGateway(routes []map[string]string) bool {
+func hasMihomoGateway(routes []map[string]string, addresses ...string) bool {
+	mihomoAddress := site.Default().MihomoAddress
+	if len(addresses) > 0 && net.ParseIP(addresses[0]) != nil {
+		mihomoAddress = addresses[0]
+	}
 	for _, route := range routes {
-		if route["dst-address"] == "0.0.0.0/0" && route["routing-table"] == mihomoTable && !disabled(route) && (route["gateway"] == "10.0.0.2" || route["gateway"] == "10.0.0.2@main") && route["comment"] == "foxos:prerequisite:mihomo-transparent" {
+		if route["dst-address"] == "0.0.0.0/0" && route["routing-table"] == mihomoTable && !disabled(route) && (route["gateway"] == mihomoAddress || route["gateway"] == mihomoAddress+"@main") && route["comment"] == "foxos:prerequisite:mihomo-transparent" {
 			return true
 		}
 	}
 	return false
 }
 
-func ensureManagementBypass(resources []map[string]string) ([]EgressOperation, error) {
-	operations := make([]EgressOperation, 0, 4)
-	for _, ip := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"} {
+func ensureManagementBypass(resources []map[string]string, protected []string) ([]EgressOperation, error) {
+	protected = normalizedProtectedAddresses(protected)
+	operations := make([]EgressOperation, 0, len(protected))
+	for _, ip := range protected {
 		owner := "foxos:bypass:" + ip
 		body := map[string]string{"list": managementList, "address": ip, "comment": owner, "disabled": "false"}
 		items, err := ensureOwned("/rest/ip/firewall/address-list", resources, body, owner, "保护 FoxOS 管理面地址 "+ip)
@@ -428,6 +442,39 @@ func ensureManagementBypass(resources []map[string]string) ([]EgressOperation, e
 		operations = append(operations, items...)
 	}
 	return operations, nil
+}
+
+func isProtectedAddress(value string, protected []string) bool {
+	for _, address := range normalizedProtectedAddresses(protected) {
+		if value == address {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedProtectedAddresses(protected []string) []string {
+	if len(protected) == 0 {
+		return site.Default().ProtectedAddresses()
+	}
+	result := make([]string, 0, len(protected))
+	seen := make(map[string]struct{}, len(protected))
+	for _, value := range protected {
+		ip := net.ParseIP(strings.TrimSpace(value))
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		canonical := ip.String()
+		if _, exists := seen[canonical]; exists {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		result = append(result, canonical)
+	}
+	if len(result) == 0 {
+		return site.Default().ProtectedAddresses()
+	}
+	return result
 }
 
 func removeOwned(path string, resources []map[string]string, owner string) ([]EgressOperation, error) {
@@ -548,7 +595,11 @@ func safeResourceName(value string) bool {
 	return true
 }
 
-func ValidateEgressOperation(operation EgressOperation) error {
+func ValidateEgressOperation(operation EgressOperation, protected ...[]string) error {
+	protectedAddresses := normalizedProtectedAddresses(nil)
+	if len(protected) > 0 {
+		protectedAddresses = normalizedProtectedAddresses(protected[0])
+	}
 	if operation.Method != http.MethodPut && operation.Method != http.MethodPatch && operation.Method != http.MethodDelete {
 		return fmt.Errorf("%w: method", ErrUnsafeOperation)
 	}
@@ -571,14 +622,14 @@ func ValidateEgressOperation(operation EgressOperation) error {
 	if operation.Body["place-before"] != "" && !safeRouterOSID(operation.Body["place-before"]) {
 		return fmt.Errorf("%w: placement", ErrUnsafeOperation)
 	}
-	if isManagementAddress(operation.Body["src-address"]) {
+	if isProtectedAddress(operation.Body["src-address"], protectedAddresses) {
 		return fmt.Errorf("%w: management address", ErrUnsafeOperation)
 	}
 	if base == "/rest/ip/firewall/address-list" {
 		if operation.Body["list"] != managementList || !strings.HasPrefix(operation.OwnedComment, "foxos:bypass:") || operation.Body["address"] != strings.TrimPrefix(operation.OwnedComment, "foxos:bypass:") {
 			return fmt.Errorf("%w: management bypass resource", ErrUnsafeOperation)
 		}
-	} else if isManagementAddress(operation.Body["address"]) {
+	} else if isProtectedAddress(operation.Body["address"], protectedAddresses) {
 		return fmt.Errorf("%w: management address", ErrUnsafeOperation)
 	}
 	switch base {

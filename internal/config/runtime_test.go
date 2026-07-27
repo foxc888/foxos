@@ -22,6 +22,9 @@ func TestLoadOptionalAdapters(t *testing.T) {
 	if cfg.RouterOS.URL != "" || cfg.Mihomo.URL != "" {
 		t.Fatalf("cfg=%+v", cfg)
 	}
+	if cfg.Site.PublicHostname != "foxos.home.arpa" || cfg.HTTPS.Enabled {
+		t.Fatalf("unexpected site or HTTPS defaults: %+v", cfg)
+	}
 }
 func TestLoadRejectsCredentialsInURL(t *testing.T) {
 	t.Setenv("FOXOS_API_TOKEN", "01234567890123456789012345678901")
@@ -62,5 +65,33 @@ func TestLoadRequiresStrongMihomoSecret(t *testing.T) {
 				t.Fatalf("unexpected Mihomo safe defaults: %+v", cfg.Mihomo)
 			}
 		})
+	}
+}
+
+func TestLoadHTTPSGateway(t *testing.T) {
+	t.Setenv("FOXOS_API_TOKEN", strings.Repeat("a", 32))
+	t.Setenv("FOXOS_CONFIRMATION_KEY", strings.Repeat("b", 32))
+	t.Setenv("FOXOS_HTTPS_ENABLED", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HTTPS.Enabled || cfg.HTTPS.InternalListen != "127.0.0.1:8090" || cfg.HTTPS.PublicListen != ":443" || cfg.HTTPS.HTTPRedirectListen != ":80" {
+		t.Fatalf("unexpected HTTPS config: %+v", cfg.HTTPS)
+	}
+	t.Setenv("FOXOS_INTERNAL_LISTEN", "0.0.0.0:8090")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected public internal-listener rejection")
+	}
+}
+
+func TestLoadRejectsEndpointOutsideSiteManifest(t *testing.T) {
+	t.Setenv("FOXOS_API_TOKEN", strings.Repeat("a", 32))
+	t.Setenv("FOXOS_CONFIRMATION_KEY", strings.Repeat("b", 32))
+	t.Setenv("FOXOS_ROUTEROS_URL", "http://192.168.1.1")
+	t.Setenv("FOXOS_ROUTEROS_USERNAME", "foxos")
+	t.Setenv("FOXOS_ROUTEROS_PASSWORD", strings.Repeat("c", 32))
+	if _, err := Load(); err == nil {
+		t.Fatal("expected endpoint/site mismatch")
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 
@@ -25,8 +26,21 @@ type NodeStore interface {
 }
 
 type Server struct {
-	nodes NodeStore
-	token [sha256.Size]byte
+	nodes              NodeStore
+	token              [sha256.Size]byte
+	requireSecure      bool
+	trustedProxyHeader string
+	trustedProxyToken  [sha256.Size]byte
+}
+
+func (s *Server) RequireSecureTransport(proxyHeader, proxyToken string) error {
+	if strings.TrimSpace(proxyHeader) == "" || len(proxyToken) < 32 {
+		return errors.New("trusted proxy header and token of at least 32 characters are required")
+	}
+	s.requireSecure = true
+	s.trustedProxyHeader = proxyHeader
+	s.trustedProxyToken = sha256.Sum256([]byte(proxyToken))
+	return nil
 }
 
 func New(nodes NodeStore, token string) (*Server, error) {
@@ -86,6 +100,14 @@ func output(n domain.Node) nodeOutput {
 
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secure := !s.requireSecure || s.secureTransport(r)
+		if s.trustedProxyHeader != "" {
+			r.Header.Del(s.trustedProxyHeader)
+		}
+		if !secure {
+			problem(w, http.StatusUpgradeRequired, "https_required", errors.New("bearer authentication requires HTTPS"))
+			return
+		}
 		const prefix = "Bearer "
 		value := r.Header.Get("Authorization")
 		candidate := sha256.Sum256([]byte(strings.TrimPrefix(value, prefix)))
@@ -96,6 +118,22 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) secureTransport(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() || r.Header.Get("X-Forwarded-Proto") != "https" {
+		return false
+	}
+	candidate := sha256.Sum256([]byte(r.Header.Get(s.trustedProxyHeader)))
+	return subtle.ConstantTimeCompare(candidate[:], s.trustedProxyToken[:]) == 1
 }
 func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	nodes, err := s.nodes.Nodes(r.Context())

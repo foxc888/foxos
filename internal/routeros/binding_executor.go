@@ -56,7 +56,7 @@ func (e *BindingExecutor) Execute(ctx context.Context, plan Plan, token string) 
 		return ErrUnsafeOperation
 	}
 	for _, operation := range plan.Operations {
-		if err := validateBindingOperation(operation); err != nil {
+		if err := validateBindingOperation(operation, plan.ProtectedAddresses); err != nil {
 			return err
 		}
 	}
@@ -96,7 +96,11 @@ func (e *BindingExecutor) Execute(ctx context.Context, plan Plan, token string) 
 	return nil
 }
 
-func validateBindingOperation(operation Operation) error {
+func validateBindingOperation(operation Operation, protected ...[]string) error {
+	protectedAddresses := normalizedProtectedAddresses(nil)
+	if len(protected) > 0 {
+		protectedAddresses = normalizedProtectedAddresses(protected[0])
+	}
 	if !strings.HasPrefix(operation.OwnedComment, "foxos:device:") || operation.After == nil {
 		return fmt.Errorf("%w: owner or expected state", ErrUnsafeOperation)
 	}
@@ -116,7 +120,7 @@ func validateBindingOperation(operation Operation) error {
 	if operation.Body["comment"] != operation.OwnedComment {
 		return fmt.Errorf("%w: comment mismatch", ErrUnsafeOperation)
 	}
-	if isManagementAddress(operation.Body["address"]) {
+	if isProtectedAddress(operation.Body["address"], protectedAddresses) {
 		return fmt.Errorf("%w: management address", ErrUnsafeOperation)
 	}
 	if operation.Body["address"] == "" || operation.Body["mac-address"] == "" || operation.Body["server"] == "" {

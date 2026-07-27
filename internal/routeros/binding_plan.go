@@ -52,6 +52,7 @@ type BindingPreState struct {
 
 type Plan struct {
 	PolicyID             string          `json:"policyId"`
+	ProtectedAddresses   []string        `json:"protectedAddresses"`
 	Operations           []Operation     `json:"operations"`
 	Warnings             []string        `json:"warnings"`
 	RequiresConfirmation bool            `json:"requiresConfirmation"`
@@ -60,7 +61,7 @@ type Plan struct {
 }
 
 func PlanDeviceBinding(policy domain.DevicePolicy, state BindingState) (Plan, error) {
-	if isManagementAddress(policy.StaticIP) {
+	if isProtectedAddress(policy.StaticIP, state.ProtectedAddresses) {
 		return Plan{}, fmt.Errorf("%w: management address is protected", ErrPlanConflict)
 	}
 	if err := policy.Validate(); err != nil {
@@ -126,7 +127,7 @@ func PlanDeviceBinding(policy domain.DevicePolicy, state BindingState) (Plan, er
 	}
 	desired := LeaseState{Address: policy.StaticIP, MACAddress: mac, Server: policy.DHCPServer, Dynamic: "false", Comment: comment, Disabled: "false"}
 	body := leaseStateBody(desired)
-	plan := Plan{PolicyID: policy.ID, RequiresConfirmation: true, PreState: preState, FinalState: desired}
+	plan := Plan{PolicyID: policy.ID, ProtectedAddresses: normalizedProtectedAddresses(state.ProtectedAddresses), RequiresConfirmation: true, PreState: preState, FinalState: desired}
 	if current == nil {
 		plan.Operations = []Operation{{Method: http.MethodPut, Path: "/rest/ip/dhcp-server/lease", Body: body, Summary: "创建 FoxOS 管理的静态 DHCP 租约", OwnedComment: comment, After: statePointer(desired)}}
 		plan.Warnings = []string{"设备当前没有 DHCP 租约；应用后设备需要重新获取地址"}
@@ -371,10 +372,6 @@ func CanonicalMAC(value string) (string, error) {
 		return "", err
 	}
 	return strings.ToUpper(mac.String()), nil
-}
-
-func isManagementAddress(value string) bool {
-	return value == "10.0.0.1" || value == "10.0.0.2" || value == "10.0.0.3" || value == "10.0.0.4"
 }
 
 func safeRouterOSID(value string) bool {

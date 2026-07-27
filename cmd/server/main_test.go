@@ -25,10 +25,13 @@ func TestSecurityHeaders(t *testing.T) {
 	tests := []struct {
 		name             string
 		path             string
+		forwardedProto   string
 		wantCacheControl string
+		wantHSTS         string
 	}{
 		{name: "API response is not cached", path: "/api/v1/health/live", wantCacheControl: "no-store"},
 		{name: "static response keeps normal cache policy", path: "/assets/app.js"},
+		{name: "HTTPS response receives HSTS", path: "/", forwardedProto: "https", wantHSTS: "max-age=31536000"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -37,15 +40,18 @@ func TestSecurityHeaders(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			}))
 			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			request.Header.Set("X-Forwarded-Proto", test.forwardedProto)
+			handler.ServeHTTP(response, request)
 
 			wantHeaders := map[string]string{
-				"Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
-				"X-Content-Type-Options":  "nosniff",
-				"X-Frame-Options":         "DENY",
-				"Referrer-Policy":         "no-referrer",
-				"Permissions-Policy":      "camera=(), microphone=(), geolocation=()",
-				"Cache-Control":           test.wantCacheControl,
+				"Content-Security-Policy":   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+				"X-Content-Type-Options":    "nosniff",
+				"X-Frame-Options":           "DENY",
+				"Referrer-Policy":           "no-referrer",
+				"Permissions-Policy":        "camera=(), microphone=(), geolocation=()",
+				"Cache-Control":             test.wantCacheControl,
+				"Strict-Transport-Security": test.wantHSTS,
 			}
 			for name, want := range wantHeaders {
 				if got := response.Header().Get(name); got != want {

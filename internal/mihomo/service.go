@@ -33,10 +33,11 @@ type ConfigStore interface {
 }
 
 type Service struct {
-	Store      ConfigStore
-	Applier    *Applier
-	BaseConfig []byte
-	Now        func() time.Time
+	Store              ConfigStore
+	Applier            *Applier
+	BaseConfig         []byte
+	ProtectedAddresses []string
+	Now                func() time.Time
 }
 
 type Preview struct {
@@ -72,7 +73,7 @@ func (s *Service) Preview(ctx context.Context, draft domain.MihomoDraft) (Previe
 	if err != nil {
 		return Preview{}, fmt.Errorf("read device policies: %w", err)
 	}
-	body, err := Generate(Input{Base: s.BaseConfig, Mode: draft.Mode, MixedPort: draft.MixedPort, AllowLAN: draft.AllowLAN, Nodes: nodes, Groups: groups, Policies: policies, Rules: draft.Rules})
+	body, err := Generate(Input{Base: s.BaseConfig, Mode: draft.Mode, MixedPort: draft.MixedPort, AllowLAN: draft.AllowLAN, Nodes: nodes, Groups: groups, Policies: policies, ProtectedAddresses: s.ProtectedAddresses, Rules: draft.Rules})
 	if err != nil {
 		return Preview{}, err
 	}
@@ -141,7 +142,7 @@ func (s *Service) ApplyPreview(ctx context.Context, draft domain.MihomoDraft, ex
 	if err != nil {
 		return ApplyResult{}, domain.MihomoSnapshot{}, err
 	}
-	body, err := Generate(Input{Base: s.BaseConfig, Mode: draft.Mode, MixedPort: draft.MixedPort, AllowLAN: draft.AllowLAN, Nodes: nodes, Groups: groups, Policies: policies, Rules: draft.Rules})
+	body, err := Generate(Input{Base: s.BaseConfig, Mode: draft.Mode, MixedPort: draft.MixedPort, AllowLAN: draft.AllowLAN, Nodes: nodes, Groups: groups, Policies: policies, ProtectedAddresses: s.ProtectedAddresses, Rules: draft.Rules})
 	if err != nil {
 		return ApplyResult{}, domain.MihomoSnapshot{}, err
 	}

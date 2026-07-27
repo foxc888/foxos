@@ -40,10 +40,6 @@ func (p DevicePolicy) Validate() error {
 	if ip == nil || ip.To4() == nil {
 		return fmt.Errorf("%w: static IPv4 is required", ErrInvalidDevicePolicy)
 	}
-	switch ip.To4().String() {
-	case "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4":
-		return fmt.Errorf("%w: management address is protected", ErrInvalidDevicePolicy)
-	}
 	if p.DHCPServer == "" {
 		return fmt.Errorf("%w: DHCP server is required", ErrInvalidDevicePolicy)
 	}

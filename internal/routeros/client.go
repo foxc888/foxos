@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/foxc888/foxos/internal/site"
 )
 
 type Client struct {
@@ -18,9 +20,10 @@ type Client struct {
 	username string
 	password string
 	http     *http.Client
+	site     site.Config
 }
 
-func NewClient(endpoint, username, password string) (*Client, error) {
+func NewClient(endpoint, username, password string, siteConfigs ...site.Config) (*Client, error) {
 	base, err := url.Parse(endpoint)
 	if err != nil || base.Host == "" || (base.Scheme != "http" && base.Scheme != "https") || base.User != nil {
 		return nil, errors.New("invalid RouterOS REST endpoint")
@@ -31,7 +34,17 @@ func NewClient(endpoint, username, password string) (*Client, error) {
 	if username == "" || password == "" {
 		return nil, errors.New("RouterOS credentials are required")
 	}
-	return &Client{base: base, username: username, password: password, http: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	if len(siteConfigs) > 1 {
+		return nil, errors.New("at most one site configuration is allowed")
+	}
+	siteConfig := site.Default()
+	if len(siteConfigs) == 1 {
+		siteConfig = siteConfigs[0]
+	}
+	if err := siteConfig.Validate(); err != nil {
+		return nil, err
+	}
+	return &Client{base: base, username: username, password: password, site: siteConfig, http: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
 func privateEndpointHost(host string) bool {
@@ -147,12 +160,13 @@ type IPAddress struct {
 }
 
 type BindingState struct {
-	Leases      []Lease       `json:"leases"`
-	Pools       []IPPool      `json:"pools"`
-	Networks    []DHCPNetwork `json:"networks"`
-	Addresses   []IPAddress   `json:"addresses"`
-	ARP         []ARP         `json:"arp"`
-	DHCPServers []DHCPServer  `json:"dhcpServers"`
+	Leases             []Lease       `json:"leases"`
+	Pools              []IPPool      `json:"pools"`
+	Networks           []DHCPNetwork `json:"networks"`
+	Addresses          []IPAddress   `json:"addresses"`
+	ARP                []ARP         `json:"arp"`
+	DHCPServers        []DHCPServer  `json:"dhcpServers"`
+	ProtectedAddresses []string      `json:"protectedAddresses,omitempty"`
 }
 
 type Container struct {
@@ -216,7 +230,7 @@ func (c *Client) IPAddresses(ctx context.Context) ([]IPAddress, error) {
 	return out, err
 }
 func (c *Client) BindingState(ctx context.Context) (BindingState, error) {
-	var state BindingState
+	state := BindingState{ProtectedAddresses: c.site.ProtectedAddresses()}
 	var err error
 	if state.Leases, err = c.Leases(ctx); err != nil {
 		return BindingState{}, err

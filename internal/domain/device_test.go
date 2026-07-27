@@ -1,20 +1,12 @@
 package domain
 
-import (
-	"errors"
-	"testing"
-)
+import "testing"
 
-func TestDevicePolicyValidateProtectsManagementPlane(t *testing.T) {
+func TestDevicePolicyValidationIsSiteAgnostic(t *testing.T) {
 	t.Parallel()
-	for _, address := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"} {
-		t.Run(address, func(t *testing.T) {
-			t.Parallel()
-			policy := DevicePolicy{ID: "device", MACAddress: "AA:BB:CC:DD:EE:FF", StaticIP: address, DHCPServer: "dhcp-lan", Egress: EgressDirect}
-			if err := policy.Validate(); !errors.Is(err, ErrInvalidDevicePolicy) {
-				t.Fatalf("err=%v", err)
-			}
-		})
+	policy := DevicePolicy{ID: "device", MACAddress: "AA:BB:CC:DD:EE:FF", StaticIP: "192.168.50.1", DHCPServer: "dhcp-lan", Egress: EgressDirect}
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("site-specific management protection belongs to the execution planner: %v", err)
 	}
 }
 

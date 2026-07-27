@@ -5,7 +5,10 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+
+	"github.com/foxc888/foxos/internal/site"
 )
 
 type Runtime struct {
@@ -16,6 +19,8 @@ type Runtime struct {
 	MosDNSURL        string
 	BackupDir        string
 	UpgradeStatePath string
+	Site             site.Config
+	HTTPS            HTTPS
 }
 
 type Endpoint struct {
@@ -35,7 +40,23 @@ type Mihomo struct {
 	ValidatorBinary   string
 }
 
+type HTTPS struct {
+	Enabled            bool
+	CertDir            string
+	InternalListen     string
+	PublicListen       string
+	HTTPRedirectListen string
+}
+
 func Load() (Runtime, error) {
+	siteConfig, err := site.Load(os.Getenv)
+	if err != nil {
+		return Runtime{}, err
+	}
+	https, err := loadHTTPS()
+	if err != nil {
+		return Runtime{}, err
+	}
 	cfg := Runtime{
 		APIToken:         os.Getenv("FOXOS_API_TOKEN"),
 		ConfirmationKey:  os.Getenv("FOXOS_CONFIRMATION_KEY"),
@@ -44,6 +65,8 @@ func Load() (Runtime, error) {
 		MosDNSURL:        os.Getenv("FOXOS_MOSDNS_URL"),
 		BackupDir:        os.Getenv("FOXOS_BACKUP_DIR"),
 		UpgradeStatePath: os.Getenv("FOXOS_UPGRADE_STATE_PATH"),
+		Site:             siteConfig,
+		HTTPS:            https,
 	}
 	if cfg.BackupDir == "" {
 		cfg.BackupDir = "backups"
@@ -74,6 +97,9 @@ func Load() (Runtime, error) {
 	if cfg.RouterOS.URL != "" && (cfg.RouterOS.Username == "" || cfg.RouterOS.Password == "") {
 		return Runtime{}, errors.New("RouterOS credentials are required when RouterOS is configured")
 	}
+	if cfg.RouterOS.URL != "" && !cfg.Site.EndpointMatches(cfg.RouterOS.URL, cfg.Site.RouterAddress, site.RouterOSPort) {
+		return Runtime{}, errors.New("FOXOS_ROUTEROS_URL does not match the site manifest")
+	}
 	if err := validateOptionalEndpoint(cfg.Mihomo.URL); err != nil {
 		return Runtime{}, errors.New("invalid FOXOS_MIHOMO_URL")
 	}
@@ -82,16 +108,86 @@ func Load() (Runtime, error) {
 			return Runtime{}, errors.New("FOXOS_MIHOMO_SECRET must contain 32 to 4096 characters without surrounding whitespace")
 		}
 	}
+	if cfg.Mihomo.URL != "" && !cfg.Site.EndpointMatches(cfg.Mihomo.URL, cfg.Site.MihomoAddress, site.MihomoControllerPort) {
+		return Runtime{}, errors.New("FOXOS_MIHOMO_URL does not match the site manifest")
+	}
 	if err := validateOptionalEndpoint(cfg.Mihomo.ProxyURL); err != nil {
 		return Runtime{}, errors.New("invalid FOXOS_MIHOMO_PROXY_URL")
 	}
+	if cfg.Mihomo.ProxyURL != "" && !cfg.Site.EndpointMatches(cfg.Mihomo.ProxyURL, cfg.Site.MihomoAddress, site.MihomoProxyPort) {
+		return Runtime{}, errors.New("FOXOS_MIHOMO_PROXY_URL does not match the site manifest")
+	}
 	if err := validateOptionalEndpoint(cfg.MosDNSURL); err != nil {
 		return Runtime{}, errors.New("invalid FOXOS_MOSDNS_URL")
+	}
+	if cfg.MosDNSURL != "" && !cfg.Site.EndpointMatches(cfg.MosDNSURL, cfg.Site.MosDNSAddress, site.MosDNSPort) {
+		return Runtime{}, errors.New("FOXOS_MOSDNS_URL does not match the site manifest")
 	}
 	if cfg.Mihomo.URL != "" && (cfg.Mihomo.BaseConfigPath == "" || cfg.Mihomo.LocalConfigPath == "" || cfg.Mihomo.RuntimeConfigPath == "" || cfg.Mihomo.BackupDir == "" || cfg.Mihomo.ValidatorBinary == "") {
 		return Runtime{}, errors.New("Mihomo base, runtime, validator and backup paths are required when Mihomo is configured")
 	}
 	return cfg, nil
+}
+
+func loadHTTPS() (HTTPS, error) {
+	rawEnabled := strings.TrimSpace(os.Getenv("FOXOS_HTTPS_ENABLED"))
+	if rawEnabled == "" {
+		return HTTPS{}, nil
+	}
+	enabled, err := strconv.ParseBool(rawEnabled)
+	if err != nil {
+		return HTTPS{}, errors.New("FOXOS_HTTPS_ENABLED must be true or false")
+	}
+	if !enabled {
+		return HTTPS{}, nil
+	}
+	config := HTTPS{
+		Enabled:            true,
+		CertDir:            strings.TrimSpace(os.Getenv("FOXOS_TLS_DIR")),
+		InternalListen:     strings.TrimSpace(os.Getenv("FOXOS_INTERNAL_LISTEN")),
+		PublicListen:       strings.TrimSpace(os.Getenv("FOXOS_HTTPS_LISTEN")),
+		HTTPRedirectListen: strings.TrimSpace(os.Getenv("FOXOS_HTTP_REDIRECT_LISTEN")),
+	}
+	if config.CertDir == "" {
+		config.CertDir = "/data/tls"
+	}
+	if config.InternalListen == "" {
+		config.InternalListen = "127.0.0.1:8090"
+	}
+	if config.PublicListen == "" {
+		config.PublicListen = ":443"
+	}
+	if config.HTTPRedirectListen == "" {
+		config.HTTPRedirectListen = ":80"
+	}
+	if strings.ContainsRune(config.CertDir, '\x00') {
+		return HTTPS{}, errors.New("FOXOS_TLS_DIR is invalid")
+	}
+	if err := validateListen(config.InternalListen, 8090, true); err != nil {
+		return HTTPS{}, errors.New("FOXOS_INTERNAL_LISTEN must be a loopback address on port 8090")
+	}
+	if err := validateListen(config.PublicListen, 443, false); err != nil {
+		return HTTPS{}, errors.New("FOXOS_HTTPS_LISTEN must use port 443")
+	}
+	if err := validateListen(config.HTTPRedirectListen, 80, false); err != nil {
+		return HTTPS{}, errors.New("FOXOS_HTTP_REDIRECT_LISTEN must use port 80")
+	}
+	return config, nil
+}
+
+func validateListen(value string, expectedPort int, requireLoopback bool) error {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil || port != strconv.Itoa(expectedPort) {
+		return errors.New("invalid listen address")
+	}
+	if !requireLoopback {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return errors.New("listen address is not loopback")
+	}
+	return nil
 }
 
 func validateOptionalEndpoint(value string) error {

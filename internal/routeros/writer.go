@@ -14,7 +14,7 @@ var ErrWriteVerification = errors.New("RouterOS write verification failed")
 var ErrCompensationStateChanged = errors.New("RouterOS state changed before compensation")
 
 func (c *Client) Apply(ctx context.Context, operation Operation) error {
-	if err := validateBindingOperation(operation); err != nil {
+	if err := validateBindingOperation(operation, c.site.ProtectedAddresses()); err != nil {
 		return err
 	}
 	if operation.Before != nil {
@@ -179,7 +179,7 @@ func (c *Client) deleteLeaseExact(ctx context.Context, id string) error {
 }
 
 func (c *Client) ApplyEgress(ctx context.Context, operation EgressOperation) error {
-	if err := ValidateEgressOperation(operation); err != nil {
+	if err := ValidateEgressOperation(operation, c.site.ProtectedAddresses()); err != nil {
 		return err
 	}
 	if operation.Method == http.MethodPatch || operation.Method == http.MethodDelete {
