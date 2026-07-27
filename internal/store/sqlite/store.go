@@ -19,6 +19,11 @@ var ErrNotFound = domain.ErrNotFound
 
 const currentSchemaVersion = 4
 
+// CurrentSchemaVersion is the newest schema this binary can safely open.
+// Upgrade recovery uses it before migrations run so an older binary never
+// attempts to open a database migrated by a newer release.
+func CurrentSchemaVersion() int { return currentSchemaVersion }
+
 type Store struct{ db *sql.DB }
 
 func Open(path string) (*Store, error) {
@@ -50,6 +55,14 @@ func Open(path string) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
+	var version int
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	return version, nil
+}
 
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `

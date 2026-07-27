@@ -25,6 +25,7 @@ import (
 	"github.com/foxc888/foxos/internal/store/sqlite"
 	"github.com/foxc888/foxos/internal/subscription"
 	"github.com/foxc888/foxos/internal/task"
+	"github.com/foxc888/foxos/internal/upgrade"
 )
 
 var version = "dev"
@@ -43,11 +44,20 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	recovery, err := upgrade.RecoverDatabase(*databasePath, runtimeConfig.UpgradeStatePath, filepath.Join(runtimeConfig.BackupDir, "upgrade"), version, sqlite.CurrentSchemaVersion())
+	if err != nil {
+		log.Fatal(err)
+	}
 	store, err := sqlite.Open(*databasePath)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer store.Close()
+	if recovery.Restored {
+		if err := store.SaveAudit(context.Background(), domain.AuditEvent{ID: "upgrade-restored-" + recovery.Checkpoint.OperationID, Action: "upgrade.database_restored", TargetID: recovery.Checkpoint.OperationID, Outcome: domain.AuditSucceeded, Details: map[string]any{"sourceVersion": recovery.Checkpoint.SourceVersion, "restoredByVersion": recovery.Checkpoint.RestoredByVersion, "schemaVersion": recovery.Checkpoint.SchemaVersion}}); err != nil {
+			log.Fatal(err)
+		}
+	}
 	jobManager, err := task.New(context.Background(), store)
 	if err != nil {
 		log.Fatal(err)
@@ -182,6 +192,8 @@ func main() {
 		backupService.MihomoHealthy = clash.Healthy
 	}
 	app.RegisterBackups(mux, backupService, signer, store, jobManager, store)
+	upgradeService := upgrade.Service{Store: store, DatabasePath: *databasePath, StatePath: runtimeConfig.UpgradeStatePath, BackupDir: filepath.Join(runtimeConfig.BackupDir, "upgrade"), Version: version}
+	app.RegisterUpgrade(mux, upgradeService, store)
 	registerMihomoJobs(jobManager, mihomoService, store)
 	registerEgressJobs(jobManager, store, egressPlanner, egressExecutor, store)
 	registerBackupJobs(jobManager, backupService, store)

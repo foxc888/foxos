@@ -97,7 +97,7 @@
 }
 
 :if ([:len $existingContainer] = 0) do={
-  /container/add name=foxos-active file=$imagePath interface=veth-foxos root-dir=$containerRoot envlists=foxos-env mountlists=foxos-data,foxos-backups logging=yes start-on-boot=yes comment="foxos:active"
+  /container/add name=foxos-active file=$imagePath interface=veth-foxos root-dir=$containerRoot envlist=foxos-env mountlists=foxos-data,foxos-backups logging=yes start-on-boot=yes comment="foxos:active"
   :put "FoxOS 镜像导入已排队。等待 /container 显示 status=stopped 后再启动。"
 } else={
   :foreach id in=$existingContainer do={

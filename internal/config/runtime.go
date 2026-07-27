@@ -9,12 +9,13 @@ import (
 )
 
 type Runtime struct {
-	APIToken        string // #nosec G117 -- configuration secrets are intentionally held in memory and never serialized.
-	ConfirmationKey string // #nosec G117 -- configuration secrets are intentionally held in memory and never serialized.
-	RouterOS        Endpoint
-	Mihomo          Mihomo
-	MosDNSURL       string
-	BackupDir       string
+	APIToken         string // #nosec G117 -- configuration secrets are intentionally held in memory and never serialized.
+	ConfirmationKey  string // #nosec G117 -- configuration secrets are intentionally held in memory and never serialized.
+	RouterOS         Endpoint
+	Mihomo           Mihomo
+	MosDNSURL        string
+	BackupDir        string
+	UpgradeStatePath string
 }
 
 type Endpoint struct {
@@ -36,12 +37,13 @@ type Mihomo struct {
 
 func Load() (Runtime, error) {
 	cfg := Runtime{
-		APIToken:        os.Getenv("FOXOS_API_TOKEN"),
-		ConfirmationKey: os.Getenv("FOXOS_CONFIRMATION_KEY"),
-		RouterOS:        Endpoint{URL: os.Getenv("FOXOS_ROUTEROS_URL"), Username: os.Getenv("FOXOS_ROUTEROS_USERNAME"), Password: os.Getenv("FOXOS_ROUTEROS_PASSWORD")},
-		Mihomo:          Mihomo{URL: os.Getenv("FOXOS_MIHOMO_URL"), ProxyURL: os.Getenv("FOXOS_MIHOMO_PROXY_URL"), Secret: os.Getenv("FOXOS_MIHOMO_SECRET"), BaseConfigPath: os.Getenv("FOXOS_MIHOMO_BASE_CONFIG"), LocalConfigPath: os.Getenv("FOXOS_MIHOMO_LOCAL_CONFIG"), RuntimeConfigPath: os.Getenv("FOXOS_MIHOMO_RUNTIME_CONFIG"), BackupDir: os.Getenv("FOXOS_MIHOMO_BACKUP_DIR"), ValidatorBinary: os.Getenv("FOXOS_MIHOMO_VALIDATOR_BINARY")},
-		MosDNSURL:       os.Getenv("FOXOS_MOSDNS_URL"),
-		BackupDir:       os.Getenv("FOXOS_BACKUP_DIR"),
+		APIToken:         os.Getenv("FOXOS_API_TOKEN"),
+		ConfirmationKey:  os.Getenv("FOXOS_CONFIRMATION_KEY"),
+		RouterOS:         Endpoint{URL: os.Getenv("FOXOS_ROUTEROS_URL"), Username: os.Getenv("FOXOS_ROUTEROS_USERNAME"), Password: os.Getenv("FOXOS_ROUTEROS_PASSWORD")},
+		Mihomo:           Mihomo{URL: os.Getenv("FOXOS_MIHOMO_URL"), ProxyURL: os.Getenv("FOXOS_MIHOMO_PROXY_URL"), Secret: os.Getenv("FOXOS_MIHOMO_SECRET"), BaseConfigPath: os.Getenv("FOXOS_MIHOMO_BASE_CONFIG"), LocalConfigPath: os.Getenv("FOXOS_MIHOMO_LOCAL_CONFIG"), RuntimeConfigPath: os.Getenv("FOXOS_MIHOMO_RUNTIME_CONFIG"), BackupDir: os.Getenv("FOXOS_MIHOMO_BACKUP_DIR"), ValidatorBinary: os.Getenv("FOXOS_MIHOMO_VALIDATOR_BINARY")},
+		MosDNSURL:        os.Getenv("FOXOS_MOSDNS_URL"),
+		BackupDir:        os.Getenv("FOXOS_BACKUP_DIR"),
+		UpgradeStatePath: os.Getenv("FOXOS_UPGRADE_STATE_PATH"),
 	}
 	if cfg.BackupDir == "" {
 		cfg.BackupDir = "backups"

@@ -32,7 +32,7 @@
 :local versionMinorEnd [:find ($versionTail . ".") "."]
 :local versionMinor [:tonum [:pick $versionTail 0 $versionMinorEnd]]
 :if ($versionMajor < 7 || ($versionMajor = 7 && $versionMinor < 21)) do={
-  :error "RouterOS 7.21 或更高版本才支持本安装器使用的 envlists/mountlists"
+  :error "RouterOS 7.21 或更高版本才支持本安装器使用的 envlist/mountlists"
 }
 :if ([:len [/interface/bridge find where name=$managementBridge]] != 1) do={
   :error ("未找到唯一管理桥: " . $managementBridge)
@@ -168,6 +168,17 @@
 :if ([:len [/container/envs find where list="foxos-env"]] != 16) do={
   :error "foxos-env 包含安全基线之外的键，拒绝继续"
 }
+
+:local mosdnsEnvMarker [/container/envs find where list="foxos-mosdns-env" key="FOXOS_INSTALL_MARKER" value="foxos:mosdns"]
+:if ([:len $mosdnsEnvMarker] > 1) do={ :error "foxos-mosdns-env 所有权标记不唯一" }
+:if ([:len $mosdnsEnvMarker] = 0) do={
+  :if ([:len [/container/envs find where list="foxos-mosdns-env"]] > 0) do={ :error "foxos-mosdns-env 已存在但没有 FoxOS 所有权标记" }
+  /container/envs add list=foxos-mosdns-env key=FOXOS_INSTALL_MARKER value="foxos:mosdns"
+  /container/envs add list=foxos-mosdns-env key=MOSDNS_AUTO_INIT value="0"
+}
+:if ([:len [/container/envs find where list="foxos-mosdns-env"]] != 2 || [:len [/container/envs find where list="foxos-mosdns-env" key=MOSDNS_AUTO_INIT value="0"]] != 1) do={
+  :error "foxos-mosdns-env 必须且只能包含所有权标记与 MOSDNS_AUTO_INIT=0"
+}
 :if ($existingInstall) do={
   :put "复用或补齐现有 FoxOS 凭据，不在重复执行时轮换有效密钥。"
 } else={
@@ -276,7 +287,7 @@
 } else={
   :if ([:len $mihomoContainer] != 1 || [:len $mihomoByName] != 1) do={ :error "Mihomo 容器不唯一" }
   :if ([/container get $mihomoContainer name] != "foxos-mihomo" || [/container get $mihomoContainer interface] != "veth-mihomo") do={ :error "已有 Mihomo 容器属性不匹配" }
-  :if ([/container get $mihomoContainer envlists] != "") do={ :error "Mihomo 容器不应继承 FoxOS 密钥环境变量" }
+  :if ([/container get $mihomoContainer envlist] != "") do={ :error "Mihomo 容器不应继承 FoxOS 密钥环境变量" }
   :if ([/container get $mihomoContainer mountlists] != "foxos-mihomo-runtime") do={ :error "Mihomo 容器挂载不匹配" }
 }
 
@@ -284,12 +295,11 @@
 :local mosdnsByName [/container find where name="foxos-mosdns"]
 :if ([:len $mosdnsContainer] = 0) do={
   :if ([:len $mosdnsByName] > 0) do={ :error "foxos-mosdns 同名容器没有 FoxOS 所有权标记" }
-  /container/add name=foxos-mosdns file=($storageRoot . "/mosdns-amd64.tar") interface=veth-mosdns root-dir=($storageRoot . "/containers/mosdns") env="MOSDNS_AUTO_INIT=0" mountlists=foxos-mosdns-runtime logging=yes start-on-boot=yes comment="foxos:mosdns"
+  /container/add name=foxos-mosdns file=($storageRoot . "/mosdns-amd64.tar") interface=veth-mosdns root-dir=($storageRoot . "/containers/mosdns") envlist=foxos-mosdns-env mountlists=foxos-mosdns-runtime logging=yes start-on-boot=yes comment="foxos:mosdns"
 } else={
   :if ([:len $mosdnsContainer] != 1 || [:len $mosdnsByName] != 1) do={ :error "MosDNS 容器不唯一" }
   :if ([/container get $mosdnsContainer name] != "foxos-mosdns" || [/container get $mosdnsContainer interface] != "veth-mosdns") do={ :error "已有 MosDNS 容器属性不匹配" }
-  :if ([/container get $mosdnsContainer envlists] != "") do={ :error "MosDNS 容器不应继承 FoxOS 密钥环境变量" }
-  :if ([/container get $mosdnsContainer env] != "MOSDNS_AUTO_INIT=0") do={ :error "MosDNS 容器必须禁用外部自动初始化" }
+  :if ([/container get $mosdnsContainer envlist] != "foxos-mosdns-env") do={ :error "MosDNS 容器环境变量列表不匹配" }
   :if ([/container get $mosdnsContainer mountlists] != "foxos-mosdns-runtime") do={ :error "MosDNS 容器挂载不匹配" }
 }
 
@@ -297,11 +307,11 @@
 :local foxosByName [/container find where name="foxos-active"]
 :if ([:len $foxosContainer] = 0) do={
   :if ([:len $foxosByName] > 0) do={ :error "foxos-active 同名容器没有 FoxOS 所有权标记" }
-  /container/add name=foxos-active file=($storageRoot . "/foxos-amd64.tar") interface=veth-foxos root-dir=($storageRoot . "/containers/foxos") envlists=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=yes start-on-boot=yes comment="foxos:active"
+  /container/add name=foxos-active file=($storageRoot . "/foxos-amd64.tar") interface=veth-foxos root-dir=($storageRoot . "/containers/foxos") envlist=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=yes start-on-boot=yes comment="foxos:active"
 } else={
   :if ([:len $foxosContainer] != 1 || [:len $foxosByName] != 1) do={ :error "FoxOS active 容器不唯一" }
   :if ([/container get $foxosContainer name] != "foxos-active" || [/container get $foxosContainer interface] != "veth-foxos") do={ :error "已有 FoxOS 容器属性不匹配" }
-  :if ([/container get $foxosContainer envlists] != "foxos-env") do={ :error "FoxOS 容器环境变量列表不匹配" }
+  :if ([/container get $foxosContainer envlist] != "foxos-env") do={ :error "FoxOS 容器环境变量列表不匹配" }
   :if ([/container get $foxosContainer mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups") do={ :error "FoxOS 容器挂载不匹配" }
 }
 

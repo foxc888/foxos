@@ -53,11 +53,14 @@ fi
 if rg -n -g '*.rsc' 'architecture[^#]*(=|!=)[^#]*"x86_64"|file=[^[:space:]]*/\$[A-Za-z_]' "$rsc_root"; then
   report "found an invalid RouterOS architecture or path expression"
 fi
-if rg -n -g '*.rsc' '/container/add[^#]*(foxos-mihomo|foxos-mosdns)[^#]*envlists=foxos-env' "$rsc_root"; then
+if rg -n -g '*.rsc' '/container/add[^#]*(foxos-mihomo|foxos-mosdns)[^#]*envlist=foxos-env' "$rsc_root"; then
   report "Mihomo or MosDNS would inherit FoxOS credentials"
 fi
-if ! rg -Fq 'env="MOSDNS_AUTO_INIT=0"' "$rsc_root/foxos-full-install.rsc"; then
+if ! rg -Fq 'envlist=foxos-mosdns-env' "$rsc_root/foxos-full-install.rsc" || ! rg -Fq 'key=MOSDNS_AUTO_INIT value="0"' "$rsc_root/foxos-full-install.rsc"; then
   report "MosDNS external auto-initialization is not disabled"
+fi
+if rg -n -g '*.rsc' 'envlists([=]|\])' "$rsc_root"; then
+  report "RouterOS Container uses the singular envlist property"
 fi
 for endpoint in \
   'FOXOS_MIHOMO_PROXY_URL|http://10.0.0.2:7890' \
