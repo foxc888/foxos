@@ -119,7 +119,7 @@ export function DHCPPlannerPanel({ notify }: { notify: Notice }) {
       <form className="dhcp-plan-form" onSubmit={generatePreview}>
         <label className="field"><span>DHCP server</span><select disabled={busy || !addressPlan?.servers.length} required value={serverName} onChange={(event) => { setServerName(event.target.value); setPreview(null); setConfirmationToken(""); }}><option value="">选择 server</option>{addressPlan?.servers.map((server) => <option disabled={!server.ready} key={server.serverName} value={server.serverName}>{server.serverName}</option>)}</select></label>
         <label className="field"><span>目标安全动态容量</span><input disabled={busy || !selected?.ready} inputMode="numeric" min={1} required type="number" value={requestedCapacity} onChange={(event) => setRequestedCapacity(event.target.value)} /></label>
-        <label className="field dhcp-ranges-field"><span>完整拟议范围</span><input disabled={busy || !selected?.ready} placeholder="10.0.0.50-10.0.0.200" value={proposedRanges} onChange={(event) => setProposedRanges(event.target.value)} /></label>
+        <label className="field dhcp-ranges-field"><span>完整拟议范围</span><input disabled={busy || !selected?.ready} placeholder={selected?.ranges.map((range) => `${range.start}-${range.end}`).join(",") || "起始IP-结束IP"} value={proposedRanges} onChange={(event) => setProposedRanges(event.target.value)} /></label>
         <button className="button primary" disabled={busy || loading || !selected?.ready} type="submit"><Calculator aria-hidden="true" size={16} />{busy ? "正在规划…" : "生成精确计划"}</button>
       </form>
 

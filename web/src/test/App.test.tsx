@@ -7,6 +7,22 @@ import { server } from "./setup";
 
 function appHandlers({ mihomoStatus = 200, dynamic = true }: { mihomoStatus?: number; dynamic?: boolean } = {}) {
   return [
+    http.get("/api/v1/site", () => HttpResponse.json({
+      managementBridge: "lan-ops",
+      storageRoot: "storage-a",
+      network: "192.168.50.0/24",
+      publicHostname: "foxos.home.arpa",
+      publicUrl: "https://foxos.home.arpa",
+      httpRedirectUrl: "http://192.168.50.4",
+      protectedAddresses: ["192.168.50.1", "192.168.50.2", "192.168.50.3", "192.168.50.4"],
+      services: {
+        routeros: { address: "192.168.50.1", port: 80, url: "http://192.168.50.1:80" },
+        mihomo: { address: "192.168.50.2", port: 9090, url: "http://192.168.50.2:9090" },
+        mosdns: { address: "192.168.50.3", port: 53, url: "http://192.168.50.3:53" },
+        foxos: { address: "192.168.50.4", port: 443, url: "https://foxos.home.arpa" },
+      },
+      https: { enabled: true, caSha256: "a".repeat(64), caDownloadPath: "/api/v1/site/ca", trustRequired: true },
+    })),
     http.get("/api/v1/routeros/overview", () => HttpResponse.json({
       configured: true,
       online: true,
@@ -63,6 +79,7 @@ describe("App", () => {
     expect(routerCard).not.toBeNull();
     expect(mihomoCard).not.toBeNull();
     await waitFor(() => expect(within(routerCard!).getByText("在线")).toBeInTheDocument());
+    expect(within(routerCard!).getByText("192.168.50.1:80")).toBeInTheDocument();
     expect(within(mihomoCard!).getByText("不可用")).toBeInTheDocument();
     expect(await screen.findByRole("heading", { level: 2, name: "地址容量" })).toBeInTheDocument();
     expect(screen.getByText("dhcp-lan")).toBeInTheDocument();

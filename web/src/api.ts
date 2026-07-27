@@ -11,6 +11,29 @@ export type ApiNode = {
   hasCredential: boolean;
 };
 
+export type SiteService = {
+  address: string;
+  port: number;
+  url?: string;
+};
+
+export type SiteManifest = {
+  managementBridge: string;
+  storageRoot: string;
+  network: string;
+  publicHostname: string;
+  publicUrl?: string;
+  httpRedirectUrl?: string;
+  protectedAddresses: string[];
+  services: Record<"routeros" | "mihomo" | "mosdns" | "foxos", SiteService>;
+  https: {
+    enabled: boolean;
+    caSha256?: string;
+    caDownloadPath?: string;
+    trustRequired: boolean;
+  };
+};
+
 export type RouterDevice = {
   macAddress: string;
   address: string;
@@ -478,6 +501,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     return undefined as T;
   }
   return response.json() as Promise<T>;
+}
+
+export async function getSiteManifest(): Promise<SiteManifest> {
+  const response = await fetch(new URL("/api/v1/site", window.location.origin), {
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(`站点清单请求失败（${response.status}）`);
+  }
+  return response.json() as Promise<SiteManifest>;
 }
 
 async function settle<T>(promise: Promise<T>): Promise<LoadResult<T>> {

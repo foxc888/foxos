@@ -1,6 +1,6 @@
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, applyMihomoConfig, commandRouterContainer, deleteProxyGroup, getApiToken, loadLiveSnapshot, planDeviceEgress, previewMihomoConfig, saveApiToken, type DevicePolicy, type EgressPlan, type MihomoDraft } from "../api";
+import { ApiError, applyMihomoConfig, commandRouterContainer, deleteProxyGroup, getApiToken, getSiteManifest, loadLiveSnapshot, planDeviceEgress, previewMihomoConfig, saveApiToken, type DevicePolicy, type EgressPlan, type MihomoDraft } from "../api";
 import { server } from "./setup";
 
 const token = "a".repeat(40);
@@ -44,6 +44,17 @@ describe("FoxOS browser API", () => {
     expect(snapshot.nodes.ok).toBe(true);
     expect(snapshot.mihomo).toMatchObject({ ok: false });
     expect(snapshot.mihomo.ok ? "" : snapshot.mihomo.error).toContain("controller unavailable");
+  });
+
+  it("loads the public site manifest without sending a bearer token", async () => {
+    let authorization = "not-observed";
+    server.use(http.get("/api/v1/site", ({ request }) => {
+      authorization = request.headers.get("Authorization") ?? "";
+      return HttpResponse.json({ managementBridge: "lan", storageRoot: "storage", network: "192.168.40.0/24", publicHostname: "foxos.home.arpa", protectedAddresses: [], services: {}, https: { enabled: true, trustRequired: true } });
+    }));
+    const site = await getSiteManifest();
+    expect(site.network).toBe("192.168.40.0/24");
+    expect(authorization).toBe("");
   });
 
 	it("keeps the bearer token only in page memory", () => {

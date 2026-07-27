@@ -64,6 +64,7 @@ import {
   executeDeviceEgress,
   getDevicePresenceHistory,
   getRouterContainers,
+  getSiteManifest,
   importNodeLinks,
   type Job,
   type L2TPClient,
@@ -84,6 +85,7 @@ import {
   type RouterDHCPServer,
   type RouterOverview,
   type RouterRoute,
+  type SiteManifest,
   saveApiToken,
   updateProxyGroup,
   updateDeviceMetadata,
@@ -92,7 +94,7 @@ import {
 import { ConfirmDialog, Dialog } from "./components/Dialog";
 import { DHCPPlannerPanel } from "./components/DHCPPlannerPanel";
 import { AlertBackupOperations, MihomoOperations, SubscriptionOperations } from "./components/OperationsPanels";
-import { type Device, type ProxyNode, services } from "./data";
+import { type Device, type ProxyNode, type ServiceStatus } from "./data";
 import { egressLabel, policyForDevice, proposedDevicePolicy } from "./policy-state";
 import {
   initialResource,
@@ -263,6 +265,11 @@ function mapL2TPNode(client: L2TPClient): ProxyNode {
     verification: "routeros-session",
     inUse: "—",
   };
+}
+
+function siteServiceAddress(site: SiteManifest | null, name: "routeros" | "mihomo" | "mosdns"): string {
+  const service = site?.services[name];
+  return service ? `${service.address}:${service.port}` : "站点清单未加载";
 }
 
 function mapDevice(device: NonNullable<RouterOverview["devices"]>[number], profile?: DeviceProfile): Device {
@@ -487,6 +494,8 @@ function App() {
   const [scanning, setScanning] = useState(false);
   const [liveLogs, setLiveLogs] = useState<LogItem[]>([]);
   const [resources, setResources] = useState<LiveResources>(initialResources);
+  const [site, setSite] = useState<SiteManifest | null>(null);
+  const [siteError, setSiteError] = useState("");
   const [clock, setClock] = useState(() => new Date());
   const toastTimer = useRef<number | undefined>(undefined);
   const mainRef = useRef<HTMLElement>(null);
@@ -563,6 +572,20 @@ function App() {
   useEffect(() => {
     void refreshLiveData(false);
   }, [refreshLiveData]);
+
+  useEffect(() => {
+    let active = true;
+    void getSiteManifest().then((manifest) => {
+      if (!active) return;
+      setSite(manifest);
+      setSiteError("");
+    }).catch((error) => {
+      if (!active) return;
+      setSite(null);
+      setSiteError(error instanceof Error ? error.message : "站点清单不可用");
+    });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     const syncFromLocation = () => {
@@ -667,6 +690,11 @@ function App() {
   const healthy = criticalServices.every((resource) => resource.phase === "live" && resource.data?.online);
   const availableCount = Object.values(resources).filter((resource) => resource.phase === "live").length;
   const resourceCount = Object.keys(resources).length;
+  const serviceItems: ServiceStatus[] = [
+    { name: "RouterOS", address: siteServiceAddress(site, "routeros"), tone: "orange" },
+    { name: "Mihomo", address: siteServiceAddress(site, "mihomo"), tone: "blue" },
+    { name: "MosDNS", address: siteServiceAddress(site, "mosdns"), tone: "purple" },
+  ];
 
   return (
     <div className={`app-shell ${collapsed ? "sidebar-collapsed" : ""} ${mobileNavOpen ? "mobile-nav-open" : ""}`}>
@@ -712,12 +740,12 @@ function App() {
         </header>
 
         <div className="page-content">
-          {page === "overview" ? <Overview navigate={navigate} onRefresh={() => void refreshLiveData(true, pollingProfiles.overview.resources)} resources={resources} scanning={scanning} /> : null}
-          {page === "network" ? <div className="stack"><RouterOSPage containers={resources.containers} dhcpServers={resources.dhcpServers} navigate={navigate} notify={notify} onRefresh={(showToast = true) => refreshLiveData(showToast, pollingProfiles.network.resources)} resource={resources.routeros} routes={resources.routes} scanning={scanning} /><MosDNSPage resource={resources.mosdns} /></div> : null}
+          {page === "overview" ? <Overview navigate={navigate} onRefresh={() => void refreshLiveData(true, pollingProfiles.overview.resources)} resources={resources} scanning={scanning} services={serviceItems} /> : null}
+          {page === "network" ? <div className="stack"><RouterOSPage containers={resources.containers} dhcpServers={resources.dhcpServers} navigate={navigate} notify={notify} onRefresh={(showToast = true) => refreshLiveData(showToast, pollingProfiles.network.resources)} resource={resources.routeros} routes={resources.routes} scanning={scanning} /><MosDNSPage address={siteServiceAddress(site, "mosdns")} resource={resources.mosdns} /></div> : null}
           {page === "proxies" ? <div className="stack"><ProxyPage groupResource={resources.groups} l2tpResource={resources.l2tp} mihomoResource={resources.mihomo} navigate={navigate} nodeResource={resources.nodes} nodes={nodes} notify={notify} onRefresh={(showToast = true) => void refreshLiveData(showToast, pollingProfiles.proxies.resources)} selectedNodeId={selectedNodeId} setNodes={setNodes} setSelectedNodeId={setSelectedNodeId} /><MihomoOperations notify={notify} /><SubscriptionOperations notify={notify} /></div> : null}
-          {page === "devices" ? <DevicesPage capabilitiesResource={resources.capabilities} devices={devices} groupResource={resources.groups} inventoryResource={resources.deviceInventory} l2tpResource={resources.l2tp} nodeResource={resources.nodes} notify={notify} onRefresh={(showToast = true) => void refreshLiveData(showToast, pollingProfiles.devices.resources)} policyResource={resources.policies} resource={resources.routeros} selectedDeviceId={selectedDeviceId} setDevices={setDevices} setSelectedDeviceId={setSelectedDeviceId} /> : null}
+          {page === "devices" ? <DevicesPage capabilitiesResource={resources.capabilities} devices={devices} groupResource={resources.groups} inventoryResource={resources.deviceInventory} l2tpResource={resources.l2tp} nodeResource={resources.nodes} notify={notify} onRefresh={(showToast = true) => void refreshLiveData(showToast, pollingProfiles.devices.resources)} policyResource={resources.policies} protectedAddresses={site?.protectedAddresses ?? []} resource={resources.routeros} selectedDeviceId={selectedDeviceId} setDevices={setDevices} setSelectedDeviceId={setSelectedDeviceId} siteReady={Boolean(site)} /> : null}
           {page === "operations" ? <OperationsPage items={liveLogs} jobs={resources.jobs} notify={notify} onRefresh={() => void refreshLiveData(true, pollingProfiles.operations.resources)} resource={resources.audit} /> : null}
-          {page === "settings" ? <SettingsPage notify={notify} /> : null}
+          {page === "settings" ? <SettingsPage notify={notify} site={site} siteError={siteError} /> : null}
         </div>
       </main>
 
@@ -763,7 +791,7 @@ function ServiceSummary<T extends { configured: boolean; online: boolean }>({ na
   );
 }
 
-function Overview({ resources, onRefresh, scanning, navigate }: { resources: LiveResources; onRefresh: () => void; scanning: boolean; navigate: (key: PageKey) => void }) {
+function Overview({ resources, onRefresh, scanning, navigate, services }: { resources: LiveResources; onRefresh: () => void; scanning: boolean; navigate: (key: PageKey) => void; services: ServiceStatus[] }) {
   const capacities = resources.dhcpAddressPlan.data?.servers ?? [];
   const readyCapacities = capacities.filter((item) => item.ready);
   const minimumRemaining = readyCapacities.length ? Math.min(...readyCapacities.map((item) => item.remaining)) : undefined;
@@ -894,7 +922,7 @@ function RouterOSPage({ resource, routes, dhcpServers, containers, onRefresh, sc
   );
 }
 
-function MosDNSPage({ resource }: { resource: ResourceState<MosDNSOverview> }) {
+function MosDNSPage({ resource, address }: { resource: ResourceState<MosDNSOverview>; address: string }) {
   const live = resource.phase === "live" && Boolean(resource.data?.online);
   return (
     <div className="stack">
@@ -906,7 +934,7 @@ function MosDNSPage({ resource }: { resource: ResourceState<MosDNSOverview> }) {
         <SummaryCard icon={Zap} label="平均响应" value="未采集" />
         <SummaryCard icon={AlertTriangle} label="失败率" value="未采集" tone="orange" />
       </div>
-      <section className="panel"><div className="panel-heading"><div><h2>服务状态</h2><p>不会用静态样例填充 DNS 指标</p></div><StatusDot status={statusTone(resource.phase, live)} /></div>{live ? <dl className="definition-list"><div><dt>状态</dt><dd className="green-text">只读检查通过</dd></div><div><dt>地址</dt><dd>{resource.data?.address || "10.0.0.3"}</dd></div><div><dt>配置写入</dt><dd>未开放</dd></div></dl> : <EmptyState detail={resource.error || "等待 MosDNS 状态 API 返回。"} title="MosDNS 在线状态未确认" />}</section>
+      <section className="panel"><div className="panel-heading"><div><h2>服务状态</h2><p>不会用静态样例填充 DNS 指标</p></div><StatusDot status={statusTone(resource.phase, live)} /></div>{live ? <dl className="definition-list"><div><dt>状态</dt><dd className="green-text">只读检查通过</dd></div><div><dt>地址</dt><dd>{resource.data?.address || address}</dd></div><div><dt>配置写入</dt><dd>未开放</dd></div></dl> : <EmptyState detail={resource.error || "等待 MosDNS 状态 API 返回。"} title="MosDNS 在线状态未确认" />}</section>
     </div>
   );
 }
@@ -926,10 +954,12 @@ type DevicesPageProps = {
   groupResource: ResourceState<ProxyGroup[]>;
   l2tpResource: ResourceState<L2TPClient[]>;
   capabilitiesResource: ResourceState<EgressCapabilities>;
+  protectedAddresses: string[];
+  siteReady: boolean;
   onRefresh: (showToast?: boolean) => void;
 };
 
-function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceId, notify, resource, inventoryResource, policyResource, nodeResource, groupResource, l2tpResource, capabilitiesResource, onRefresh }: DevicesPageProps) {
+function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceId, notify, resource, inventoryResource, policyResource, nodeResource, groupResource, l2tpResource, capabilitiesResource, protectedAddresses, siteReady, onRefresh }: DevicesPageProps) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [pending, setPending] = useState<PendingBinding | null>(null);
@@ -955,8 +985,9 @@ function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceI
   const selectedCapability = capabilityByMode.get(egress);
   const targetRequired = egress === "mihomo-node" || egress === "proxy-chain" || egress === "l2tp";
   const targetSourceLive = egress === "mihomo-node" ? nodeResource.phase === "live" : egress === "proxy-chain" ? groupResource.phase === "live" : egress === "l2tp" ? l2tpResource.phase === "live" : true;
-  const managementProtected = Boolean(selected && ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"].includes(selected.ip));
-  const canPrepareEgress = Boolean(selected && live && policyResource.phase === "live" && capabilitiesResource.phase === "live" && selectedCapability?.available && selected.fixed && (selectedPolicy?.dhcpServer || selected.dhcpServer) && !managementProtected && targetSourceLive && (!targetRequired || targetId));
+  const protectedAddressSet = new Set(protectedAddresses);
+  const managementProtected = Boolean(selected && protectedAddressSet.has(selected.ip));
+  const canPrepareEgress = Boolean(siteReady && selected && live && policyResource.phase === "live" && capabilitiesResource.phase === "live" && selectedCapability?.available && selected.fixed && (selectedPolicy?.dhcpServer || selected.dhcpServer) && !managementProtected && targetSourceLive && (!targetRequired || targetId));
 
   useEffect(() => {
     setEgress(selectedPolicy?.egress ?? "direct");
@@ -1118,7 +1149,7 @@ function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceI
       <div className="split-view">
         <section className="panel table-panel">
           <div className="toolbar"><label className="search-box"><Search aria-hidden="true" size={17} /><span className="sr-only">搜索设备</span><input onChange={(event) => setSearch(event.target.value)} placeholder="搜索设备名称 / IP / MAC" value={search} /></label><select aria-label="筛选设备状态" onChange={(event) => setStatus(event.target.value)} value={status}><option value="all">全部状态</option><option value="online">在线</option><option value="offline">离线</option></select></div>
-          {filtered.length ? <div aria-label="可横向滚动的数据表" className="table-wrap" role="region" tabIndex={0}><table aria-label="RouterOS 设备" className="interactive-table device-policy-table" role="grid"><thead><tr><th role="columnheader">设备名称</th><th role="columnheader">IP 地址</th><th role="columnheader">MAC 地址</th><th role="columnheader">RouterOS 接口</th><th role="columnheader">出口策略</th><th role="columnheader">状态</th><th role="columnheader">原位操作</th></tr></thead><tbody>{filtered.map((device) => { const policy = policyForDevice(policies, device); const draft = inlineDrafts[device.id] ?? { egress: policy?.egress ?? "direct", targetId: policy?.targetId ?? "" }; const requiresTarget = draft.egress === "mihomo-node" || draft.egress === "proxy-chain" || draft.egress === "l2tp"; const options = targetOptionsFor(draft.egress); const capability = capabilityByMode.get(draft.egress); const protectedDevice = ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"].includes(device.ip); const canApply = live && device.fixed && !protectedDevice && policyResource.phase === "live" && capabilitiesResource.phase === "live" && Boolean(capability?.available) && (!requiresTarget || Boolean(draft.targetId)); return <tr aria-selected={selected?.id === device.id} className={selected?.id === device.id ? "selected" : ""} data-grid-row key={device.id} onClick={() => setSelectedDeviceId(device.id)} onKeyDown={(event) => handleGridRowKeyDown(event, () => setSelectedDeviceId(device.id))} tabIndex={keyboardActiveId === device.id ? 0 : -1}><td><span className="name-cell"><DeviceIcon kind={device.kind} /><strong>{device.name}</strong></span></td><td>{device.ip}</td><td>{device.mac}</td><td>{device.iface}</td><td>{egressLabel(policy?.egress)}</td><td><StatusDot status={live ? device.online ? "ok" : "offline" : "warning"} />{live ? device.online ? "在线" : "离线" : "上次状态"}</td><td><div className="inline-policy-controls" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><button aria-label={`固定租约 ${device.name}`} className="icon-button" disabled={device.fixed || !live || !device.dhcpServer || executing} onClick={() => void prepareBinding(device)} title={device.fixed ? "租约已固定" : "生成固定租约计划"} type="button"><LockKeyhole aria-hidden="true" size={15} /></button><select aria-label={`出口选择 ${device.name}`} disabled={!device.fixed || protectedDevice || capabilitiesResource.phase !== "live" || executingEgress} onChange={(event) => { const next = event.target.value as EgressType; setInlineDrafts((current) => ({ ...current, [device.id]: { egress: next, targetId: next === policy?.egress ? policy?.targetId ?? "" : "" } })); }} value={draft.egress}><option disabled={!capabilityByMode.get("direct")?.available} value="direct">直连</option><option disabled={!capabilityByMode.get("mihomo-node")?.available} value="mihomo-node">Mihomo 节点</option><option disabled={!capabilityByMode.get("proxy-chain")?.available} value="proxy-chain">链式代理</option><option disabled={!capabilityByMode.get("l2tp")?.available} value="l2tp">L2TP</option><option disabled={!capabilityByMode.get("blocked")?.available} value="blocked">阻断</option></select>{requiresTarget ? <select aria-label={`出口目标 ${device.name}`} disabled={executingEgress} onChange={(event) => setInlineDrafts((current) => ({ ...current, [device.id]: { ...draft, targetId: event.target.value } }))} value={draft.targetId}><option value="">选择目标</option>{options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select> : null}<button aria-label={`应用出口 ${device.name}`} className="icon-button apply-icon" disabled={!canApply || executingEgress} onClick={() => void prepareEgress(device, draft.egress, draft.targetId)} title="生成出口应用计划" type="button"><Play aria-hidden="true" size={15} /></button><button aria-label={`阻断设备 ${device.name}`} className="icon-button danger-icon" disabled={!device.fixed || protectedDevice || !capabilityByMode.get("blocked")?.available || executingEgress} onClick={() => void prepareEgress(device, "blocked", "")} title="生成阻断计划" type="button"><Ban aria-hidden="true" size={15} /></button></div></td></tr>; })}</tbody></table></div> : <EmptyState detail="设备接口失败不会回退到演示清单。" title="没有设备数据" />}
+          {filtered.length ? <div aria-label="可横向滚动的数据表" className="table-wrap" role="region" tabIndex={0}><table aria-label="RouterOS 设备" className="interactive-table device-policy-table" role="grid"><thead><tr><th role="columnheader">设备名称</th><th role="columnheader">IP 地址</th><th role="columnheader">MAC 地址</th><th role="columnheader">RouterOS 接口</th><th role="columnheader">出口策略</th><th role="columnheader">状态</th><th role="columnheader">原位操作</th></tr></thead><tbody>{filtered.map((device) => { const policy = policyForDevice(policies, device); const draft = inlineDrafts[device.id] ?? { egress: policy?.egress ?? "direct", targetId: policy?.targetId ?? "" }; const requiresTarget = draft.egress === "mihomo-node" || draft.egress === "proxy-chain" || draft.egress === "l2tp"; const options = targetOptionsFor(draft.egress); const capability = capabilityByMode.get(draft.egress); const protectedDevice = protectedAddressSet.has(device.ip); const canApply = siteReady && live && device.fixed && !protectedDevice && policyResource.phase === "live" && capabilitiesResource.phase === "live" && Boolean(capability?.available) && (!requiresTarget || Boolean(draft.targetId)); return <tr aria-selected={selected?.id === device.id} className={selected?.id === device.id ? "selected" : ""} data-grid-row key={device.id} onClick={() => setSelectedDeviceId(device.id)} onKeyDown={(event) => handleGridRowKeyDown(event, () => setSelectedDeviceId(device.id))} tabIndex={keyboardActiveId === device.id ? 0 : -1}><td><span className="name-cell"><DeviceIcon kind={device.kind} /><strong>{device.name}</strong></span></td><td>{device.ip}</td><td>{device.mac}</td><td>{device.iface}</td><td>{egressLabel(policy?.egress)}</td><td><StatusDot status={live ? device.online ? "ok" : "offline" : "warning"} />{live ? device.online ? "在线" : "离线" : "上次状态"}</td><td><div className="inline-policy-controls" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><button aria-label={`固定租约 ${device.name}`} className="icon-button" disabled={device.fixed || !live || !device.dhcpServer || executing} onClick={() => void prepareBinding(device)} title={device.fixed ? "租约已固定" : "生成固定租约计划"} type="button"><LockKeyhole aria-hidden="true" size={15} /></button><select aria-label={`出口选择 ${device.name}`} disabled={!siteReady || !device.fixed || protectedDevice || capabilitiesResource.phase !== "live" || executingEgress} onChange={(event) => { const next = event.target.value as EgressType; setInlineDrafts((current) => ({ ...current, [device.id]: { egress: next, targetId: next === policy?.egress ? policy?.targetId ?? "" : "" } })); }} value={draft.egress}><option disabled={!capabilityByMode.get("direct")?.available} value="direct">直连</option><option disabled={!capabilityByMode.get("mihomo-node")?.available} value="mihomo-node">Mihomo 节点</option><option disabled={!capabilityByMode.get("proxy-chain")?.available} value="proxy-chain">链式代理</option><option disabled={!capabilityByMode.get("l2tp")?.available} value="l2tp">L2TP</option><option disabled={!capabilityByMode.get("blocked")?.available} value="blocked">阻断</option></select>{requiresTarget ? <select aria-label={`出口目标 ${device.name}`} disabled={executingEgress} onChange={(event) => setInlineDrafts((current) => ({ ...current, [device.id]: { ...draft, targetId: event.target.value } }))} value={draft.targetId}><option value="">选择目标</option>{options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select> : null}<button aria-label={`应用出口 ${device.name}`} className="icon-button apply-icon" disabled={!canApply || executingEgress} onClick={() => void prepareEgress(device, draft.egress, draft.targetId)} title="生成出口应用计划" type="button"><Play aria-hidden="true" size={15} /></button><button aria-label={`阻断设备 ${device.name}`} className="icon-button danger-icon" disabled={!siteReady || !device.fixed || protectedDevice || !capabilityByMode.get("blocked")?.available || executingEgress} onClick={() => void prepareEgress(device, "blocked", "")} title="生成阻断计划" type="button"><Ban aria-hidden="true" size={15} /></button></div></td></tr>; })}</tbody></table></div> : <EmptyState detail="设备接口失败不会回退到演示清单。" title="没有设备数据" />}
         </section>
         <aside className="detail-panel">
           {selected ? (
@@ -1163,7 +1194,7 @@ function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceI
               <DetailSection title="出口策略">
                 <label className="field"><span>选择出口</span><select disabled={!live || policyResource.phase !== "live" || capabilitiesResource.phase !== "live"} onChange={(event) => changeEgress(event.target.value as EgressType)} value={egress}><option disabled={!capabilityByMode.get("direct")?.available} value="direct">直连</option><option disabled={!capabilityByMode.get("mihomo-node")?.available} value="mihomo-node">Mihomo 节点</option><option disabled={!capabilityByMode.get("proxy-chain")?.available} value="proxy-chain">链式代理</option><option disabled={!capabilityByMode.get("l2tp")?.available} value="l2tp">RouterOS L2TP</option><option disabled={!capabilityByMode.get("blocked")?.available} value="blocked">阻断</option></select></label>
                 {targetRequired ? <label className="field"><span>目标</span><select disabled={!targetSourceLive} onChange={(event) => setTargetId(event.target.value)} value={targetId}><option value="">请选择目标</option>{targetOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label> : null}
-                {!selected.fixed ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />先将租约固定，避免 DHCP 地址变化后策略命中错误设备。</div> : managementProtected ? <div className="warning-note"><ShieldCheck aria-hidden="true" size={16} />10.0.0.1 至 10.0.0.4 为永久旁路管理面，禁止创建出口策略。</div> : !selectedCapability?.available ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />该出口当前不可用：{selectedCapability?.missing.join("、") || "就绪状态未返回"}</div> : policyResource.phase !== "live" || !targetSourceLive ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />策略或目标数据源不是实时状态，写入已禁用。</div> : null}
+                {!siteReady ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />站点清单未加载，设备策略写入已关闭。</div> : !selected.fixed ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />先将租约固定，避免 DHCP 地址变化后策略命中错误设备。</div> : managementProtected ? <div className="warning-note"><ShieldCheck aria-hidden="true" size={16} />该地址属于站点清单中的旁路管理面，禁止创建出口策略。</div> : !selectedCapability?.available ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />该出口当前不可用：{selectedCapability?.missing.join("、") || "就绪状态未返回"}</div> : policyResource.phase !== "live" || !targetSourceLive ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />策略或目标数据源不是实时状态，写入已禁用。</div> : null}
               </DetailSection>
               <div className="detail-actions"><Button disabled={!canPrepareEgress || executingEgress} icon={Play} onClick={() => void prepareEgress()} variant="primary">生成应用计划</Button></div>
             </>
@@ -1495,7 +1526,7 @@ function LogsPage({ items, resource, onRefresh }: { items: LogItem[]; resource: 
   return <div className="stack"><section className="panel status-band"><ResourceMeta resource={resource} /><Button icon={RefreshCw} onClick={onRefresh}>刷新审计</Button></section><section className="panel table-panel"><div className="toolbar"><label className="search-box"><Search aria-hidden="true" size={17} /><span className="sr-only">搜索审计事件</span><input onChange={(event) => setSearch(event.target.value)} placeholder="搜索事件、来源或详情" value={search} /></label><select aria-label="筛选日志级别" onChange={(event) => setLevel(event.target.value)} value={level}><option value="all">全部级别</option><option>成功</option><option>信息</option><option>错误</option></select></div>{filtered.length ? <div aria-label="可横向滚动的数据表" className="table-wrap" role="region" tabIndex={0}><table><thead><tr><th>时间</th><th>级别</th><th>来源</th><th>事件</th><th>目标</th></tr></thead><tbody>{filtered.map((item) => <tr key={`${item.time}-${item.event}-${item.detail}`}><td>{item.time}</td><td><span className={`log-level ${item.level}`}>{item.level}</span></td><td>{item.source}</td><td><strong>{item.event}</strong></td><td>{item.detail}</td></tr>)}</tbody></table></div> : <EmptyState detail="审计接口失败时不会显示样例日志。" title="没有审计记录" />}</section></div>;
 }
 
-function SettingsPage({ notify }: { notify: (message: string, tone?: Toast["tone"]) => void }) {
+function SettingsPage({ notify, site, siteError }: { notify: (message: string, tone?: Toast["tone"]) => void; site: SiteManifest | null; siteError: string }) {
   const [saved, setSaved] = useState(false);
   const save = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1518,6 +1549,10 @@ function SettingsPage({ notify }: { notify: (message: string, tone?: Toast["tone
         <div className="form-actions"><Button icon={saved ? Check : Save} type="submit" variant="primary">{saved ? "已保存" : "保存当前会话凭据"}</Button></div>
       </form>
       <aside className="stack">
+        <section className="panel">
+          <div className="panel-heading"><div><h2>站点清单</h2><p>来自当前 FoxOS 后端</p></div>{site?.https.enabled ? <ShieldCheck aria-hidden="true" className="green-text" size={22} /> : <AlertTriangle aria-hidden="true" size={22} />}</div>
+          {site ? <><dl className="definition-list"><div><dt>管理网段</dt><dd>{site.network}</dd></div><div><dt>管理桥</dt><dd>{site.managementBridge}</dd></div><div><dt>存储</dt><dd>{site.storageRoot}</dd></div><div><dt>访问地址</dt><dd>{site.publicUrl || site.services.foxos.url || "未配置"}</dd></div><div><dt>HTTPS</dt><dd>{site.https.enabled ? "已启用" : "未启用"}</dd></div>{site.https.caSha256 ? <div><dt>本地 CA SHA-256</dt><dd className="fingerprint">{site.https.caSha256}</dd></div> : null}</dl>{site.https.caDownloadPath ? <a className="button secondary" download href={site.https.caDownloadPath}><Download aria-hidden="true" size={16} />下载本地 CA</a> : null}</> : <EmptyState detail={siteError || "等待站点 API 返回。"} title="站点清单不可用" />}
+        </section>
         <section className="panel">
           <div className="panel-heading"><div><h2>服务端配置边界</h2><p>以下内容仅通过容器环境变量配置</p></div></div>
           <dl className="definition-list"><div><dt>RouterOS</dt><dd>FOXOS_ROUTEROS_*</dd></div><div><dt>Mihomo</dt><dd>FOXOS_MIHOMO_*</dd></div><div><dt>确认密钥</dt><dd>FOXOS_CONFIRMATION_KEY</dd></div><div><dt>MosDNS</dt><dd>只读状态</dd></div></dl>

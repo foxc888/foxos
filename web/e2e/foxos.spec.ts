@@ -47,6 +47,25 @@ async function mockApi(page: Page, options: MockOptions = {}) {
     const url = new URL(request.url());
     const path = url.pathname;
     if (request.method() === "GET") calls.resourceReads[path] = (calls.resourceReads[path] ?? 0) + 1;
+    if (path === "/api/v1/site") {
+      await json(route, {
+        managementBridge: "bridge-lan",
+        storageRoot: "disk1",
+        network: "10.0.0.0/24",
+        publicHostname: "foxos.home.arpa",
+        publicUrl: "https://foxos.home.arpa",
+        httpRedirectUrl: "http://10.0.0.4",
+        protectedAddresses: ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"],
+        services: {
+          routeros: { address: "10.0.0.1", port: 80, url: "http://10.0.0.1:80" },
+          mihomo: { address: "10.0.0.2", port: 9090, url: "http://10.0.0.2:9090" },
+          mosdns: { address: "10.0.0.3", port: 53, url: "http://10.0.0.3:53" },
+          foxos: { address: "10.0.0.4", port: 443, url: "https://foxos.home.arpa" },
+        },
+        https: { enabled: true, caSha256: "a".repeat(64), caDownloadPath: "/api/v1/site/ca", trustRequired: true },
+      });
+      return;
+    }
 
     if (path === "/api/v1/routeros/overview" && options.routerosFailure) {
       await json(route, { configured: true, online: false, error: "routeros_unavailable" }, 503);

@@ -39,9 +39,3 @@ export type ProxyNode = {
   verification: "unverified" | "tcp" | "routeros-session";
   inUse: string;
 };
-
-export const services: ServiceStatus[] = [
-  { name: "RouterOS", address: "10.0.0.1", tone: "orange" },
-  { name: "Mihomo", address: "10.0.0.2", tone: "blue" },
-  { name: "MosDNS", address: "10.0.0.3:53", tone: "purple" },
-];
