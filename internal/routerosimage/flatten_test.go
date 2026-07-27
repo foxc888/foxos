@@ -172,6 +172,24 @@ func TestFlattenRejectsUnsafeOrAmbiguousArchives(t *testing.T) {
 	}
 }
 
+func TestUnpackDockerArchiveConfinesWritesToRoot(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	input := filepath.Join(parent, "input.tar")
+	writeTarFile(t, input, []fixtureEntry{{name: "../escaped", body: "bad", mode: 0o600}})
+
+	root, _, err := unpackDockerArchive(input, filepath.Join(parent, "archive"))
+	if root != nil {
+		_ = root.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "unsafe archive path") {
+		t.Fatalf("unpackDockerArchive() error = %v, want unsafe archive path", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(parent, "escaped")); !os.IsNotExist(statErr) {
+		t.Fatalf("archive wrote outside extraction root: %v", statErr)
+	}
+}
+
 func TestCopySized(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

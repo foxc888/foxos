@@ -96,6 +96,10 @@ func (s *Server) RegisterEgress(mux *http.ServeMux, policies DevicePolicyStore, 
 			problem(w, http.StatusBadRequest, "invalid_json", err)
 			return
 		}
+		if len(input.Plan.Operations) > routeros.MaxEgressOperations {
+			problemCode(w, http.StatusUnprocessableEntity, "egress_plan_too_large")
+			return
+		}
 		if input.Plan.PolicyID != r.PathValue("id") || input.Plan.Policy.ID != input.Plan.PolicyID || !input.Plan.RequiresConfirmation || strings.TrimSpace(input.ConfirmationToken) == "" {
 			problemCode(w, http.StatusConflict, "confirmation_invalid")
 			return

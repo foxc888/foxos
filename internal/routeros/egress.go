@@ -140,7 +140,7 @@ func (e EgressExecutor) Execute(ctx context.Context, plan EgressPlan) error {
 }
 
 func (e EgressExecutor) Compensate(ctx context.Context, plan EgressPlan) error {
-	if e.Writer == nil || len(plan.Operations) == 0 {
+	if e.Writer == nil || len(plan.Operations) == 0 || len(plan.Operations) > MaxEgressOperations {
 		if len(plan.Operations) == 0 {
 			return nil
 		}
@@ -165,7 +165,7 @@ func (e EgressExecutor) Compensate(ctx context.Context, plan EgressPlan) error {
 // the FoxOS jump chains and routing prerequisites exist can silently place a
 // rule after a user drop/accept rule and give a false success signal.
 func PlanDeviceEgress(policy domain.DevicePolicy, state EgressState) (EgressPlan, error) {
-	if egressResourceCount(state) > maxEgressResources {
+	if !egressStateWithinLimit(state) {
 		return EgressPlan{}, fmt.Errorf("%w: RouterOS egress state exceeds the planning limit", ErrEgressPlan)
 	}
 	if isProtectedAddress(policy.StaticIP, state.ProtectedAddresses) {
@@ -270,8 +270,15 @@ func PlanDeviceEgress(policy domain.DevicePolicy, state EgressState) (EgressPlan
 	return plan, nil
 }
 
-func egressResourceCount(state EgressState) int {
-	return len(state.MangleRules) + len(state.FilterRules) + len(state.AddressLists) + len(state.Routes) + len(state.RoutingTables) + len(state.L2TPClients)
+func egressStateWithinLimit(state EgressState) bool {
+	count := 0
+	for _, size := range []int{len(state.MangleRules), len(state.FilterRules), len(state.AddressLists), len(state.Routes), len(state.RoutingTables), len(state.L2TPClients)} {
+		if size > maxEgressResources-count {
+			return false
+		}
+		count += size
+	}
+	return true
 }
 
 func EgressStateDigest(state EgressState) string {

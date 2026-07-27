@@ -1181,7 +1181,7 @@ func decodeEgressPlan(value any) (routeros.EgressPlan, error) {
 	if err := json.Unmarshal(body, &plan); err != nil {
 		return routeros.EgressPlan{}, err
 	}
-	if plan.PolicyID == "" || plan.Policy.ID != plan.PolicyID || plan.StateDigest == "" || !plan.RequiresConfirmation || plan.Policy.Validate() != nil {
+	if plan.PolicyID == "" || plan.Policy.ID != plan.PolicyID || plan.StateDigest == "" || !plan.RequiresConfirmation || len(plan.Operations) > routeros.MaxEgressOperations || plan.Policy.Validate() != nil {
 		return routeros.EgressPlan{}, errors.New("invalid RouterOS egress job plan")
 	}
 	return plan, nil

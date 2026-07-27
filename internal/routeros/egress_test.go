@@ -2,7 +2,9 @@ package routeros
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -53,6 +55,15 @@ func TestPlanDeviceEgressRejectsUnverifiedMihomoDataPlane(t *testing.T) {
 		if !errors.Is(err, ErrEgressPrerequisite) {
 			t.Fatalf("mode=%s err=%v", mode, err)
 		}
+	}
+}
+
+func TestPlanDeviceEgressRejectsOversizedRouterOSState(t *testing.T) {
+	t.Parallel()
+	policy := domain.DevicePolicy{ID: "phone", MACAddress: "AA:BB:CC:DD:EE:FF", StaticIP: "10.0.0.20", DHCPServer: "dhcp-lan", Egress: domain.EgressDirect}
+	state := EgressState{FilterRules: make([]map[string]string, maxEgressResources+1)}
+	if _, err := PlanDeviceEgress(policy, state); !errors.Is(err, ErrEgressPlan) {
+		t.Fatalf("err=%v, want ErrEgressPlan", err)
 	}
 }
 
@@ -170,6 +181,23 @@ func TestEgressExecutorDoesNotCompensateWhenFirstWriteFails(t *testing.T) {
 	}
 	if writer.compensated != 0 {
 		t.Fatalf("compensated=%d", writer.compensated)
+	}
+}
+
+func TestEgressExecutorRejectsOversizedOperationLists(t *testing.T) {
+	t.Parallel()
+	operations := make([]EgressOperation, MaxEgressOperations+1)
+	plan := EgressPlan{RequiresConfirmation: true, StateDigest: strings.Repeat("a", sha256.Size*2), Operations: operations}
+	writer := &fakeEgressWriter{}
+	executor := EgressExecutor{Writer: writer}
+	if err := executor.Execute(context.Background(), plan); !errors.Is(err, ErrUnsafeOperation) {
+		t.Fatalf("Execute() error = %v, want ErrUnsafeOperation", err)
+	}
+	if err := executor.Compensate(context.Background(), plan); !errors.Is(err, ErrUnsafeOperation) {
+		t.Fatalf("Compensate() error = %v, want ErrUnsafeOperation", err)
+	}
+	if writer.applied != 0 || writer.compensated != 0 {
+		t.Fatalf("oversized plan reached writer: %+v", writer)
 	}
 }
 

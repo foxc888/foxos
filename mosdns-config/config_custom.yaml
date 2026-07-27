@@ -2,9 +2,10 @@ log:
   level: warn
   file: "/tmp/mosdns.log"
 
-#跟web ui绑定，不要修改此端口
+# FoxOS only checks DNS on TCP 53. Keep the unauthenticated MosDNS API inside
+# the container; local rule-generation plugins continue to use this port.
 api:
-  http: "0.0.0.0:9099"
+  http: "127.0.0.1:9099"
 
 #子配置，不要调整顺序
 include:

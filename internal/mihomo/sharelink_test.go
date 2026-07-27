@@ -3,6 +3,7 @@ package mihomo
 import (
 	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -47,7 +48,7 @@ func TestBatchRejectsPartialFailure(t *testing.T) {
 	}
 }
 
-func TestProvisionalNodeIDDoesNotDependOnCredential(t *testing.T) {
+func TestProvisionalNodeIDIsRandomAndDoesNotExposeCredential(t *testing.T) {
 	t.Parallel()
 	first, err := ParseShareLink("vless://00000000-0000-0000-0000-000000000001@example.com:443?security=tls#node")
 	if err != nil {
@@ -57,7 +58,12 @@ func TestProvisionalNodeIDDoesNotDependOnCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.ID != second.ID {
-		t.Fatalf("credential affected externally visible ID: %s != %s", first.ID, second.ID)
+	if first.ID == second.ID || !strings.HasPrefix(first.ID, "node-") || !strings.HasPrefix(second.ID, "node-") {
+		t.Fatalf("provisional IDs are not independently random: %q %q", first.ID, second.ID)
+	}
+	for _, value := range []string{first.ID, second.ID} {
+		if strings.Contains(value, "00000000") {
+			t.Fatalf("credential material leaked into externally visible ID: %q", value)
+		}
 	}
 }

@@ -65,11 +65,12 @@ find "$stage_root" -name '.DS_Store' -delete
 # A release bundle must never contain a populated controller secret or a common
 # credential copied from a local working tree.
 grep -Eq '^secret:[[:space:]]*""[[:space:]]*$' "$stage_root/mihomo-config/config.yaml" || die "Mihomo secret is not empty in bundle"
+grep -Eq '^[[:space:]]*http:[[:space:]]*"127\.0\.0\.1:9099"[[:space:]]*$' "$stage_root/mosdns-config/config_custom.yaml" || die "MosDNS API must be bound to container loopback"
+[[ ! -e "$stage_root/mosdns-config/ui" ]] || die "unused MosDNS management UI must not be present in bundle"
 if rg -n --hidden \
   -g '*.{yaml,yml,json,rsc,md,txt}' \
   -g '!foxos-env.example.rsc' \
   -g '!mihomo-config/ui/**' \
-  -g '!mosdns-config/ui/**' \
   -g '!mosdns-config/rule/**' \
   -g '!mosdns-config/gen/**' \
   '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|private-key:[[:space:]]*"?[^"[:space:]]+|uuid:[[:space:]]*"?[0-9a-fA-F-]{32,}|password:[[:space:]]*"[^" ]+"|secret:[[:space:]]*"[^" ]+"|vmess://|vless://|trojan://|ss://|hysteria2://)' \

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -538,6 +539,21 @@ func TestEgressJobRecoveryReconcilesOnlyProvenStates(t *testing.T) {
 				t.Fatalf("persisted=%+v", persisted)
 			}
 		})
+	}
+}
+
+func TestDecodeEgressPlanRejectsOversizedOperationList(t *testing.T) {
+	t.Parallel()
+	policy := domain.DevicePolicy{ID: "phone", Name: "Phone", MACAddress: "AA:BB:CC:DD:EE:FF", StaticIP: "192.168.1.20", DHCPServer: "dhcp-lan", Egress: domain.EgressDirect}
+	plan := routeros.EgressPlan{
+		PolicyID:             policy.ID,
+		Policy:               policy,
+		StateDigest:          strings.Repeat("a", sha256.Size*2),
+		RequiresConfirmation: true,
+		Operations:           make([]routeros.EgressOperation, routeros.MaxEgressOperations+1),
+	}
+	if _, err := decodeEgressPlan(plan); err == nil {
+		t.Fatal("decodeEgressPlan accepted an oversized operation list")
 	}
 }
 

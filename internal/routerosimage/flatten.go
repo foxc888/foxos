@@ -66,15 +66,15 @@ func Flatten(inputPath, outputPath, expectedArchitecture string) (Metadata, erro
 		_ = os.RemoveAll(work)
 	}()
 
-	files, err := unpackDockerArchive(inputPath, filepath.Join(work, "archive"))
+	archiveRoot, files, err := unpackDockerArchive(inputPath, filepath.Join(work, "archive"))
 	if err != nil {
 		return Metadata{}, err
 	}
-	manifestPath, ok := files["manifest.json"]
-	if !ok {
+	defer archiveRoot.Close()
+	if _, ok := files["manifest.json"]; !ok {
 		return Metadata{}, errors.New("docker archive does not contain manifest.json")
 	}
-	manifestBody, err := readFileAtMost(manifestPath, maxImageMetadataBytes)
+	manifestBody, err := readRootFileAtMost(archiveRoot, "manifest.json", maxImageMetadataBytes)
 	if err != nil {
 		return Metadata{}, err
 	}
@@ -93,11 +93,10 @@ func Flatten(inputPath, outputPath, expectedArchitecture string) (Metadata, erro
 	if err != nil {
 		return Metadata{}, fmt.Errorf("invalid config path: %w", err)
 	}
-	configPath, ok := files[configName]
-	if !ok {
+	if _, ok := files[configName]; !ok {
 		return Metadata{}, fmt.Errorf("docker archive is missing config %q", configName)
 	}
-	configBody, err := readFileAtMost(configPath, maxImageMetadataBytes)
+	configBody, err := readRootFileAtMost(archiveRoot, configName, maxImageMetadataBytes)
 	if err != nil {
 		return Metadata{}, err
 	}
@@ -131,11 +130,10 @@ func Flatten(inputPath, outputPath, expectedArchitecture string) (Metadata, erro
 		if err != nil {
 			return Metadata{}, fmt.Errorf("invalid layer path %q: %w", layerName, err)
 		}
-		layerPath, ok := files[cleanLayerName]
-		if !ok {
+		if _, ok := files[cleanLayerName]; !ok {
 			return Metadata{}, fmt.Errorf("docker archive is missing layer %q", cleanLayerName)
 		}
-		layerEntries, whiteouts, nextSequence, err := readLayer(layerPath, dataRoot, sequence)
+		layerEntries, whiteouts, nextSequence, err := readLayer(archiveRoot, cleanLayerName, dataRoot, sequence)
 		if err != nil {
 			return Metadata{}, fmt.Errorf("read layer %q: %w", cleanLayerName, err)
 		}
@@ -187,19 +185,29 @@ func Flatten(inputPath, outputPath, expectedArchitecture string) (Metadata, erro
 	return Metadata{Architecture: architecture, OS: operatingSystem, RepoTags: append([]string(nil), manifest.RepoTags...), OriginalLayers: len(manifest.Layers)}, nil
 }
 
-func unpackDockerArchive(inputPath, outputRoot string) (map[string]string, error) {
+func unpackDockerArchive(inputPath, outputRoot string) (*os.Root, map[string]struct{}, error) {
 	// #nosec G304 -- inputPath is the operator-selected local archive passed to
 	// the CLI; archive member paths are validated independently below.
 	input, err := os.Open(inputPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer input.Close()
 	if err := os.MkdirAll(outputRoot, 0o700); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	root, err := os.OpenRoot(outputRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = root.Close()
+		}
+	}()
 	reader := tar.NewReader(input)
-	files := make(map[string]string)
+	files := make(map[string]struct{})
 	entries := 0
 	var extractedBytes int64
 	for {
@@ -208,59 +216,56 @@ func unpackDockerArchive(inputPath, outputRoot string) (map[string]string, error
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read docker archive: %w", err)
+			return nil, nil, fmt.Errorf("read docker archive: %w", err)
 		}
 		entries++
 		if entries > maxArchiveEntries {
-			return nil, errors.New("docker archive contains too many entries")
+			return nil, nil, errors.New("docker archive contains too many entries")
 		}
 		if header.Typeflag == tar.TypeDir {
 			continue
 		}
 		if !isRegularEntry(header.Typeflag) {
-			return nil, fmt.Errorf("unsupported docker archive entry type for %q", header.Name)
+			return nil, nil, fmt.Errorf("unsupported docker archive entry type for %q", header.Name)
 		}
 		if header.Size < 0 || header.Size > maxDockerArchiveEntryBytes {
-			return nil, fmt.Errorf("docker archive entry %q exceeds the %d-byte limit", header.Name, maxDockerArchiveEntryBytes)
+			return nil, nil, fmt.Errorf("docker archive entry %q exceeds the %d-byte limit", header.Name, maxDockerArchiveEntryBytes)
 		}
 		if extractedBytes > maxDockerArchiveBytes-header.Size {
-			return nil, fmt.Errorf("docker archive expands beyond the %d-byte limit", maxDockerArchiveBytes)
+			return nil, nil, fmt.Errorf("docker archive expands beyond the %d-byte limit", maxDockerArchiveBytes)
 		}
 		extractedBytes += header.Size
 		name, err := cleanArchivePath(header.Name)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, exists := files[name]; exists {
-			return nil, fmt.Errorf("duplicate docker archive entry %q", name)
+			return nil, nil, fmt.Errorf("duplicate docker archive entry %q", name)
 		}
-		destination := filepath.Join(outputRoot, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-			return nil, err
+		relativeName := filepath.FromSlash(name)
+		if err := root.MkdirAll(filepath.Dir(relativeName), 0o700); err != nil {
+			return nil, nil, err
 		}
-		// #nosec G304 -- destination is derived from cleanArchivePath and lives
-		// under a mode-0700 temporary extraction directory.
-		output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		output, err := root.OpenFile(relativeName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		copyErr := copySized(output, reader, header.Size, maxDockerArchiveEntryBytes, "docker archive entry")
 		closeErr := output.Close()
 		if copyErr != nil {
-			return nil, copyErr
+			return nil, nil, copyErr
 		}
 		if closeErr != nil {
-			return nil, closeErr
+			return nil, nil, closeErr
 		}
-		files[name] = destination
+		files[name] = struct{}{}
 	}
-	return files, nil
+	succeeded = true
+	return root, files, nil
 }
 
-func readLayer(layerPath, dataRoot string, sequence int) ([]stagedEntry, []whiteout, int, error) {
-	// #nosec G304 -- layerPath is selected from the validated file map inside
-	// the private extraction directory, never directly from an archive name.
-	input, err := os.Open(layerPath)
+func readLayer(archiveRoot *os.Root, layerName, dataRoot string, sequence int) ([]stagedEntry, []whiteout, int, error) {
+	input, err := archiveRoot.Open(filepath.FromSlash(layerName))
 	if err != nil {
 		return nil, nil, sequence, err
 	}
@@ -542,22 +547,20 @@ func copySized(destination io.Writer, source io.Reader, size, limit int64, kind 
 	return nil
 }
 
-func readFileAtMost(filePath string, limit int64) ([]byte, error) {
-	// #nosec G304 -- callers only pass paths from the validated archive map in
-	// the private extraction directory.
-	input, err := os.Open(filePath)
+func readRootFileAtMost(root *os.Root, name string, limit int64) ([]byte, error) {
+	file, err := root.Open(filepath.FromSlash(name))
 	if err != nil {
 		return nil, err
 	}
-	defer input.Close()
-	info, err := input.Stat()
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
-	if info.Size() < 0 || info.Size() > limit {
-		return nil, fmt.Errorf("metadata file exceeds the %d-byte limit", limit)
+	if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > limit {
+		return nil, fmt.Errorf("file %q exceeds the %d-byte metadata limit or is not regular", name, limit)
 	}
-	return io.ReadAll(io.LimitReader(input, limit+1))
+	return io.ReadAll(io.LimitReader(file, limit+1))
 }
 
 func removeChildren(entries map[string]stagedEntry, directory string) {

@@ -1,8 +1,9 @@
 package mihomo
 
 import (
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -182,12 +183,14 @@ func ssNode(credential, address, fragment string) (domain.Node, error) {
 	return finalizeImportedNode(node)
 }
 func finalizeImportedNode(node domain.Node) (domain.Node, error) {
-	// IDs are returned by parsing APIs, so they must not be a verifier for a
-	// password or UUID. The import endpoint replaces this provisional ID with
-	// cryptographic randomness before persistence.
-	material := fmt.Sprintf("%s|%s|%s|%d|%s|%s|%s|%s|%t", node.Type, node.Name, node.Server, node.Port, node.Network, node.SNI, node.Path, node.Host, node.TLS)
-	sum := sha256.Sum256([]byte(material))
-	node.ID = fmt.Sprintf("node-%x", sum[:8])
+	// Parser results can be returned to callers, so IDs must not disclose or
+	// verify credential material. The import endpoint replaces this provisional
+	// random ID with its own random persistence ID.
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return domain.Node{}, fmt.Errorf("generate imported node id: %w", err)
+	}
+	node.ID = "node-" + hex.EncodeToString(id[:])
 	if err := node.Validate(); err != nil {
 		return domain.Node{}, err
 	}
