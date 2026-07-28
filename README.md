@@ -236,7 +236,7 @@ RouterOS 升级使用 release ID 绑定的版本化 pending/active/rollback 槽�
 - Playwright：桌面、平板、390px 移动端，覆盖深链接、浏览器前进后退、键盘、焦点锁定、失败降级、危险确认、发布与回滚。
 - 独立 `FoxOS CodeQL` workflow 分析 Go 与 TypeScript；Core CI 运行 Trivy、RouterOS 脚本静态检查、敏感材料和生成物检查。
 - Linux network namespace：非 root 80/443、CA/HTTPS、跳转、回程、管理路径和 fail-closed 出口 readiness。
-- amd64 FoxOS、Mihomo、MosDNS 三镜像与全量 RouterOS 包构建、运行契约、校验和及 Artifact 上传。Release workflow 另为裸 Go 二进制与每张镜像 tar 生成独立 `SHA256SUMS` 和 CycloneDX SBOM。Mihomo 校验器和独立运行时共用 SHA-256 固定的官方 `v1.19.29` 源码与加固二进制；MosDNS 固定 `jasonxtt/mosdns` 的 `2ac30e867a7b...`。两者使用 Go 1.26.5，把命中的 `x/crypto`、`x/net`（Mihomo 另含 `x/oauth2`）提升到已修复版本，并以仅含静态二进制、CA、时区数据和空 `/tmp` 的 scratch 运行时交付。
+- amd64 FoxOS、Mihomo、MosDNS 三镜像与全量 RouterOS 包构建、运行契约、校验和及 Artifact 上传。Release workflow 另为裸 Go 二进制与每张镜像 tar 生成独立 `SHA256SUMS` 和 CycloneDX SBOM。Mihomo 校验器和独立运行时共用 SHA-256 固定的官方 `v1.19.29` 源码与加固二进制；MosDNS 固定 `jasonxtt/mosdns` 的 `2ac30e867a7b...`。两者使用 Go 1.26.5，把命中的 `x/crypto`、`x/net`（Mihomo 另含 `x/oauth2`、`x/text`）提升到已修复版本，并以仅含静态二进制、CA、时区数据和空 `/tmp` 的 scratch 运行时交付。
 
 本地完整命令：
 

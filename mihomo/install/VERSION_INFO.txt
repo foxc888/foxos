@@ -8,7 +8,7 @@ and pass the exact scanned archives to scripts/build-routeros-bundle.sh.
 
 Mihomo
 ------
-version: v1.19.29-foxos1
+version: v1.19.29-foxos2
 source: https://github.com/MetaCubeX/mihomo/tree/v1.19.29
 source archive sha256: 1db1cd49c233b67701b596fbd8a963f418ebeca4cb497f38a0e7cd706ea4c630
 builder: Go 1.26.5

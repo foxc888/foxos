@@ -1,9 +1,10 @@
 FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS mihomo-build
 ARG MIHOMO_VERSION=v1.19.29
 ARG MIHOMO_SOURCE_SHA256=1db1cd49c233b67701b596fbd8a963f418ebeca4cb497f38a0e7cd706ea4c630
-ARG MIHOMO_X_CRYPTO_VERSION=v0.52.0
-ARG MIHOMO_X_NET_VERSION=v0.55.0
+ARG MIHOMO_X_CRYPTO_VERSION=v0.53.0
+ARG MIHOMO_X_NET_VERSION=v0.56.0
 ARG MIHOMO_X_OAUTH2_VERSION=v0.27.0
+ARG MIHOMO_X_TEXT_VERSION=v0.39.0
 RUN apk add --no-cache ca-certificates tzdata \
     && mkdir -p /runtime/tmp \
     && chmod 1777 /runtime/tmp
@@ -16,17 +17,18 @@ RUN GOTOOLCHAIN=local go get \
       "golang.org/x/crypto@${MIHOMO_X_CRYPTO_VERSION}" \
       "golang.org/x/net@${MIHOMO_X_NET_VERSION}" \
       "golang.org/x/oauth2@${MIHOMO_X_OAUTH2_VERSION}" \
+      "golang.org/x/text@${MIHOMO_X_TEXT_VERSION}" \
     && GOTOOLCHAIN=local go mod tidy \
     && GOTOOLCHAIN=local go mod verify
 RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -mod=readonly -tags with_gvisor -trimpath \
-    -ldflags="-s -w -buildid= -X github.com/metacubex/mihomo/constant.Version=${MIHOMO_VERSION}-foxos1" \
+    -ldflags="-s -w -buildid= -X github.com/metacubex/mihomo/constant.Version=${MIHOMO_VERSION}-foxos2" \
     -o /mihomo .
 
 FROM scratch AS mihomo-runtime
 ARG MIHOMO_VERSION=v1.19.29
 LABEL org.opencontainers.image.source="https://github.com/MetaCubeX/mihomo" \
       org.opencontainers.image.title="mihomo" \
-      org.opencontainers.image.version="${MIHOMO_VERSION}-foxos1" \
+      org.opencontainers.image.version="${MIHOMO_VERSION}-foxos2" \
       io.foxos.component="mihomo"
 COPY --from=mihomo-build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=mihomo-build /usr/share/zoneinfo /usr/share/zoneinfo

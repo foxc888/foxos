@@ -14,7 +14,7 @@
 
 同一 push/PR 还会触发独立的 `FoxOS CodeQL` workflow，分别分析 Go 与 JavaScript/TypeScript；不能用 Core CI 绿色替代 CodeQL 结论。
 
-最终 FoxOS 镜像中的 `/usr/local/bin/mihomo` 是配置发布校验器，独立 `mihomo-runtime` 使用同一个二进制。构建固定官方 `v1.19.29` 源码归档的 SHA-256，使用 Go 1.26.5，并将上游仍固定在已知 High 版本的 `golang.org/x/crypto`、`golang.org/x/net`、`golang.org/x/oauth2` 最小提升到已修复版本，版本标识为 `v1.19.29-foxos1`。CI 会在 FoxOS 镜像和独立运行时中分别执行语义契约，并扫描两张最终镜像；这仍不等同于 RouterOS 客户端透明数据平面验收。
+最终 FoxOS 镜像中的 `/usr/local/bin/mihomo` 是配置发布校验器，独立 `mihomo-runtime` 使用同一个二进制。构建固定官方 `v1.19.29` 源码归档的 SHA-256，使用 Go 1.26.5，并将上游仍固定在已知 High 版本的 `golang.org/x/crypto`、`golang.org/x/net`、`golang.org/x/oauth2`、`golang.org/x/text` 最小提升到已修复版本，版本标识为 `v1.19.29-foxos2`。CI 会在 FoxOS 镜像和独立运行时中分别执行语义契约，并扫描两张最终镜像；这仍不等同于 RouterOS 客户端透明数据平面验收。
 
 `mosdns-runtime` 从 SHA-256 固定的 `jasonxtt/mosdns` 提交 `2ac30e867a7b40ee0ef70ef85b7dcf7ce56d48d0` 重建 `v0.6.4-foxos1`，把 `golang.org/x/crypto` 与 `golang.org/x/net` 提升到已修复版本。CI 验证版本、入口、`MOSDNS_AUTO_INIT=0`、不存在外部初始化 URL，并用包内配置启动后回读进程仍在运行。Mihomo 与 MosDNS 运行时都是 scratch，只复制静态二进制、CA、时区数据和 mode 1777 的空 `/tmp`；预制第三方 tar 不再跟踪或作为组包回退输入。
 
