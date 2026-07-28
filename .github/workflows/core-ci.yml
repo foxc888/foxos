@@ -136,6 +136,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Typecheck Playwright suite
+        run: npm run typecheck:e2e
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
       - name: Run E2E suite
@@ -166,7 +168,7 @@ jobs:
       - name: Validate GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
       - name: Shell syntax
-        run: bash -n scripts/*.sh
+        run: bash -n scripts/*.sh deploy/routeros/seal-site-config.sh mihomo/config/start.sh
       - name: RouterOS static checks
         run: scripts/check-routeros-scripts.sh
       - name: Sensitive material checks
@@ -190,6 +192,17 @@ jobs:
         with:
           go-version: "1.24.x"
           cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build production frontend for integration
+        working-directory: web
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
       - name: Install namespace tools
         run: sudo apt-get update -qq && sudo apt-get install --yes curl iproute2 iputils-ping libcap2-bin util-linux
       - name: Verify isolated management data plane
@@ -252,6 +265,35 @@ jobs:
           sleep 2
           docker container inspect --format '{{.State.Running}}' "$mosdns_id" | grep -Fx true
           docker stop --time 5 "$mosdns_id"
+      - name: Smoke test final FoxOS runtime image
+        run: |
+          set -Eeuo pipefail
+          api_token=$(openssl rand -hex 32)
+          confirmation_key=$(openssl rand -hex 32)
+          docker rm --force foxos-runtime-smoke >/dev/null 2>&1 || true
+          trap 'docker rm --force foxos-runtime-smoke >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name foxos-runtime-smoke \
+            --publish 127.0.0.1:18090:8090 \
+            --env FOXOS_ENV=development \
+            --env "FOXOS_API_TOKEN=$api_token" \
+            --env "FOXOS_CONFIRMATION_KEY=$confirmation_key" \
+            "foxos-ci:${GITHUB_SHA}" \
+            -listen 0.0.0.0:8090 -static /app/web -database /data/foxos.db
+          for _ in $(seq 1 60); do
+            curl --fail --silent --show-error --connect-timeout 1 http://127.0.0.1:18090/api/v1/health/live >/dev/null 2>&1 && break
+            sleep 0.25
+          done
+          live=$(curl --fail --silent --show-error http://127.0.0.1:18090/api/v1/health/live)
+          ready=$(curl --fail --silent --show-error http://127.0.0.1:18090/api/v1/health/ready)
+          page=$(curl --fail --silent --show-error http://127.0.0.1:18090/)
+          grep -Fq '"status":"ok"' <<<"$live"
+          grep -Fq '"status":"ready"' <<<"$ready"
+          grep -Fq 'id="root"' <<<"$page"
+          asset_path=$(grep -oE '/assets/[^" ]+\.js' <<<"$page" | head -1)
+          test -n "$asset_path"
+          test "$(curl --fail --silent --show-error "http://127.0.0.1:18090${asset_path}" | wc -c)" -gt 1000
+          docker image inspect --format '{{.Config.User}}' "foxos-ci:${GITHUB_SHA}" | grep -Fx '10001:10001'
+          docker image inspect --format '{{json .Config.Cmd}}' "foxos-ci:${GITHUB_SHA}" | grep -Fx '["-static","/app/web","-database","/data/foxos.db"]'
       - name: Scan FoxOS image
         uses: aquasecurity/trivy-action@v0.36.0
         with:

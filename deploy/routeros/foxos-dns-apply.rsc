@@ -1,10 +1,12 @@
 # Apply only the exact DNS plan confirmed after foxos-dns-plan.rsc.
 
 :global FoxOSSiteManifestVersion
+:global FoxOSSiteStorageRoot
 :global FoxOSSitePublicHostname
 :global FoxOSSiteFoxOSAddress
 :global FoxOSDNSConfirmation
-:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
+/import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :local hostname $FoxOSSitePublicHostname
 :local address $FoxOSSiteFoxOSAddress
 :local expectedConfirmation ("ADD " . $hostname . " " . $address)

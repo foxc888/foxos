@@ -172,6 +172,73 @@ func TestFlattenRejectsUnsafeOrAmbiguousArchives(t *testing.T) {
 	}
 }
 
+func TestFlattenComponentContracts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		expectedComponent string
+		entrypoint        []string
+		env               []string
+		labels            map[string]string
+		files             []fixtureEntry
+		wantMessage       string
+	}{
+		{
+			name:              "valid foxos",
+			expectedComponent: "foxos",
+			entrypoint:        []string{"/app/foxos"},
+			labels:            map[string]string{"io.foxos.component": "foxos", "org.opencontainers.image.title": "foxos"},
+			files: []fixtureEntry{
+				{name: "app/foxos", body: "foxos", mode: 0o755},
+				{name: "usr/local/bin/mihomo", body: "mihomo", mode: 0o755},
+			},
+		},
+		{
+			name:              "mihomo cannot masquerade as foxos",
+			expectedComponent: "foxos",
+			entrypoint:        []string{"/mihomo"},
+			labels:            map[string]string{"io.foxos.component": "mihomo", "org.opencontainers.image.title": "mihomo"},
+			files:             []fixtureEntry{{name: "mihomo", body: "mihomo", mode: 0o755}},
+			wantMessage:       "component \"foxos\" entrypoint",
+		},
+		{
+			name:              "old mosdns external initializer is forbidden",
+			expectedComponent: "mosdns",
+			entrypoint:        []string{"/usr/bin/mosdns", "start", "-d", "/cus/mosdns", "-c", "/cus/mosdns/config_custom.yaml"},
+			env:               []string{"MOSDNS_AUTO_INIT=0", "MOSDNS_CONFIG_INIT_URL=https://example.invalid/config.yaml"},
+			labels:            map[string]string{"io.foxos.component": "mosdns", "org.opencontainers.image.title": "mosdns"},
+			files:             []fixtureEntry{{name: "usr/bin/mosdns", body: "mosdns", mode: 0o755}},
+			wantMessage:       "forbidden environment key",
+		},
+		{
+			name:              "mosdns auto init must be disabled",
+			expectedComponent: "mosdns",
+			entrypoint:        []string{"/usr/bin/mosdns", "start", "-d", "/cus/mosdns", "-c", "/cus/mosdns/config_custom.yaml"},
+			env:               []string{"MOSDNS_AUTO_INIT=1"},
+			labels:            map[string]string{"io.foxos.component": "mosdns", "org.opencontainers.image.title": "mosdns"},
+			files:             []fixtureEntry{{name: "usr/bin/mosdns", body: "mosdns", mode: 0o755}},
+			wantMessage:       "MOSDNS_AUTO_INIT=0",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			input := filepath.Join(t.TempDir(), "input.tar")
+			writeComponentDockerFixture(t, input, tt.entrypoint, tt.env, tt.labels, tt.files)
+			_, err := FlattenComponent(input, filepath.Join(t.TempDir(), "output.tar"), "amd64", tt.expectedComponent)
+			if tt.wantMessage == "" {
+				if err != nil {
+					t.Fatalf("FlattenComponent() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Fatalf("FlattenComponent() error = %v, want message containing %q", err, tt.wantMessage)
+			}
+		})
+	}
+}
+
 func TestUnpackDockerArchiveConfinesWritesToRoot(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
@@ -264,6 +331,33 @@ func writeDockerFixture(t *testing.T, destination, architecture string, layers [
 		entries = append(entries, fixtureEntry{name: "layers/" + string(rune('a'+index)) + ".tar", body: string(layer), mode: 0o600})
 	}
 	writeTarFile(t, destination, entries)
+}
+
+func writeComponentDockerFixture(t *testing.T, destination string, entrypoint, env []string, labels map[string]string, files []fixtureEntry) {
+	t.Helper()
+	config, err := json.Marshal(map[string]any{
+		"architecture": "amd64",
+		"os":           "linux",
+		"config": map[string]any{
+			"Entrypoint": entrypoint,
+			"Env":        env,
+			"Labels":     labels,
+		},
+		"rootfs":  rootFS{Type: "layers", DiffIDs: []string{"sha256:old"}},
+		"history": []map[string]any{{"created_by": "component fixture"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBody, err := json.Marshal([]dockerManifest{{Config: "config.json", RepoTags: []string{"foxos/component:test"}, Layers: []string{"layers/component.tar"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTarFile(t, destination, []fixtureEntry{
+		{name: "config.json", body: string(config), mode: 0o600},
+		{name: "manifest.json", body: string(manifestBody), mode: 0o600},
+		{name: "layers/component.tar", body: string(layerFixture(t, files)), mode: 0o600},
+	})
 }
 
 func layerFixture(t *testing.T, entries []fixtureEntry) []byte {

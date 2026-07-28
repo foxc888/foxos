@@ -12,9 +12,17 @@
 :global FoxOSSiteMihomoAddress
 :global FoxOSSiteMosDNSAddress
 :global FoxOSSiteFoxOSAddress
-:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:global FoxOSSitePublicHostname
+:global FoxOSSiteSubscriptionPrivateCIDRs
+:global FoxOSSiteLoadedDigest
+:global FoxOSSiteLoadedConfigPath
+:global FoxOSSiteLoaderVersion
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1) do={ :error "先导入不可变的 load-site-config.rsc，禁止直接导入可编辑清单" }
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
+:local releaseID "__FOXOS_RELEASE_ID__"
+:if ($releaseID ~ "^__.*__$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || $releaseID !~ "^[A-Za-z0-9._-]+$") do={ :error "preflight.rsc 未绑定有效 release ID；只能使用发布包内脚本" }
+:local upgradeDirectory ("foxos-upgrade-" . $releaseID)
 :local siteNetwork $FoxOSSiteNetwork
 :local prefixLength $FoxOSSitePrefixLength
 :local minimumFreeBytes 536870912
@@ -23,7 +31,146 @@
 :local mihomoAddress $FoxOSSiteMihomoAddress
 :local mosdnsAddress $FoxOSSiteMosDNSAddress
 :local foxosAddress $FoxOSSiteFoxOSAddress
+:local publicHostname $FoxOSSitePublicHostname
+:local subscriptionPrivateCIDRs $FoxOSSiteSubscriptionPrivateCIDRs
 :local failed false
+
+:local expectedConfigPath ($storageRoot . "/site-config.rsc")
+:if ($FoxOSSiteLoadedConfigPath != $expectedConfigPath || [:len $FoxOSSiteLoadedDigest] != 128) do={
+  :put "ERROR 当前会话没有 loader 对此存储根和清单的有效证明"
+  :set failed true
+}
+:local loadedConfigFile [/file find where name=$expectedConfigPath]
+:local loadedDigestFile [/file find where name=($expectedConfigPath . ".sha512")]
+:if ([:len $loadedConfigFile] != 1 || [:len $loadedDigestFile] != 1) do={
+  :put "ERROR loader 绑定的清单或独立摘要缺失或不唯一"
+  :set failed true
+} else={
+  :local currentConfigContents [/file get $loadedConfigFile contents]
+  :local currentDigestContents [/file get $loadedDigestFile contents]
+  :local currentExpectedDigest [:pick $currentDigestContents 0 128]
+  :local currentActualDigest [:convert $currentConfigContents transform=sha512 to=hex]
+  :if ([:len $currentDigestContents] != 129 || [:pick $currentDigestContents 128 129] != "\n" || $currentExpectedDigest != $FoxOSSiteLoadedDigest || $currentActualDigest != $FoxOSSiteLoadedDigest) do={
+    :put "ERROR site-config.rsc 在 loader 执行后发生变化或摘要不匹配"
+    :set failed true
+  }
+}
+
+:put "=== site manifest validation ==="
+:if ([:len $managementBridge] < 1 || [:len $managementBridge] > 63 || $managementBridge !~ "^[A-Za-z0-9][A-Za-z0-9._-]*$") do={
+  :put "ERROR management bridge name is invalid"
+  :set failed true
+}
+:if ([:len $storageRoot] < 1 || [:len $storageRoot] > 63 || $storageRoot !~ "^[A-Za-z0-9][A-Za-z0-9._-]*$") do={
+  :put "ERROR storage slot name is invalid"
+  :set failed true
+}
+:if ($prefixLength < 8 || $prefixLength > 30) do={
+  :put "ERROR site prefix length must be between 8 and 30"
+  :set failed true
+}
+:local prefixSeparator [:find $siteNetwork "/"]
+:local networkAddressValue
+:local sitePrefixValue [:toip $siteNetwork]
+:if ([:typeof $prefixSeparator] = "nil" || [:typeof $sitePrefixValue] != "ip-prefix") do={
+  :put "ERROR FoxOSSiteNetwork must be a valid IPv4 CIDR"
+  :set failed true
+} else={
+  :set networkAddressValue [:toip [:pick $siteNetwork 0 $prefixSeparator]]
+  :if ([:typeof $networkAddressValue] != "ip" || $siteNetwork != ($networkAddressValue . "/" . $prefixLength)) do={
+    :put "ERROR FoxOSSiteNetwork must use the canonical network address and match FoxOSSitePrefixLength"
+    :set failed true
+  }
+}
+:local routerAddressValue [:toip $routerAddress]
+:local mihomoAddressValue [:toip $mihomoAddress]
+:local mosdnsAddressValue [:toip $mosdnsAddress]
+:local foxosAddressValue [:toip $foxosAddress]
+:if ([:typeof $routerAddressValue] != "ip" || [:typeof $mihomoAddressValue] != "ip" || [:typeof $mosdnsAddressValue] != "ip" || [:typeof $foxosAddressValue] != "ip") do={
+  :put "ERROR all four site service addresses must be valid IPv4 literals"
+  :set failed true
+}
+:if ($routerAddress = $mihomoAddress || $routerAddress = $mosdnsAddress || $routerAddress = $foxosAddress || $mihomoAddress = $mosdnsAddress || $mihomoAddress = $foxosAddress || $mosdnsAddress = $foxosAddress) do={
+  :put "ERROR RouterOS, Mihomo, MosDNS, and FoxOS addresses must be distinct"
+  :set failed true
+}
+:local netmaskValue
+:foreach maskDefinition in={"8|255.0.0.0";"9|255.128.0.0";"10|255.192.0.0";"11|255.224.0.0";"12|255.240.0.0";"13|255.248.0.0";"14|255.252.0.0";"15|255.254.0.0";"16|255.255.0.0";"17|255.255.128.0";"18|255.255.192.0";"19|255.255.224.0";"20|255.255.240.0";"21|255.255.248.0";"22|255.255.252.0";"23|255.255.254.0";"24|255.255.255.0";"25|255.255.255.128";"26|255.255.255.192";"27|255.255.255.224";"28|255.255.255.240";"29|255.255.255.248";"30|255.255.255.252"} do={
+  :local separator [:find $maskDefinition "|"]
+  :if ([:tonum [:pick $maskDefinition 0 $separator]] = $prefixLength) do={ :set netmaskValue [:toip [:pick $maskDefinition ($separator + 1) [:len $maskDefinition]]] }
+}
+:if ([:typeof $networkAddressValue] = "ip" && [:typeof $sitePrefixValue] = "ip-prefix" && [:typeof $netmaskValue] = "ip" && [:typeof $routerAddressValue] = "ip" && [:typeof $mihomoAddressValue] = "ip" && [:typeof $mosdnsAddressValue] = "ip" && [:typeof $foxosAddressValue] = "ip") do={
+  :local broadcastAddressValue ($networkAddressValue | (~$netmaskValue))
+  :foreach serviceAddress in={$routerAddressValue;$mihomoAddressValue;$mosdnsAddressValue;$foxosAddressValue} do={
+    :if (!($serviceAddress in $sitePrefixValue)) do={ :put ("ERROR address is outside FoxOSSiteNetwork: " . $serviceAddress); :set failed true }
+    :if ($serviceAddress = $networkAddressValue || $serviceAddress = $broadcastAddressValue) do={ :put ("ERROR network or broadcast address is not a usable host: " . $serviceAddress); :set failed true }
+  }
+}
+:local publicHostnameLength [:len $publicHostname]
+:local hostnameLabelsValid true
+:if ($publicHostnameLength < 3 || $publicHostnameLength > 253 || $publicHostname !~ "^[a-z0-9][a-z0-9.-]*[a-z0-9]$" || [:typeof [:find $publicHostname ".."]] != "nil" || [:typeof [:find $publicHostname ".-"]] != "nil" || [:typeof [:find $publicHostname "-."]] != "nil" || $publicHostname !~ "\\.home\\.arpa$") do={
+  :set hostnameLabelsValid false
+}
+:local hostnameLabelCursor 0
+:while ($hostnameLabelCursor < $publicHostnameLength) do={
+  :local hostnameLabelEnd [:find $publicHostname "." $hostnameLabelCursor]
+  :if ([:typeof $hostnameLabelEnd] = "nil") do={ :set hostnameLabelEnd $publicHostnameLength }
+  :local hostnameLabel [:pick $publicHostname $hostnameLabelCursor $hostnameLabelEnd]
+  :local hostnameLabelLength [:len $hostnameLabel]
+  :if ($hostnameLabelLength < 1 || $hostnameLabelLength > 63) do={
+    :set hostnameLabelsValid false
+  } else={
+    :if ($hostnameLabel !~ "^[a-z0-9-]+$" || [:pick $hostnameLabel 0 1] = "-" || [:pick $hostnameLabel ($hostnameLabelLength - 1) $hostnameLabelLength] = "-") do={
+      :set hostnameLabelsValid false
+    }
+  }
+  :set hostnameLabelCursor ($hostnameLabelEnd + 1)
+}
+:if ($hostnameLabelsValid = false) do={
+  :put "ERROR public hostname must be a lowercase, valid name below home.arpa"
+  :set failed true
+}
+:if ([:len $subscriptionPrivateCIDRs] > 0) do={
+  :if ([:pick $subscriptionPrivateCIDRs 0 1] = "," || [:pick $subscriptionPrivateCIDRs ([:len $subscriptionPrivateCIDRs] - 1) [:len $subscriptionPrivateCIDRs]] = "," || [:typeof [:find $subscriptionPrivateCIDRs ",,"]] != "nil") do={ :put "ERROR subscription private CIDRs contain an empty entry"; :set failed true }
+  :local privateCIDRCursor 0
+  :local privateCIDRCount 0
+  :local privateCIDRSeen ","
+  :local private10 [:toip "10.0.0.0/8"]
+  :local private172 [:toip "172.16.0.0/12"]
+  :local private192 [:toip "192.168.0.0/16"]
+  :local privateULA [:toip6 "fc00::/7"]
+  :while ($privateCIDRCursor < [:len $subscriptionPrivateCIDRs]) do={
+    :local privateCIDREnd [:find $subscriptionPrivateCIDRs "," $privateCIDRCursor]
+    :if ([:typeof $privateCIDREnd] = "nil") do={ :set privateCIDREnd [:len $subscriptionPrivateCIDRs] }
+    :local privateCIDR [:pick $subscriptionPrivateCIDRs $privateCIDRCursor $privateCIDREnd]
+    :set privateCIDRCursor ($privateCIDREnd + 1)
+    :set privateCIDRCount ($privateCIDRCount + 1)
+    :local privateCIDRSlash [:find $privateCIDR "/"]
+    :local privateCIDRIsIPv6 ([:typeof [:find $privateCIDR ":"]] != "nil")
+    :local privateCIDRValue
+    :if ($privateCIDRIsIPv6) do={ :set privateCIDRValue [:toip6 $privateCIDR] } else={ :set privateCIDRValue [:toip $privateCIDR] }
+    :local privateCIDRValid true
+    :if ($privateCIDRCount > 32 || [:typeof [:find $privateCIDRSeen ("," . $privateCIDR . ",")]] != "nil") do={ :set privateCIDRValid false }
+    :if ([:typeof $privateCIDRSlash] = "nil" || ($privateCIDRIsIPv6 && [:typeof $privateCIDRValue] != "ip6-prefix") || (!$privateCIDRIsIPv6 && [:typeof $privateCIDRValue] != "ip-prefix")) do={ :set privateCIDRValid false }
+    :if ($privateCIDRValid) do={
+      :local privateCIDRAddress
+      :if ($privateCIDRIsIPv6) do={ :set privateCIDRAddress [:toip6 [:pick $privateCIDR 0 $privateCIDRSlash]] } else={ :set privateCIDRAddress [:toip [:pick $privateCIDR 0 $privateCIDRSlash]] }
+      :local privateCIDRBits [:tonum [:pick $privateCIDR ($privateCIDRSlash + 1) [:len $privateCIDR]]]
+      :if (($privateCIDRIsIPv6 && [:typeof $privateCIDRAddress] != "ip6") || (!$privateCIDRIsIPv6 && [:typeof $privateCIDRAddress] != "ip")) do={ :set privateCIDRValid false }
+      :if ($privateCIDR != ($privateCIDRAddress . "/" . $privateCIDRBits)) do={ :set privateCIDRValid false }
+      :local privateCIDRAllowed false
+      :if ($privateCIDRIsIPv6 = false) do={
+        :if (($privateCIDRAddress in $private10) && $privateCIDRBits >= 8) do={ :set privateCIDRAllowed true }
+        :if (($privateCIDRAddress in $private172) && $privateCIDRBits >= 12) do={ :set privateCIDRAllowed true }
+        :if (($privateCIDRAddress in $private192) && $privateCIDRBits >= 16) do={ :set privateCIDRAllowed true }
+      }
+      :if ($privateCIDRIsIPv6 && ($privateCIDRAddress in $privateULA) && $privateCIDRBits >= 7) do={ :set privateCIDRAllowed true }
+      :if ($privateCIDRAllowed = false) do={ :set privateCIDRValid false }
+    }
+    :if ($privateCIDRValid = false) do={ :put ("ERROR invalid, duplicate, non-canonical, or non-private subscription CIDR: " . $privateCIDR); :set failed true }
+    :set privateCIDRSeen ($privateCIDRSeen . $privateCIDR . ",")
+  }
+}
 
 :put "=== FoxOS read-only preflight ==="
 :local version [/system/resource get version]
@@ -71,10 +218,16 @@
   }
 }
 
-:local deviceMode [/system/device-mode get container]
-:put ("device-mode container: " . $deviceMode)
-:if ($deviceMode != true && $deviceMode != "yes") do={
+:local containerDeviceMode [/system/device-mode get container]
+:local schedulerDeviceMode [/system/device-mode get scheduler]
+:put ("device-mode container: " . $containerDeviceMode)
+:put ("device-mode scheduler: " . $schedulerDeviceMode)
+:if ($containerDeviceMode != true && $containerDeviceMode != "yes") do={
   :put "ERROR device-mode container=yes is required"
+  :set failed true
+}
+:if ($schedulerDeviceMode != true && $schedulerDeviceMode != "yes") do={
+  :put "ERROR device-mode scheduler=yes is required for the owned ordered cold-start coordinator"
   :set failed true
 }
 
@@ -123,10 +276,25 @@
     :put "ERROR FoxOS full bundle expects enabled RouterOS www/REST on port 80"
     :set failed true
   }
-	  :if ([:typeof [:find $wwwAddresses $siteNetwork]] = "nil" && [:typeof [:find $wwwAddresses ($foxosAddress . "/32")]] = "nil") do={
-	    :put ("ERROR www/REST must be restricted to " . $siteNetwork . " or " . $foxosAddress . "/32")
-    :set failed true
-  }
+	  :local wwwCursor 0
+	  :local wwwCount 0
+	  :local wwwSeen ","
+	  :local wwwAllowed true
+	  :local foxosRESTAddress ($foxosAddress . "/32")
+	  :if ([:len $wwwAddresses] = 0 || [:pick $wwwAddresses 0 1] = "," || [:pick $wwwAddresses ([:len $wwwAddresses] - 1) [:len $wwwAddresses]] = "," || [:typeof [:find $wwwAddresses ",,"]] != "nil") do={ :set wwwAllowed false }
+	  :while ($wwwAllowed && $wwwCursor < [:len $wwwAddresses]) do={
+	    :local wwwEnd [:find $wwwAddresses "," $wwwCursor]
+	    :if ([:typeof $wwwEnd] = "nil") do={ :set wwwEnd [:len $wwwAddresses] }
+	    :local wwwAddress [:pick $wwwAddresses $wwwCursor $wwwEnd]
+	    :set wwwCursor ($wwwEnd + 1)
+	    :set wwwCount ($wwwCount + 1)
+	    :if (($wwwAddress != $siteNetwork && $wwwAddress != $foxosRESTAddress) || [:typeof [:find $wwwSeen ("," . $wwwAddress . ",")]] != "nil" || $wwwCount > 2) do={ :set wwwAllowed false }
+	    :set wwwSeen ($wwwSeen . $wwwAddress . ",")
+	  }
+	  :if ($wwwAllowed = false || $wwwCount < 1) do={
+	    :put ("ERROR www/REST address list may contain only exact entries " . $siteNetwork . " and/or " . $foxosRESTAddress)
+	    :set failed true
+	  }
 }
 
 :put "=== reserved management addresses ==="
@@ -175,7 +343,7 @@
 }
 
 :put ("=== required files under " . $storageRoot . "/ ===")
-:local requiredFiles {"foxos-amd64.tar|1048576";"mihomo_amd64.tar|20971520";"mosdns-amd64.tar|5242880";"provenance/mihomo-container.lock.json|100";"provenance/mosdns-container.lock.json|100";"site-config.rsc|100";"preflight.rsc|100";"foxos-plan.rsc|100";"foxos-full-install.rsc|1000";"foxos-start-all.rsc|100";"SHA256SUMS|100";"RELEASE-MANIFEST.txt|100"}
+:local requiredFiles {($upgradeDirectory . "/foxos-amd64.tar|1048576");($upgradeDirectory . "/upgrade-inspect.rsc|1000");($upgradeDirectory . "/upgrade-plan.rsc|100");($upgradeDirectory . "/upgrade.rsc|100");($upgradeDirectory . "/upgrade-promote-inspect.rsc|1000");($upgradeDirectory . "/upgrade-promote-plan.rsc|100");($upgradeDirectory . "/upgrade-promote.rsc|100");($upgradeDirectory . "/rollback-inspect.rsc|1000");($upgradeDirectory . "/rollback-plan.rsc|100");($upgradeDirectory . "/rollback.rsc|100");($upgradeDirectory . "/upgrade-cleanup-inspect.rsc|1000");($upgradeDirectory . "/upgrade-cleanup-plan.rsc|100");($upgradeDirectory . "/upgrade-cleanup-apply.rsc|100");($upgradeDirectory . "/UPGRADE-MANIFEST.txt|100");($upgradeDirectory . "/SHA256SUMS|100");"mihomo_amd64.tar|20971520";"mosdns-amd64.tar|5242880";"provenance/mihomo-container.lock.json|100";"provenance/mosdns-container.lock.json|100";"site-config.example.rsc|100";"site-config.rsc|100";"site-config.rsc.sha512|128";"seal-site-config.sh|100";"load-site-config.rsc|1000";"preflight.rsc|100";"foxos-install-inspect.rsc|1000";"foxos-plan.rsc|100";"foxos-full-install.rsc|1000";"foxos-start-all.rsc|100";"foxos-verify.rsc|100";"foxos-dns-plan.rsc|100";"foxos-dns-apply.rsc|100";"foxos-uninstall-inspect.rsc|1000";"uninstall-plan.rsc|100";"uninstall-apply.rsc|100";"SHA256SUMS|100";"RELEASE-MANIFEST.txt|100";"QUICK-INSTALL.md|100"}
 :foreach definition in=$requiredFiles do={
   :local separator [:find $definition "|"]
   :local fileName [:pick $definition 0 $separator]
@@ -213,9 +381,9 @@
 :put "=== existing FoxOS ownership markers ==="
 :put ("FoxOS containers: " . [:len [/container find where comment~"^foxos:"]])
 :put ("FoxOS veths: " . [:len [/interface/veth find where comment~"^foxos:"]])
-:put ("FoxOS mounts: " . [:len [/container/mounts find where name~"^foxos-"]])
+:put ("FoxOS mounts: " . [:len [/container/mounts find where list~"^foxos-"]])
 
 :if ($failed) do={
   :error "FoxOS preflight failed. No RouterOS configuration was changed. Fix every ERROR and run it again."
 }
-:put ("PRECHECK PASSED: no RouterOS configuration was changed. Review " . $storageRoot . "/foxos-plan.rsc before installation.")
+:put ("PRECHECK PASSED: sealed manifest, topology, files, and prerequisites are valid. No RouterOS resource was changed. Review " . $storageRoot . "/foxos-plan.rsc before installation.")

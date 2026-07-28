@@ -26,7 +26,8 @@ FROM scratch AS mihomo-runtime
 ARG MIHOMO_VERSION=v1.19.29
 LABEL org.opencontainers.image.source="https://github.com/MetaCubeX/mihomo" \
       org.opencontainers.image.title="mihomo" \
-      org.opencontainers.image.version="${MIHOMO_VERSION}-foxos1"
+      org.opencontainers.image.version="${MIHOMO_VERSION}-foxos1" \
+      io.foxos.component="mihomo"
 COPY --from=mihomo-build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=mihomo-build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=mihomo-build --chmod=1777 /runtime/tmp /tmp
@@ -63,7 +64,8 @@ ARG MOSDNS_REVISION=2ac30e867a7b40ee0ef70ef85b7dcf7ce56d48d0
 LABEL org.opencontainers.image.source="https://github.com/jasonxtt/mosdns" \
       org.opencontainers.image.title="mosdns" \
       org.opencontainers.image.version="${MOSDNS_VERSION}-foxos1" \
-      org.opencontainers.image.revision="${MOSDNS_REVISION}"
+      org.opencontainers.image.revision="${MOSDNS_REVISION}" \
+      io.foxos.component="mosdns"
 ENV MOSDNS_CONTAINER_MODE=1 \
     MOSDNS_CONTAINER_NETWORK_MODE=bridge \
     MOSDNS_AUTO_INIT=0
@@ -95,6 +97,8 @@ RUN go mod tidy \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${FOXOS_VERSION:-dev}" -o /out/foxos ./cmd/server
 
 FROM alpine:3.22 AS foxos-runtime
+LABEL org.opencontainers.image.title="foxos" \
+      io.foxos.component="foxos"
 RUN apk add --no-cache ca-certificates libcap tzdata \
     && addgroup -S -g 10001 foxos \
     && adduser -S -D -H -u 10001 -G foxos foxos \

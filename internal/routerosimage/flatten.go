@@ -29,6 +29,7 @@ const (
 type Metadata struct {
 	Architecture   string
 	OS             string
+	Component      string
 	RepoTags       []string
 	OriginalLayers int
 }
@@ -44,6 +45,41 @@ type rootFS struct {
 	DiffIDs []string `json:"diff_ids"`
 }
 
+type imageRuntimeConfig struct {
+	Entrypoint []string
+	Cmd        []string
+	Env        []string
+	Labels     map[string]string
+}
+
+type componentContract struct {
+	title         string
+	entrypoint    []string
+	requiredFiles []string
+	requiredEnv   []string
+	forbiddenEnv  []string
+}
+
+var componentContracts = map[string]componentContract{
+	"foxos": {
+		title:         "foxos",
+		entrypoint:    []string{"/app/foxos"},
+		requiredFiles: []string{"app/foxos", "usr/local/bin/mihomo"},
+	},
+	"mihomo": {
+		title:         "mihomo",
+		entrypoint:    []string{"/mihomo"},
+		requiredFiles: []string{"mihomo"},
+	},
+	"mosdns": {
+		title:         "mosdns",
+		entrypoint:    []string{"/usr/bin/mosdns", "start", "-d", "/cus/mosdns", "-c", "/cus/mosdns/config_custom.yaml"},
+		requiredFiles: []string{"usr/bin/mosdns"},
+		requiredEnv:   []string{"MOSDNS_AUTO_INIT=0"},
+		forbiddenEnv:  []string{"MOSDNS_CONFIG_INIT_URL="},
+	},
+}
+
 type stagedEntry struct {
 	header   tar.Header
 	dataPath string
@@ -55,8 +91,17 @@ type whiteout struct {
 }
 
 func Flatten(inputPath, outputPath, expectedArchitecture string) (Metadata, error) {
+	return FlattenComponent(inputPath, outputPath, expectedArchitecture, "")
+}
+
+func FlattenComponent(inputPath, outputPath, expectedArchitecture, expectedComponent string) (Metadata, error) {
 	if strings.TrimSpace(inputPath) == "" || strings.TrimSpace(outputPath) == "" {
 		return Metadata{}, errors.New("input and output paths are required")
+	}
+	if expectedComponent != "" {
+		if _, ok := componentContracts[expectedComponent]; !ok {
+			return Metadata{}, fmt.Errorf("unsupported image component %q", expectedComponent)
+		}
 	}
 	work, err := os.MkdirTemp("", "foxos-routeros-image-*")
 	if err != nil {
@@ -118,6 +163,9 @@ func Flatten(inputPath, outputPath, expectedArchitecture string) (Metadata, erro
 	if operatingSystem != "linux" {
 		return Metadata{}, fmt.Errorf("RouterOS container image must target linux, got %q", operatingSystem)
 	}
+	if err := validateComponentConfig(config, expectedComponent); err != nil {
+		return Metadata{}, err
+	}
 
 	entries := make(map[string]stagedEntry)
 	dataRoot := filepath.Join(work, "data")
@@ -152,6 +200,9 @@ func Flatten(inputPath, outputPath, expectedArchitecture string) (Metadata, erro
 			entries[entry.header.Name] = entry
 		}
 	}
+	if err := validateComponentFiles(entries, expectedComponent); err != nil {
+		return Metadata{}, err
+	}
 
 	flattenedLayer := filepath.Join(work, "layer.tar")
 	if err := writeLayer(flattenedLayer, entries); err != nil {
@@ -182,7 +233,74 @@ func Flatten(inputPath, outputPath, expectedArchitecture string) (Metadata, erro
 	if err := writeDockerArchive(outputPath, flattenedConfig, flattenedManifest, flattenedLayer); err != nil {
 		return Metadata{}, err
 	}
-	return Metadata{Architecture: architecture, OS: operatingSystem, RepoTags: append([]string(nil), manifest.RepoTags...), OriginalLayers: len(manifest.Layers)}, nil
+	return Metadata{Architecture: architecture, OS: operatingSystem, Component: expectedComponent, RepoTags: append([]string(nil), manifest.RepoTags...), OriginalLayers: len(manifest.Layers)}, nil
+}
+
+func validateComponentConfig(config map[string]json.RawMessage, expectedComponent string) error {
+	if expectedComponent == "" {
+		return nil
+	}
+	contract := componentContracts[expectedComponent]
+	var runtime imageRuntimeConfig
+	if err := json.Unmarshal(config["config"], &runtime); err != nil {
+		return fmt.Errorf("decode runtime config for component %q: %w", expectedComponent, err)
+	}
+	if !equalStrings(runtime.Entrypoint, contract.entrypoint) {
+		return fmt.Errorf("component %q entrypoint is %q, expected %q", expectedComponent, runtime.Entrypoint, contract.entrypoint)
+	}
+	if runtime.Labels["io.foxos.component"] != expectedComponent {
+		return fmt.Errorf("component %q is missing exact io.foxos.component identity label", expectedComponent)
+	}
+	if runtime.Labels["org.opencontainers.image.title"] != contract.title {
+		return fmt.Errorf("component %q has unexpected OCI title %q", expectedComponent, runtime.Labels["org.opencontainers.image.title"])
+	}
+	for _, required := range contract.requiredEnv {
+		count := 0
+		for _, item := range runtime.Env {
+			if item == required {
+				count++
+			}
+		}
+		if count != 1 {
+			return fmt.Errorf("component %q must contain %q exactly once", expectedComponent, required)
+		}
+	}
+	for _, forbiddenPrefix := range contract.forbiddenEnv {
+		for _, item := range runtime.Env {
+			if strings.HasPrefix(item, forbiddenPrefix) {
+				return fmt.Errorf("component %q contains forbidden environment key %q", expectedComponent, strings.TrimSuffix(forbiddenPrefix, "="))
+			}
+		}
+	}
+	return nil
+}
+
+func validateComponentFiles(entries map[string]stagedEntry, expectedComponent string) error {
+	if expectedComponent == "" {
+		return nil
+	}
+	for _, name := range componentContracts[expectedComponent].requiredFiles {
+		entry, ok := entries[name]
+		if !ok {
+			return fmt.Errorf("component %q is missing required executable /%s", expectedComponent, name)
+		}
+		if !isRegularEntry(entry.header.Typeflag) || entry.header.Mode&0o111 == 0 {
+			return fmt.Errorf("component %q required file /%s is not executable", expectedComponent, name)
+		}
+	}
+	return nil
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func unpackDockerArchive(inputPath, outputRoot string) (*os.Root, map[string]struct{}, error) {

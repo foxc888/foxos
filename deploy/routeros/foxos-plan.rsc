@@ -1,28 +1,36 @@
-# FoxOS 只读变更计划
-# 运行本文件不会写入 RouterOS。它用于在执行 foxos-full-install.rsc 前展示精确范围。
+# FoxOS exact read-only install plan. It reruns preflight and the shared
+# resource inspector, then binds operator confirmation to the current SHA-512.
 
 :global FoxOSSiteManifestVersion
-:global FoxOSSiteManagementBridge
 :global FoxOSSiteStorageRoot
+:global FoxOSSiteManagementBridge
 :global FoxOSSiteNetwork
 :global FoxOSSiteRouterAddress
 :global FoxOSSiteMihomoAddress
 :global FoxOSSiteMosDNSAddress
 :global FoxOSSiteFoxOSAddress
 :global FoxOSSitePublicHostname
-:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:global FoxOSSiteSubscriptionPrivateCIDRs
+:global FoxOSInstallInspectVerbose true
+:global FoxOSInstallCurrentDigest
+:global FoxOSInstallApprovedDigest
+:global FoxOSInstallConfirmation
+:if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
+/import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 
-:put "=== FoxOS planned RouterOS changes ==="
-:put ("Prerequisites: RouterOS 7.21+, architecture-name=x86, matching container package, container=yes, bridge=" . $FoxOSSiteManagementBridge . ", storage=" . $FoxOSSiteStorageRoot . ".")
+/import file-name=($FoxOSSiteStorageRoot . "/preflight.rsc")
+/import file-name=($FoxOSSiteStorageRoot . "/foxos-install-inspect.rsc")
+:if ([:len $FoxOSInstallCurrentDigest] != 128) do={ :error "只读检查未生成有效计划摘要" }
+
+:set FoxOSInstallApprovedDigest $FoxOSInstallCurrentDigest
+:set FoxOSInstallConfirmation ""
+:put "=== FoxOS exact install plan ==="
+:put ("Prerequisites: RouterOS 7.21+, architecture-name=x86, matching container package, container=yes, scheduler=yes, bridge=" . $FoxOSSiteManagementBridge . ", storage=" . $FoxOSSiteStorageRoot . ".")
 :put ("Site " . $FoxOSSiteNetwork . ": RouterOS=" . $FoxOSSiteRouterAddress . ", Mihomo=" . $FoxOSSiteMihomoAddress . ", MosDNS=" . $FoxOSSiteMosDNSAddress . ", FoxOS=https://" . $FoxOSSitePublicHostname . " (" . $FoxOSSiteFoxOSAddress . ").")
-:put "Create/reuse owned resources only:"
-:put "  user group foxos-rest and user foxos-service"
-:put "  env list foxos-env (FOXOS_INSTALL_MARKER=foxos), attached only to the FoxOS container; status endpoints use Mihomo :9090/:7890 and MosDNS TCP :53"
-:put "  mounts foxos-mihomo-runtime, foxos-mihomo-config, foxos-mosdns-runtime, foxos-data, foxos-backups"
-:put ("  veth-mihomo, veth-mosdns, veth-foxos and " . $FoxOSSiteManagementBridge . " ports")
-:put "  containers foxos-mihomo, foxos-mosdns, foxos-active"
-:put ("Files changed: " . $FoxOSSiteStorageRoot . "/mihomo-config/config.yaml secret field only; persistent FoxOS data, TLS material, and backup directories are created on first start.")
-:put "Explicitly untouched: DNS, DHCP/DHCP DNS, default routes, NAT, Mangle, firewall and user-owned resources."
-:put "Backup before execution: /export hide-sensitive file=before-foxos and /system/backup/save name=before-foxos."
-:put ("Rollback: stop FoxOS containers, restore the RouterOS backup, keep old image tar and " . $FoxOSSiteStorageRoot . "/foxos-data.")
-:put "Run preflight.rsc first. Continue only after every check passes and an operator has confirmed this exact plan."
+:put "CREATE and REUSE decisions above are the complete RouterOS resource pre-state for this plan. Any FAIL stops here."
+:put "The write phase manages only foxos-rest, foxos-service, FoxOS env/mount/veth/bridge-port owners, containers foxos-mihomo, foxos-mosdns, initial admin slot foxos-initial, the owned sequential-start scheduler/script, and Mihomo secret lines."
+:put "DNS, DHCP/DHCP DNS, default routes, NAT, Mangle, firewall, FastTrack, and unknown resources remain untouched."
+:put "Before confirmation, create an encrypted RouterOS v7 binary backup in WinBox with AES-SHA256 and a unique offline password. Also run /export hide-sensitive file=before-foxos."
+:put ("Rollback: stop only exact FoxOS-owned containers, preserve " . $FoxOSSiteStorageRoot . "/foxos-data and images, then restore the reviewed binary backup if required.")
+:put ("APPROVED PLAN SHA-512: " . $FoxOSInstallApprovedDigest)
+:put ("To confirm this exact current state, run :global FoxOSInstallConfirmation \"" . $FoxOSInstallApprovedDigest . "\" then import foxos-full-install.rsc without re-importing or editing site-config.rsc.")

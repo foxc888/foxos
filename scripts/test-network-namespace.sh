@@ -10,7 +10,7 @@ if ((EUID != 0)); then
   exit 2
 fi
 
-for command in go ip curl setcap setpriv ping awk grep; do
+for command in go ip curl setcap setpriv ping awk grep wc tr head; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'network namespace test requires %s\n' "$command" >&2
     exit 2
@@ -94,18 +94,21 @@ static_dir="$work_root/web"
 data_dir="$work_root/data"
 tls_dir="$data_dir/tls"
 mkdir -p "$static_dir" "$data_dir" "$work_root/backups"
-printf '<!doctype html><html><body><div id="root">FoxOS namespace acceptance</div></body></html>\n' > "$static_dir/index.html"
+[[ -s "$repo_root/web/dist/index.html" ]] || fail "web/dist is missing; build the production frontend before namespace acceptance"
+cp -a "$repo_root/web/dist/." "$static_dir/"
 (cd "$repo_root" && CGO_ENABLED=0 go build -trimpath -o "$binary" ./cmd/server)
 chown -R 65534:65534 "$work_root"
 setcap cap_net_bind_service=+ep "$binary"
 
-api_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-confirmation_key=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+api_token=nsApi_7vQ4mK9xP2cR8tW5yH3dF6jL1sB0uE9aC2gZ4n
+confirmation_key=nsConfirm_3pT8wY1kH6rD9sF2mV5xC7qL0bN4jG8u
 ip netns exec "$foxos_ns" setpriv --reuid=65534 --regid=65534 --clear-groups \
   env \
+  FOXOS_ENV=production \
   FOXOS_API_TOKEN="$api_token" \
   FOXOS_CONFIRMATION_KEY="$confirmation_key" \
   FOXOS_BACKUP_DIR="$work_root/backups" \
+  FOXOS_UPGRADE_STATE_PATH="$data_dir/upgrade-checkpoint.json" \
   FOXOS_SITE_MANAGEMENT_BRIDGE=lab-lan \
   FOXOS_SITE_STORAGE_ROOT=lab-storage \
   FOXOS_SITE_NETWORK=10.77.0.0/24 \
@@ -150,6 +153,10 @@ ready=$(curl_from_client https://foxos.home.arpa/api/v1/health/ready)
 grep -Fq '"status":"ready"' <<<"$ready" || fail "ready endpoint did not pass"
 page=$(curl_from_client https://foxos.home.arpa/)
 grep -Fq 'id="root"' <<<"$page" || fail "Web page did not pass"
+asset_path=$(grep -oE '/assets/[^" ]+\.js' <<<"$page" | head -1)
+[[ -n "$asset_path" ]] || fail "production page did not reference a JavaScript asset"
+asset_size=$(curl_from_client "https://foxos.home.arpa${asset_path}" | wc -c | tr -d ' ')
+((asset_size > 1000)) || fail "production JavaScript asset was empty or truncated"
 site=$(curl_from_client https://foxos.home.arpa/api/v1/site)
 grep -Fq '"network":"10.77.0.0/24"' <<<"$site" || fail "site manifest did not match the namespace"
 grep -Fq '"publicUrl":"https://foxos.home.arpa"' <<<"$site" || fail "site manifest did not advertise HTTPS"

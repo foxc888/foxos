@@ -1,0 +1,223 @@
+# Immutable FoxOS site manifest loader. This script validates the independently
+# sealed editable manifest as data and assigns only the 11 allowed globals. It
+# never imports or otherwise executes site-config.rsc.
+
+:global FoxOSSiteLoadedDigest
+:global FoxOSSiteLoadedConfigPath
+:global FoxOSSiteLoaderVersion
+:set FoxOSSiteLoadedDigest ""
+:set FoxOSSiteLoadedConfigPath ""
+:set FoxOSSiteLoaderVersion 0
+
+:local configFiles [/file find where name~"(^|/)site-config.rsc$"]
+:if ([:len $configFiles] != 1) do={ :error "必须且只能上传一份 site-config.rsc" }
+:local configFile $configFiles
+:local configPath [/file get $configFile name]
+:local configSize [/file get $configFile size]
+:if ($configSize < 100 || $configSize > 8192) do={ :error "site-config.rsc 大小超出 100..8192 字节安全边界" }
+:local configContents [/file get $configFile contents]
+:if ([:len $configContents] != $configSize) do={ :error "无法完整读取 site-config.rsc" }
+
+:local digestFiles [/file find where name=($configPath . ".sha512")]
+:if ([:len $digestFiles] != 1) do={ :error "site-config.rsc.sha512 缺失或不唯一" }
+:local digestContents [/file get $digestFiles contents]
+:if ([:len $digestContents] != 129 || [:pick $digestContents 128 129] != "\n") do={ :error "站点清单摘要必须是 128 位小写 SHA-512 加换行" }
+:local expectedDigest [:pick $digestContents 0 128]
+:if ($expectedDigest !~ "^[0-9a-f]+$") do={ :error "站点清单摘要包含非十六进制字符" }
+:local actualDigest [:convert $configContents transform=sha512 to=hex]
+:if ($actualDigest != $expectedDigest) do={ :error "site-config.rsc 与独立 SHA-512 不一致" }
+:if ([:typeof [:find $configContents "\r"]] != "nil" || [:typeof [:find $configContents ";"]] != "nil" || [:typeof [:find $configContents "\\"]] != "nil") do={
+  :error "site-config.rsc 包含禁止的换行、分号或转义字符"
+}
+
+:local manifestVersionCount 0
+:local managementBridgeCount 0
+:local storageRootCount 0
+:local networkCount 0
+:local prefixLengthCount 0
+:local routerAddressCount 0
+:local mihomoAddressCount 0
+:local mosdnsAddressCount 0
+:local foxosAddressCount 0
+:local publicHostnameCount 0
+:local privateCIDRsCount 0
+:local manifestVersion
+:local managementBridge
+:local storageRoot
+:local siteNetwork
+:local prefixLength
+:local routerAddress
+:local mihomoAddress
+:local mosdnsAddress
+:local foxosAddress
+:local publicHostname
+:local privateCIDRs
+:local cursor 0
+:local contentLength [:len $configContents]
+
+:while ($cursor < $contentLength) do={
+  :local lineEnd [:find $configContents "\n" $cursor]
+  :if ([:typeof $lineEnd] = "nil") do={ :set lineEnd $contentLength }
+  :local line [:pick $configContents $cursor $lineEnd]
+  :set cursor ($lineEnd + 1)
+  :if ([:len $line] = 0) do={ :continue }
+  :if ([:pick $line 0 1] = "#") do={ :continue }
+  :local matched false
+  :if ($line = ":global FoxOSSiteManifestVersion 2") do={
+    :set manifestVersionCount ($manifestVersionCount + 1)
+    :set manifestVersion 2
+    :set matched true
+  }
+  :if ($line ~ "^:global FoxOSSiteManagementBridge \"[A-Za-z0-9][A-Za-z0-9._-]*\"$") do={
+    :set managementBridgeCount ($managementBridgeCount + 1)
+    :set managementBridge [:pick $line [:len ":global FoxOSSiteManagementBridge \""] ([:len $line] - 1)]
+    :set matched true
+  }
+  :if ($line ~ "^:global FoxOSSiteStorageRoot \"[A-Za-z0-9][A-Za-z0-9._-]*\"$") do={
+    :set storageRootCount ($storageRootCount + 1)
+    :set storageRoot [:pick $line [:len ":global FoxOSSiteStorageRoot \""] ([:len $line] - 1)]
+    :set matched true
+  }
+  :if ($line ~ "^:global FoxOSSiteNetwork \"[0-9.]+/[0-9]+\"$") do={
+    :set networkCount ($networkCount + 1)
+    :set siteNetwork [:pick $line [:len ":global FoxOSSiteNetwork \""] ([:len $line] - 1)]
+    :set matched true
+  }
+  :if ($line ~ "^:global FoxOSSitePrefixLength [0-9]+$") do={
+    :set prefixLengthCount ($prefixLengthCount + 1)
+    :set prefixLength [:tonum [:pick $line [:len ":global FoxOSSitePrefixLength "] [:len $line]]]
+    :set matched true
+  }
+  :if ($line ~ "^:global FoxOSSiteRouterAddress \"[0-9.]+\"$") do={
+    :set routerAddressCount ($routerAddressCount + 1)
+    :set routerAddress [:pick $line [:len ":global FoxOSSiteRouterAddress \""] ([:len $line] - 1)]
+    :set matched true
+  }
+  :if ($line ~ "^:global FoxOSSiteMihomoAddress \"[0-9.]+\"$") do={
+    :set mihomoAddressCount ($mihomoAddressCount + 1)
+    :set mihomoAddress [:pick $line [:len ":global FoxOSSiteMihomoAddress \""] ([:len $line] - 1)]
+    :set matched true
+  }
+  :if ($line ~ "^:global FoxOSSiteMosDNSAddress \"[0-9.]+\"$") do={
+    :set mosdnsAddressCount ($mosdnsAddressCount + 1)
+    :set mosdnsAddress [:pick $line [:len ":global FoxOSSiteMosDNSAddress \""] ([:len $line] - 1)]
+    :set matched true
+  }
+  :if ($line ~ "^:global FoxOSSiteFoxOSAddress \"[0-9.]+\"$") do={
+    :set foxosAddressCount ($foxosAddressCount + 1)
+    :set foxosAddress [:pick $line [:len ":global FoxOSSiteFoxOSAddress \""] ([:len $line] - 1)]
+    :set matched true
+  }
+  :if ($line ~ "^:global FoxOSSitePublicHostname \"[a-z0-9][a-z0-9.-]*[a-z0-9]\"$") do={
+    :set publicHostnameCount ($publicHostnameCount + 1)
+    :set publicHostname [:pick $line [:len ":global FoxOSSitePublicHostname \""] ([:len $line] - 1)]
+    :set matched true
+  }
+  :if ($line ~ "^:global FoxOSSiteSubscriptionPrivateCIDRs \"[0-9A-Fa-f:.,/]*\"$") do={
+    :set privateCIDRsCount ($privateCIDRsCount + 1)
+    :set privateCIDRs [:pick $line [:len ":global FoxOSSiteSubscriptionPrivateCIDRs \""] ([:len $line] - 1)]
+    :set matched true
+  }
+  :if ($matched = false) do={ :error ("site-config.rsc 包含非白名单行: " . $line) }
+}
+
+:foreach count in={$manifestVersionCount;$managementBridgeCount;$storageRootCount;$networkCount;$prefixLengthCount;$routerAddressCount;$mihomoAddressCount;$mosdnsAddressCount;$foxosAddressCount;$publicHostnameCount;$privateCIDRsCount} do={
+  :if ($count != 1) do={ :error "site-config.rsc 必须且只能包含 11 个指定赋值各一次" }
+}
+:local publicHostnameLength [:len $publicHostname]
+:if ($publicHostnameLength < 3 || $publicHostnameLength > 253 || $publicHostname !~ "^[a-z0-9][a-z0-9.-]*[a-z0-9]$" || [:typeof [:find $publicHostname ".."]] != "nil" || [:typeof [:find $publicHostname ".-"]] != "nil" || [:typeof [:find $publicHostname "-."]] != "nil" || $publicHostname !~ "\\.home\\.arpa$") do={
+  :error "管理主机名必须是 home.arpa 下总长不超过 253 字节的小写 ASCII 名称"
+}
+:local hostnameLabelCursor 0
+:while ($hostnameLabelCursor < $publicHostnameLength) do={
+  :local hostnameLabelEnd [:find $publicHostname "." $hostnameLabelCursor]
+  :if ([:typeof $hostnameLabelEnd] = "nil") do={ :set hostnameLabelEnd $publicHostnameLength }
+  :local hostnameLabel [:pick $publicHostname $hostnameLabelCursor $hostnameLabelEnd]
+  :local hostnameLabelLength [:len $hostnameLabel]
+  :if ($hostnameLabelLength < 1 || $hostnameLabelLength > 63) do={
+    :error "管理主机名的每个 label 必须包含 1..63 个 ASCII 字节"
+  }
+  :if ($hostnameLabel !~ "^[a-z0-9-]+$" || [:pick $hostnameLabel 0 1] = "-" || [:pick $hostnameLabel ($hostnameLabelLength - 1) $hostnameLabelLength] = "-") do={
+    :error "管理主机名 label 只能包含小写 ASCII 字母、数字和内部连字符"
+  }
+  :set hostnameLabelCursor ($hostnameLabelEnd + 1)
+}
+:if ([:len $privateCIDRs] > 0) do={
+  :if ([:pick $privateCIDRs 0 1] = "," || [:pick $privateCIDRs ([:len $privateCIDRs] - 1) [:len $privateCIDRs]] = "," || [:typeof [:find $privateCIDRs ",,"]] != "nil") do={
+    :error "订阅私网 allowlist 包含空项"
+  }
+  :local privateCIDRCursor 0
+  :local privateCIDRCount 0
+  :local privateCIDRSeen ","
+  :local private10 [:toip "10.0.0.0/8"]
+  :local private172 [:toip "172.16.0.0/12"]
+  :local private192 [:toip "192.168.0.0/16"]
+  :local privateULA [:toip6 "fc00::/7"]
+  :while ($privateCIDRCursor < [:len $privateCIDRs]) do={
+    :local privateCIDREnd [:find $privateCIDRs "," $privateCIDRCursor]
+    :if ([:typeof $privateCIDREnd] = "nil") do={ :set privateCIDREnd [:len $privateCIDRs] }
+    :local privateCIDR [:pick $privateCIDRs $privateCIDRCursor $privateCIDREnd]
+    :set privateCIDRCursor ($privateCIDREnd + 1)
+    :set privateCIDRCount ($privateCIDRCount + 1)
+    :if ($privateCIDRCount > 32 || [:typeof [:find $privateCIDRSeen ("," . $privateCIDR . ",")]] != "nil") do={
+      :error "订阅私网 allowlist 超过 32 项或包含重复项"
+    }
+    :local privateCIDRSlash [:find $privateCIDR "/"]
+    :local privateCIDRIsIPv6 ([:typeof [:find $privateCIDR ":"]] != "nil")
+    :local privateCIDRValue
+    :if ($privateCIDRIsIPv6) do={ :set privateCIDRValue [:toip6 $privateCIDR] } else={ :set privateCIDRValue [:toip $privateCIDR] }
+    :if ([:typeof $privateCIDRSlash] = "nil" || ($privateCIDRIsIPv6 && [:typeof $privateCIDRValue] != "ip6-prefix") || (!$privateCIDRIsIPv6 && [:typeof $privateCIDRValue] != "ip-prefix")) do={
+      :error ("订阅私网 allowlist 包含无效 CIDR: " . $privateCIDR)
+    }
+    :local privateCIDRAddress
+    :if ($privateCIDRIsIPv6) do={ :set privateCIDRAddress [:toip6 [:pick $privateCIDR 0 $privateCIDRSlash]] } else={ :set privateCIDRAddress [:toip [:pick $privateCIDR 0 $privateCIDRSlash]] }
+    :local privateCIDRBits [:tonum [:pick $privateCIDR ($privateCIDRSlash + 1) [:len $privateCIDR]]]
+    :if (($privateCIDRIsIPv6 && [:typeof $privateCIDRAddress] != "ip6") || (!$privateCIDRIsIPv6 && [:typeof $privateCIDRAddress] != "ip")) do={
+      :error ("订阅私网 allowlist 包含无效网络地址: " . $privateCIDR)
+    }
+    :if ($privateCIDR != ($privateCIDRAddress . "/" . $privateCIDRBits)) do={
+      :error ("订阅私网 allowlist 必须使用 canonical network address: " . $privateCIDR)
+    }
+    :local privateCIDRAllowed false
+    :if ($privateCIDRIsIPv6 = false) do={
+      :if (($privateCIDRAddress in $private10) && $privateCIDRBits >= 8) do={ :set privateCIDRAllowed true }
+      :if (($privateCIDRAddress in $private172) && $privateCIDRBits >= 12) do={ :set privateCIDRAllowed true }
+      :if (($privateCIDRAddress in $private192) && $privateCIDRBits >= 16) do={ :set privateCIDRAllowed true }
+    }
+    :if ($privateCIDRIsIPv6 && ($privateCIDRAddress in $privateULA) && $privateCIDRBits >= 7) do={ :set privateCIDRAllowed true }
+    :if ($privateCIDRAllowed = false) do={ :error ("订阅私网 allowlist 只接受 RFC1918 或 IPv6 ULA 前缀: " . $privateCIDR) }
+    :set privateCIDRSeen ($privateCIDRSeen . $privateCIDR . ",")
+  }
+}
+:local configSuffix "/site-config.rsc"
+:local suffixPosition [:find $configPath $configSuffix]
+:if ([:typeof $suffixPosition] = "nil" || [:pick $configPath 0 $suffixPosition] != $storageRoot) do={
+  :error "site-config.rsc 中的存储根必须与实际上传目录一致"
+}
+
+:global FoxOSSiteManifestVersion
+:global FoxOSSiteManagementBridge
+:global FoxOSSiteStorageRoot
+:global FoxOSSiteNetwork
+:global FoxOSSitePrefixLength
+:global FoxOSSiteRouterAddress
+:global FoxOSSiteMihomoAddress
+:global FoxOSSiteMosDNSAddress
+:global FoxOSSiteFoxOSAddress
+:global FoxOSSitePublicHostname
+:global FoxOSSiteSubscriptionPrivateCIDRs
+:set FoxOSSiteManifestVersion $manifestVersion
+:set FoxOSSiteManagementBridge $managementBridge
+:set FoxOSSiteStorageRoot $storageRoot
+:set FoxOSSiteNetwork $siteNetwork
+:set FoxOSSitePrefixLength $prefixLength
+:set FoxOSSiteRouterAddress $routerAddress
+:set FoxOSSiteMihomoAddress $mihomoAddress
+:set FoxOSSiteMosDNSAddress $mosdnsAddress
+:set FoxOSSiteFoxOSAddress $foxosAddress
+:set FoxOSSitePublicHostname $publicHostname
+:set FoxOSSiteSubscriptionPrivateCIDRs $privateCIDRs
+:set FoxOSSiteLoadedDigest $actualDigest
+:set FoxOSSiteLoadedConfigPath $configPath
+:set FoxOSSiteLoaderVersion 1
+:put ("SITE CONFIG LOADED: SHA-512=" . $FoxOSSiteLoadedDigest . " storage=" . $FoxOSSiteStorageRoot)

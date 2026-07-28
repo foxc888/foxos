@@ -1,34 +1,49 @@
-# FoxOS two-phase upgrade, phase 1: import a pending image without stopping active.
-# This script does not change DNS, DHCP, routes, NAT, Mangle, or firewall rules.
+# FoxOS two-phase upgrade, phase 1 apply. It creates one release-bound pending
+# container only after upgrade-plan.rsc binds an exact read-only state digest.
 
-:local architecture [/system/resource get architecture-name]
 :global FoxOSSiteManifestVersion
 :global FoxOSSiteStorageRoot
-:if ($FoxOSSiteManifestVersion != 1) do={ :error "先导入已审核的 site-config.rsc" }
+:global FoxOSUpgradeInspectVerbose false
+:global FoxOSUpgradeCurrentDigest
+:global FoxOSUpgradeApprovedDigest
+:global FoxOSUpgradeConfirmation
+:global FoxOSUpgradeActiveID
+:global FoxOSUpgradeImageID
+:local releaseID "__FOXOS_RELEASE_ID__"
+:if ($releaseID ~ "^__.*__$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || $releaseID !~ "^[A-Za-z0-9._-]+$") do={ :error "upgrade.rsc 未绑定有效 release ID；只能使用版本化升级包内脚本" }
+:if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入根目录不可变 load-site-config.rsc" }
 :local storageRoot $FoxOSSiteStorageRoot
-:local imageFile ""
-:if ($architecture = "x86") do={ :set imageFile "foxos-amd64.tar" }
-:if ($architecture = "arm64") do={ :set imageFile "foxos-arm64.tar" }
-:if ($imageFile = "") do={ :error ("不支持的架构: " . $architecture) }
-
-:local imagePath ($storageRoot . "/" . $imageFile)
-:local active [/container find where comment="foxos:active"]
-:local rollback [/container find where comment="foxos:rollback"]
-:local pending [/container find where comment="foxos:pending"]
-:if ([:len $active] != 1) do={ :error "必须且只能存在一个 foxos:active 容器" }
-:if ([:len $rollback] > 0) do={ :error "已有 foxos:rollback；完成清理或回滚后才能再次升级" }
-:if ([:len $pending] > 0) do={ :error "已有 foxos:pending；拒绝覆盖未完成升级" }
-:if ([:len [/container find where name="foxos-next"]] > 0) do={ :error "同名 foxos-next 容器已存在，拒绝覆盖" }
-:if ([:len [/file find where name=$imagePath]] != 1) do={ :error ("镜像文件不存在或不唯一: " . $imagePath) }
-:if ([:len [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER" value="foxos"]] != 1) do={ :error "foxos-env 所有权标记缺失" }
-:local foxosVeth [/interface/veth find where name="veth-foxos"]
-:if ([:len $foxosVeth] != 1) do={ :error "veth-foxos 缺失或不唯一" }
-:if ([/interface/veth get $foxosVeth comment] != "foxos:admin") do={ :error "veth-foxos 所有权标记缺失" }
-:foreach mountName in={"foxos-mihomo-config";"foxos-data";"foxos-backups"} do={
-  :if ([:len [/container/mounts find where name=$mountName]] != 1) do={ :error ("升级所需挂载缺失: " . $mountName) }
+:local payloadRoot ($storageRoot . "/foxos-upgrade-" . $releaseID)
+:local approved $FoxOSUpgradeApprovedDigest
+:local confirmation $FoxOSUpgradeConfirmation
+/import file-name=($storageRoot . "/load-site-config.rsc")
+/import file-name=($payloadRoot . "/upgrade-inspect.rsc")
+:if ([:len $approved] != 128 || $approved != $FoxOSUpgradeCurrentDigest || $confirmation != $approved) do={
+  :error "升级阶段 1 前态在计划后变化或摘要未确认；重新运行 upgrade-plan.rsc"
 }
+:local activeSnapshot $FoxOSUpgradeActiveID
+:local imageSnapshot $FoxOSUpgradeImageID
+/import file-name=($payloadRoot . "/upgrade-inspect.rsc")
+:if ($FoxOSUpgradeCurrentDigest != $approved || $FoxOSUpgradeActiveID != $activeSnapshot || $FoxOSUpgradeImageID != $imageSnapshot) do={
+  :error "升级阶段 1 对象 ID snapshot 后变化；重新运行 upgrade-plan.rsc"
+}
+:local activeNow [/container find where comment="foxos:active"]
+:local imagePath ($payloadRoot . "/foxos-amd64.tar")
+:local imageNow [/file find where name=$imagePath]
+:if ([:len $activeNow] != 1 || $activeNow != $activeSnapshot || [/container get $activeNow status] != "running" || [:len $imageNow] != 1 || $imageNow != $imageSnapshot) do={
+  :error "升级阶段 1 写入前 active 或镜像 ID 变化"
+}
+:set FoxOSUpgradeConfirmation ""
+:set FoxOSUpgradeApprovedDigest ""
 
-:put ("升级阶段 1：active 容器保持运行，仅导入 " . $storageRoot . " 中的新镜像到 foxos:pending。")
-:put ("新 root-dir: " . $storageRoot . "/containers/foxos-next；回滚仍使用当前 active root-dir。")
-/container/add name=foxos-next file=$imagePath interface=veth-foxos root-dir=($storageRoot . "/containers/foxos-next") envlist=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=yes start-on-boot=no comment="foxos:pending"
-:put ("镜像导入已排队，当前 FoxOS 未停止。等待 foxos:pending status=stopped 后执行 " . $storageRoot . "/upgrade-promote.rsc。")
+:local pendingName ("foxos-" . $releaseID)
+:local pendingRoot ($storageRoot . "/containers/" . $pendingName)
+:put ("升级阶段 1：active 保持运行，导入 release=" . $releaseID . " 到版本化 pending 槽位 " . $pendingName . "。")
+:put ("pending root-dir=" . $pendingRoot . "；现有配置、数据、镜像、备份和 active root-dir 不变。")
+/container/add name=$pendingName file=$imagePath interface=veth-foxos root-dir=$pendingRoot envlists=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=yes start-on-boot=no comment="foxos:pending"
+:local pending [/container find where comment="foxos:pending"]
+:local pendingByName [/container find where name=$pendingName]
+:if ([:len $pending] != 1 || [:len $pendingByName] != 1 || [/container get $pending .id] != [/container get $pendingByName .id] || [/container get $pending interface] != "veth-foxos" || [/container get $pending envlists] != "foxos-env" || [/container get $pending mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [/container get $pending root-dir] != $pendingRoot || ([/container get $pending start-on-boot] != false && [/container get $pending start-on-boot] != "no") || ([/container get $pending logging] != true && [/container get $pending logging] != "yes") || [/container get $pending status] = "running") do={
+  :error "pending 容器创建后的完整身份回读失败"
+}
+:put ("镜像导入已排队。等待 " . $pendingName . " status=stopped 后执行 " . $payloadRoot . "/upgrade-promote-plan.rsc。")
