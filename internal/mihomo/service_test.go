@@ -232,7 +232,7 @@ func TestServiceApplyPersistsDeterministicSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	store := &configMemoryStore{nodes: []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}}}
 	runtime := &fakeRuntime{}
-	service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(dir, "config.yaml"), BackupDir: filepath.Join(dir, "backups"), Runtime: runtime}, DigestKey: []byte(testDigestKey), Now: func() time.Time { return time.Unix(123, 0) }}
+	service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(dir, "config.yaml"), BackupDir: filepath.Join(dir, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}, DigestKey: []byte(testDigestKey), Now: func() time.Time { return time.Unix(123, 0) }}
 	draft := domain.MihomoDraft{Mode: "rule", Rules: []string{"MATCH,DIRECT"}}
 	preview, err := service.Preview(context.Background(), draft)
 	if err != nil {
@@ -263,10 +263,84 @@ func TestServiceApplyRejectsChangedDigest(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	store := &configMemoryStore{nodes: []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}}}
-	service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(dir, "config.yaml"), BackupDir: filepath.Join(dir, "backups"), Runtime: &fakeRuntime{}}, DigestKey: []byte(testDigestKey)}
+	service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(dir, "config.yaml"), BackupDir: filepath.Join(dir, "backups"), Runtime: &fakeRuntime{}, IntegrityKey: []byte(testApplyIntegrityKey)}, DigestKey: []byte(testDigestKey)}
 	_, _, err := service.ApplyPreview(context.Background(), domain.MihomoDraft{Mode: "rule"}, "wrong", "")
 	if err == nil || errors.Is(err, ErrApplyFailed) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestServiceApplyRejectsUnsafeSnapshotLabel(t *testing.T) {
+	for _, label := range []string{strings.Repeat("a", applySnapshotLabelLimit+1), "line\nbreak"} {
+		label := label
+		t.Run(label[:4], func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			runtime := &fakeRuntime{}
+			applier := &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}
+			store := &configMemoryStore{nodes: []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}}}
+			service := &Service{Store: store, Applier: applier, DigestKey: []byte(testDigestKey)}
+			if _, _, err := service.ApplyPreview(context.Background(), domain.MihomoDraft{Mode: "rule"}, "", label); err == nil {
+				t.Fatal("unsafe snapshot label was accepted")
+			}
+			if runtime.reloads != 0 {
+				t.Fatalf("unsafe label reached the runtime: reloads=%d", runtime.reloads)
+			}
+			if _, found, err := applier.Pending(); err != nil || found {
+				t.Fatalf("unsafe label created a journal: found=%t err=%v", found, err)
+			}
+		})
+	}
+}
+
+func TestServiceReconcileAppliedNormalizesSnapshotLabel(t *testing.T) {
+	tests := []struct {
+		name      string
+		label     string
+		wantLabel string
+		wantErr   bool
+	}{
+		{name: "trims valid label", label: "  recovered snapshot  ", wantLabel: "recovered snapshot"},
+		{name: "rejects oversized label", label: strings.Repeat("a", applySnapshotLabelLimit+1), wantErr: true},
+		{name: "rejects control character", label: "line\nbreak", wantErr: true},
+		{name: "rejects invalid UTF-8", label: string([]byte{0xff}), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			body := []byte("mode: rule\n")
+			config := filepath.Join(root, "config.yaml")
+			if err := os.WriteFile(config, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runtime := &fakeRuntime{}
+			store := &configMemoryStore{}
+			service := &Service{
+				Store:     store,
+				Applier:   &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)},
+				DigestKey: []byte(testDigestKey),
+			}
+			digest, err := service.digest(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			snapshot, reconciled, err := service.ReconcileApplied(context.Background(), digest, test.label)
+			if test.wantErr {
+				if err == nil || reconciled || len(store.snapshots) != 0 || runtime.healthChecks != 0 {
+					t.Fatalf("unsafe label result: snapshot=%+v reconciled=%t snapshots=%d health-checks=%d err=%v", snapshot, reconciled, len(store.snapshots), runtime.healthChecks, err)
+				}
+				return
+			}
+			if err != nil || !reconciled || snapshot.Label != test.wantLabel || runtime.healthChecks != 1 {
+				t.Fatalf("snapshot=%+v reconciled=%t health-checks=%d err=%v", snapshot, reconciled, runtime.healthChecks, err)
+			}
+			stored, ok := store.snapshots[snapshot.ID]
+			if !ok || stored.Label != test.wantLabel {
+				t.Fatalf("stored snapshot=%+v found=%t", stored, ok)
+			}
+		})
 	}
 }
 
@@ -277,7 +351,7 @@ func TestServicePersistsSnapshotBeforeCompletingJournal(t *testing.T) {
 	if err := os.WriteFile(config, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: &fakeRuntime{}}
+	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: &fakeRuntime{}, IntegrityKey: []byte(testApplyIntegrityKey)}
 	store := &configMemoryStore{nodes: []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}}}
 	service := &Service{Store: store, Applier: applier, DigestKey: []byte(testDigestKey)}
 	draft := domain.MihomoDraft{Mode: "rule", Rules: []string{"MATCH,DIRECT"}}
@@ -314,7 +388,7 @@ func TestServiceSnapshotFailureRollsBackWithIndependentContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &contextRecordingRuntime{}
-	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime}
+	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}
 	ctx, cancel := context.WithCancel(context.Background())
 	store := &configMemoryStore{
 		nodes:           []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}},
@@ -357,7 +431,7 @@ func TestServiceSnapshotPersistenceIgnoresCanceledRequestContext(t *testing.T) {
 		beforeSave:                    func(domain.MihomoSnapshot) { cancel() },
 		rejectCanceledSnapshotContext: true,
 	}
-	service := &Service{Store: store, Applier: &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: &fakeRuntime{}}, DigestKey: []byte(testDigestKey)}
+	service := &Service{Store: store, Applier: &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: &fakeRuntime{}, IntegrityKey: []byte(testApplyIntegrityKey)}, DigestKey: []byte(testDigestKey)}
 	draft := domain.MihomoDraft{Mode: "rule", Rules: []string{"MATCH,DIRECT"}}
 	preview, err := service.Preview(ctx, draft)
 	if err != nil {
@@ -391,7 +465,7 @@ func TestServiceSaveErrorUsesAuthoritativeSnapshotReadback(t *testing.T) {
 				t.Fatal(err)
 			}
 			runtime := &fakeRuntime{}
-			applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime}
+			applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}
 			store := &configMemoryStore{
 				nodes:               []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}},
 				saveSnapshotErr:     errors.New("commit result unavailable"),
@@ -433,7 +507,7 @@ func TestServiceSaveErrorRejectsStaleSnapshotLabelReadback(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &fakeRuntime{}
-	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime}
+	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}
 	store := &configMemoryStore{
 		nodes:           []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}},
 		saveSnapshotErr: errors.New("database unavailable before write"),
@@ -467,8 +541,23 @@ func TestServiceSaveErrorRejectsStaleSnapshotLabelReadback(t *testing.T) {
 		t.Fatalf("stale snapshot was unexpectedly replaced: %+v", stored)
 	}
 	intent, found, pendingErr := applier.Pending()
-	if pendingErr != nil || !found || intent.Phase != "snapshot_unconfirmed" {
+	if pendingErr != nil || !found || intent.Phase != "snapshot_unconfirmed" || intent.SnapshotLabel != "new label" {
 		t.Fatalf("journal intent=%+v found=%t err=%v", intent, found, pendingErr)
+	}
+	if err := service.RecoverPending(context.Background()); err == nil {
+		t.Fatal("restart recovery accepted a stale snapshot label")
+	}
+	if _, found, pendingErr := applier.Pending(); pendingErr != nil || !found {
+		t.Fatalf("stale label recovery cleared journal: found=%t err=%v", found, pendingErr)
+	}
+	repaired := store.snapshots[id]
+	repaired.Label = "new label"
+	store.snapshots[id] = repaired
+	if err := service.RecoverPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, pendingErr := applier.Pending(); pendingErr != nil || found {
+		t.Fatalf("matching label recovery left journal: found=%t err=%v", found, pendingErr)
 	}
 }
 
@@ -480,7 +569,7 @@ func TestServiceRollbackFailureIsRecoveredOnRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &fakeRuntime{rollbackReloadErr: errors.New("rollback reload unavailable")}
-	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime}
+	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}
 	store := &configMemoryStore{
 		nodes:           []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}},
 		saveSnapshotErr: errors.New("database unavailable"),
@@ -516,7 +605,7 @@ func TestServiceCommittedSnapshotOnlyCompletesJournalAfterRestart(t *testing.T) 
 	t.Parallel()
 	root := t.TempDir()
 	runtime := &fakeRuntime{}
-	applier := &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: filepath.Join(root, "backups"), Runtime: runtime}
+	applier := &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}
 	clearCalls := 0
 	applier.clearPendingHook = func(string) error {
 		clearCalls++
@@ -612,7 +701,7 @@ func TestServiceSnapshotReadbackUncertaintyNeverRollsBack(t *testing.T) {
 				t.Fatal(err)
 			}
 			runtime := &fakeRuntime{}
-			applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime}
+			applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}
 			store := &configMemoryStore{nodes: []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}}}
 			test.configure(store)
 			service := &Service{Store: store, Applier: applier, DigestKey: []byte(testDigestKey)}
@@ -632,6 +721,13 @@ func TestServiceSnapshotReadbackUncertaintyNeverRollsBack(t *testing.T) {
 			intent, found, pendingErr := applier.Pending()
 			if pendingErr != nil || !found || intent.Phase != "snapshot_unconfirmed" {
 				t.Fatalf("unconfirmed journal missing: intent=%+v found=%t err=%v", intent, found, pendingErr)
+			}
+			if err := service.RecoverPending(context.Background()); err == nil {
+				t.Fatal("restart recovery accepted an uncertain snapshot readback")
+			}
+			intent, found, pendingErr = applier.Pending()
+			if pendingErr != nil || !found || intent.Phase != "snapshot_unconfirmed" {
+				t.Fatalf("failed restart recovery did not preserve the journal: intent=%+v found=%t err=%v", intent, found, pendingErr)
 			}
 			test.repair(store, snapshot)
 			if err := service.RecoverPending(context.Background()); err != nil {
@@ -655,7 +751,7 @@ func TestServiceMissingSnapshotReadbackRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &fakeRuntime{}
-	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime}
+	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}
 	store := &configMemoryStore{nodes: []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}}}
 	store.afterSave = func(current *configMemoryStore, snapshot domain.MihomoSnapshot) {
 		delete(current.snapshots, snapshot.ID)
@@ -684,7 +780,7 @@ func TestServiceRestartRollsBackSnapshotNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &fakeRuntime{}
-	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime}
+	applier := &Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}
 	store := &configMemoryStore{nodes: []domain.Node{{ID: "n1", Name: "Node", Type: "vless", Server: "example.com", Port: 443, UUID: "credential"}}, readSnapshotErr: errors.New("readback unavailable")}
 	store.afterSave = func(current *configMemoryStore, snapshot domain.MihomoSnapshot) {
 		delete(current.snapshots, snapshot.ID)
@@ -729,7 +825,7 @@ func TestServiceRestoreRequiresSnapshotReadback(t *testing.T) {
 		changed.Body = []byte("mode: global\n")
 		current.snapshots[snapshot.ID] = changed
 	}
-	applier := &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: filepath.Join(root, "backups"), Runtime: &fakeRuntime{}}
+	applier := &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: filepath.Join(root, "backups"), Runtime: &fakeRuntime{}, IntegrityKey: []byte(testApplyIntegrityKey)}
 	service := &Service{Store: store, Applier: applier, DigestKey: []byte(testDigestKey)}
 	_, _, err = service.Restore(WithApplyOperation(context.Background(), "mihomo.restore", "job-restore-readback"), snapshotIDValue, "restored")
 	if !errors.Is(err, ErrPendingApply) {
@@ -780,7 +876,7 @@ func TestServiceRestoreRejectsCorruptSnapshotBeforeApply(t *testing.T) {
 			store := &configMemoryStore{snapshots: map[string]domain.MihomoSnapshot{
 				"snapshot": {ID: "snapshot", Digest: test.digest, Body: test.body},
 			}}
-			service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: filepath.Join(root, "backups"), Runtime: runtime}, DigestKey: []byte(testDigestKey)}
+			service := &Service{Store: store, Applier: &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: filepath.Join(root, "backups"), Runtime: runtime, IntegrityKey: []byte(testApplyIntegrityKey)}, DigestKey: []byte(testDigestKey)}
 			if _, _, err := service.Restore(context.Background(), "snapshot", ""); !errors.Is(err, ErrMihomoSnapshotCorrupt) {
 				t.Fatalf("Restore() error = %v", err)
 			}

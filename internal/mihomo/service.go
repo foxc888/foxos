@@ -166,12 +166,16 @@ func (s *Service) ApplyPreview(ctx context.Context, draft domain.MihomoDraft, ex
 	if err != nil {
 		return ApplyResult{}, domain.MihomoSnapshot{}, err
 	}
-	operation, err := operationFromContext(ctx, "mihomo.apply", digest)
+	snapshotLabel, err := normalizeSnapshotLabel(label)
 	if err != nil {
 		return ApplyResult{}, domain.MihomoSnapshot{}, err
 	}
+	operation, err := operationFromContext(ctx, "mihomo.apply", digest, snapshotLabel)
+	if err != nil {
+		return ApplyResult{}, domain.MihomoSnapshot{}, err
+	}
+	snapshot := domain.MihomoSnapshot{ID: id, Digest: digest, Label: snapshotLabel, Body: append([]byte(nil), body...), CreatedAt: nowUTC(s.Now)}
 	result, applyErr := s.Applier.ApplyPending(ctx, body, operation)
-	snapshot := domain.MihomoSnapshot{ID: id, Digest: digest, Label: strings.TrimSpace(label), Body: append([]byte(nil), body...), CreatedAt: nowUTC(s.Now)}
 	if applyErr != nil {
 		return result, snapshot, applyErr
 	}
@@ -193,16 +197,23 @@ func (s *Service) Restore(ctx context.Context, id, label string) (ApplyResult, d
 	if !matchingDigest(actual, snapshot.Digest) {
 		return ApplyResult{}, snapshot, ErrMihomoSnapshotCorrupt
 	}
-	operation, err := operationFromContext(ctx, "mihomo.restore", actual)
+	snapshot.Label, err = normalizeSnapshotLabel(snapshot.Label)
+	if err != nil {
+		return ApplyResult{}, snapshot, err
+	}
+	if label = strings.TrimSpace(label); label != "" {
+		snapshot.Label, err = normalizeSnapshotLabel(label)
+		if err != nil {
+			return ApplyResult{}, snapshot, err
+		}
+	}
+	operation, err := operationFromContext(ctx, "mihomo.restore", actual, snapshot.Label)
 	if err != nil {
 		return ApplyResult{}, snapshot, err
 	}
 	result, err := s.Applier.ApplyPending(ctx, snapshot.Body, operation)
 	if err != nil {
 		return result, snapshot, err
-	}
-	if label = strings.TrimSpace(label); label != "" {
-		snapshot.Label = label
 	}
 	snapshot.Digest = actual
 	snapshot.ID, err = snapshotID(snapshot.Digest)
@@ -263,21 +274,21 @@ func (s *Service) RecoverPending(ctx context.Context) error {
 	}
 
 	current, currentErr := readCurrentConfig(s.Applier.ConfigPath)
-	currentSHA256 := ""
+	currentMAC := ""
 	if currentErr == nil {
-		currentSHA256 = configSHA256(current)
+		currentMAC = s.Applier.configMAC(current)
 	}
-	if intent.Phase == "prepared" && ((intent.PreviousSHA256 == "" && errors.Is(currentErr, os.ErrNotExist)) || (currentErr == nil && currentSHA256 == intent.PreviousSHA256)) {
+	if intent.Phase == "prepared" && ((intent.PreviousMAC == "" && errors.Is(currentErr, os.ErrNotExist)) || (currentErr == nil && matchingConfigMAC(currentMAC, intent.PreviousMAC))) {
 		return s.Applier.discardPrepared(intent.ID)
 	}
-	if intent.Phase == "rolled_back" && currentErr == nil && currentSHA256 == intent.PreviousSHA256 {
+	if intent.Phase == "rolled_back" && currentErr == nil && matchingConfigMAC(currentMAC, intent.PreviousMAC) {
 		if err := s.Applier.Runtime.Healthy(ctx); err != nil {
 			return fmt.Errorf("verify recovered Mihomo runtime: %w", err)
 		}
 		return s.Applier.CompletePending(intent.ID)
 	}
 
-	if (intent.Phase == "snapshot_save_started" || intent.Phase == "snapshot_unconfirmed" || intent.Phase == "snapshot_confirmed") && currentErr == nil && currentSHA256 == intent.TargetSHA256 {
+	if (intent.Phase == "snapshot_save_started" || intent.Phase == "snapshot_unconfirmed" || intent.Phase == "snapshot_confirmed") && currentErr == nil && matchingConfigMAC(currentMAC, intent.TargetMAC) {
 		committed, err := s.pendingSnapshotCommitted(ctx, intent, current)
 		if err != nil {
 			return err
@@ -305,7 +316,7 @@ func (s *Service) RecoverPending(ctx context.Context) error {
 	if intent.Phase == "snapshot_save_started" || intent.Phase == "snapshot_unconfirmed" || intent.Phase == "snapshot_confirmed" {
 		return ErrPendingApply
 	}
-	if intent.Phase == "external_applied" && !intent.RequiresSnapshot && currentErr == nil && currentSHA256 == intent.TargetSHA256 {
+	if intent.Phase == "external_applied" && !intent.RequiresSnapshot && currentErr == nil && matchingConfigMAC(currentMAC, intent.TargetMAC) {
 		if err := s.Applier.Runtime.Healthy(ctx); err != nil {
 			return err
 		}
@@ -337,10 +348,18 @@ func (s *Service) pendingSnapshotCommitted(ctx context.Context, intent PendingAp
 	if err != nil {
 		return false, fmt.Errorf("read pending Mihomo snapshot: %w", err)
 	}
-	if !matchingDigest(snapshot.Digest, intent.TargetDigest) || configSHA256(snapshot.Body) != intent.TargetSHA256 || !bytes.Equal(snapshot.Body, current) {
+	if snapshot.ID != id || snapshot.Label != intent.SnapshotLabel || !matchingDigest(snapshot.Digest, intent.TargetDigest) || !matchingConfigMAC(s.Applier.configMAC(snapshot.Body), intent.TargetMAC) || !bytes.Equal(snapshot.Body, current) {
 		return false, errors.New("pending Mihomo snapshot does not match the applied configuration")
 	}
 	return true, nil
+}
+
+func normalizeSnapshotLabel(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !validSnapshotLabel(value) {
+		return "", errors.New("Mihomo snapshot label must be valid UTF-8, contain no control characters, and not exceed 120 bytes")
+	}
+	return value, nil
 }
 
 // ReconcileApplied closes the crash window between an atomic config replace
@@ -364,6 +383,10 @@ func (s *Service) ReconcileApplied(ctx context.Context, expectedDigest, label st
 	if !matchingDigest(actual, expectedDigest) {
 		return domain.MihomoSnapshot{}, false, nil
 	}
+	snapshotLabel, err := normalizeSnapshotLabel(label)
+	if err != nil {
+		return domain.MihomoSnapshot{}, false, err
+	}
 	if err := s.Applier.Runtime.Healthy(ctx); err != nil {
 		return domain.MihomoSnapshot{}, false, err
 	}
@@ -371,7 +394,7 @@ func (s *Service) ReconcileApplied(ctx context.Context, expectedDigest, label st
 	if err != nil {
 		return domain.MihomoSnapshot{}, false, err
 	}
-	snapshot := domain.MihomoSnapshot{ID: id, Digest: actual, Label: label, Body: body, CreatedAt: nowUTC(s.Now)}
+	snapshot := domain.MihomoSnapshot{ID: id, Digest: actual, Label: snapshotLabel, Body: body, CreatedAt: nowUTC(s.Now)}
 	if err := s.Store.SaveMihomoSnapshot(ctx, snapshot); err != nil {
 		return domain.MihomoSnapshot{}, false, err
 	}

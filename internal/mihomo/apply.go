@@ -3,6 +3,7 @@ package mihomo
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,19 +16,26 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
-	ErrApplyFailed    = errors.New("mihomo config apply failed")
-	ErrRollbackFailed = errors.New("mihomo config rollback failed")
-	ErrPendingApply   = errors.New("mihomo pending apply requires recovery")
+	ErrApplyFailed             = errors.New("mihomo config apply failed")
+	ErrRollbackFailed          = errors.New("mihomo config rollback failed")
+	ErrPendingApply            = errors.New("mihomo pending apply requires recovery")
+	ErrUnsupportedApplyJournal = errors.New("unsupported Mihomo apply journal version")
 )
 
 const (
-	applyIntentVersion = 1
-	applyIntentName    = ".foxos-mihomo-apply.json"
-	applyIntentLimit   = 32 << 10
-	rollbackTimeout    = 30 * time.Second
+	applyIntentVersion      = 2
+	applyIntentName         = ".foxos-mihomo-apply.json"
+	applyIntentLimit        = 32 << 10
+	applySnapshotLabelLimit = 120
+	applyIntegrityKeyDomain = "foxos:mihomo:journal-key:v2\x00"
+	applyConfigMACDomain    = "foxos:mihomo:journal:v2\x00"
+	applyJournalMACDomain   = "foxos:mihomo:journal-envelope:v2\x00"
+	rollbackTimeout         = 30 * time.Second
 )
 
 type Runtime interface {
@@ -44,9 +52,10 @@ type ApplyResult struct {
 }
 
 type ApplyOperation struct {
-	ID           string
-	Kind         string
-	TargetDigest string
+	ID            string
+	Kind          string
+	TargetDigest  string
+	SnapshotLabel string
 }
 
 type applyOperationContextKey struct{}
@@ -60,7 +69,7 @@ func WithApplyOperation(ctx context.Context, kind, id string) context.Context {
 	return context.WithValue(ctx, applyOperationContextKey{}, ApplyOperation{ID: id, Kind: kind})
 }
 
-func operationFromContext(ctx context.Context, fallbackKind, targetDigest string) (ApplyOperation, error) {
+func operationFromContext(ctx context.Context, fallbackKind, targetDigest, snapshotLabel string) (ApplyOperation, error) {
 	operation, _ := ctx.Value(applyOperationContextKey{}).(ApplyOperation)
 	if operation.ID == "" {
 		id, err := randomApplyID("operation")
@@ -73,6 +82,7 @@ func operationFromContext(ctx context.Context, fallbackKind, targetDigest string
 		operation.Kind = fallbackKind
 	}
 	operation.TargetDigest = targetDigest
+	operation.SnapshotLabel = snapshotLabel
 	return operation, nil
 }
 
@@ -81,28 +91,61 @@ type PendingApply struct {
 	ID               string    `json:"id"`
 	OperationID      string    `json:"operationId"`
 	OperationKind    string    `json:"operationKind"`
-	TargetSHA256     string    `json:"targetSha256"`
-	PreviousSHA256   string    `json:"previousSha256,omitempty"`
+	TargetMAC        string    `json:"targetMac"`
+	PreviousMAC      string    `json:"previousMac,omitempty"`
 	TargetDigest     string    `json:"targetDigest,omitempty"`
+	SnapshotLabel    string    `json:"snapshotLabel"`
 	RequiresSnapshot bool      `json:"requiresSnapshot"`
 	BackupPath       string    `json:"backupPath,omitempty"`
 	Phase            string    `json:"phase"`
 	LastError        string    `json:"lastError,omitempty"`
 	CreatedAt        time.Time `json:"createdAt"`
+	JournalMAC       string    `json:"journalMac"`
+}
+
+// pendingApplyMACPayload is the canonical authenticated representation. Keep
+// every recovery-relevant field explicit so JSON formatting and omitted empty
+// values cannot change what the journal signature covers.
+type pendingApplyMACPayload struct {
+	Version          int       `json:"version"`
+	ID               string    `json:"id"`
+	OperationID      string    `json:"operationId"`
+	OperationKind    string    `json:"operationKind"`
+	TargetMAC        string    `json:"targetMac"`
+	PreviousMAC      string    `json:"previousMac"`
+	TargetDigest     string    `json:"targetDigest"`
+	SnapshotLabel    string    `json:"snapshotLabel"`
+	RequiresSnapshot bool      `json:"requiresSnapshot"`
+	BackupPath       string    `json:"backupPath"`
+	Phase            string    `json:"phase"`
+	LastError        string    `json:"lastError"`
+	CreatedAt        time.Time `json:"createdAt"`
 }
 
 type Applier struct {
-	ConfigPath string
-	BackupDir  string
-	Runtime    Runtime
-	Now        func() time.Time
+	ConfigPath   string
+	BackupDir    string
+	Runtime      Runtime
+	IntegrityKey []byte // #nosec G117 -- derived secret is held in memory and never serialized.
+	Now          func() time.Time
 
 	mu               sync.Mutex
 	clearPendingHook func(string) error
 }
 
+// NewApplyIntegrityKey derives a dedicated key so journal authentication
+// cannot be confused with confirmation tokens or configuration previews.
+func NewApplyIntegrityKey(rootKey []byte) ([]byte, error) {
+	if len(rootKey) < sha256.Size {
+		return nil, errors.New("Mihomo apply integrity root key must contain at least 32 bytes")
+	}
+	mac := hmac.New(sha256.New, rootKey)
+	_, _ = mac.Write([]byte(applyIntegrityKeyDomain))
+	return mac.Sum(nil), nil
+}
+
 func (a *Applier) Apply(ctx context.Context, body []byte) (ApplyResult, error) {
-	operation, err := operationFromContext(ctx, "mihomo.direct", "")
+	operation, err := operationFromContext(ctx, "mihomo.direct", "", "")
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -122,10 +165,13 @@ func (a *Applier) ApplyPending(ctx context.Context, body []byte, operation Apply
 	if a == nil || ctx == nil || a.Runtime == nil || len(body) == 0 {
 		return ApplyResult{}, fmt.Errorf("%w: invalid input", ErrApplyFailed)
 	}
+	if err := a.requireIntegrityKey(); err != nil {
+		return ApplyResult{}, err
+	}
 	operation.ID = strings.TrimSpace(operation.ID)
 	operation.Kind = strings.TrimSpace(operation.Kind)
 	operation.TargetDigest = strings.ToLower(strings.TrimSpace(operation.TargetDigest))
-	if !validJournalValue(operation.ID) || !validJournalValue(operation.Kind) || (operation.TargetDigest != "" && !validDigest(operation.TargetDigest)) {
+	if !validJournalValue(operation.ID) || !validJournalValue(operation.Kind) || (operation.TargetDigest != "" && !validDigest(operation.TargetDigest)) || !validSnapshotLabel(operation.SnapshotLabel) || (operation.TargetDigest == "" && operation.SnapshotLabel != "") {
 		return ApplyResult{}, fmt.Errorf("%w: invalid operation identity", ErrApplyFailed)
 	}
 
@@ -188,19 +234,19 @@ func (a *Applier) ApplyPending(ctx context.Context, body []byte, operation Apply
 		return ApplyResult{}, err
 	}
 	result := ApplyResult{AppliedAt: now, IntentID: intentID}
-	previousSHA256 := ""
+	previousMAC := ""
 	if _, err := os.Stat(configPath); err == nil {
 		previousBody, readErr := readCurrentConfig(configPath)
 		if readErr != nil {
 			return ApplyResult{}, fmt.Errorf("%w: read previous config: %v", ErrApplyFailed, readErr)
 		}
-		previousSHA256 = configSHA256(previousBody)
+		previousMAC = a.configMAC(previousBody)
 		result.BackupPath = filepath.Join(backupDir, "config-"+now.Format("20060102T150405.000000000Z")+"-"+intentID+".yaml")
 		if err := copyFile(configPath, result.BackupPath); err != nil {
 			return ApplyResult{}, fmt.Errorf("%w: snapshot: %v", ErrApplyFailed, err)
 		}
 		backupBody, err := readRestrictedConfig(result.BackupPath, backupDir)
-		if err != nil || configSHA256(backupBody) != previousSHA256 {
+		if err != nil || !matchingConfigMAC(a.configMAC(backupBody), previousMAC) {
 			return ApplyResult{}, fmt.Errorf("%w: snapshot readback mismatch", ErrApplyFailed)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -212,9 +258,10 @@ func (a *Applier) ApplyPending(ctx context.Context, body []byte, operation Apply
 		ID:               intentID,
 		OperationID:      operation.ID,
 		OperationKind:    operation.Kind,
-		TargetSHA256:     configSHA256(body),
-		PreviousSHA256:   previousSHA256,
+		TargetMAC:        a.configMAC(body),
+		PreviousMAC:      previousMAC,
 		TargetDigest:     operation.TargetDigest,
+		SnapshotLabel:    operation.SnapshotLabel,
 		RequiresSnapshot: operation.TargetDigest != "",
 		BackupPath:       result.BackupPath,
 		Phase:            "prepared",
@@ -243,7 +290,7 @@ func (a *Applier) ApplyPending(ctx context.Context, body []byte, operation Apply
 		return a.rollbackPendingUnlocked(result, intent, err)
 	}
 	current, err := readCurrentConfig(configPath)
-	if err != nil || configSHA256(current) != intent.TargetSHA256 {
+	if err != nil || !matchingConfigMAC(a.configMAC(current), intent.TargetMAC) {
 		return a.rollbackPendingUnlocked(result, intent, errors.New("target config readback mismatch"))
 	}
 	intent.Phase = "external_applied"
@@ -346,11 +393,11 @@ func (a *Applier) discardPrepared(intentID string) error {
 		return ErrPendingApply
 	}
 	current, err := readCurrentConfig(configPath)
-	if intent.PreviousSHA256 == "" {
+	if intent.PreviousMAC == "" {
 		if !errors.Is(err, os.ErrNotExist) {
 			return ErrPendingApply
 		}
-	} else if err != nil || configSHA256(current) != intent.PreviousSHA256 {
+	} else if err != nil || !matchingConfigMAC(a.configMAC(current), intent.PreviousMAC) {
 		return ErrPendingApply
 	}
 	return a.clearPendingUnlocked(backupDir, intentID)
@@ -383,11 +430,11 @@ func (a *Applier) rollbackPendingUnlocked(result ApplyResult, intent PendingAppl
 	intent.Phase = "rollback_required"
 	intent.LastError = "rollback required"
 	journalErr := a.writePendingUnlocked(backupDir, intent)
-	if intent.PreviousSHA256 == "" || intent.BackupPath == "" {
+	if intent.PreviousMAC == "" || intent.BackupPath == "" {
 		return result, fmt.Errorf("%w: no previous configuration is available", ErrRollbackFailed)
 	}
 	previous, err := readRestrictedConfig(intent.BackupPath, backupDir)
-	if err != nil || configSHA256(previous) != intent.PreviousSHA256 {
+	if err != nil || !matchingConfigMAC(a.configMAC(previous), intent.PreviousMAC) {
 		intent.LastError = "previous configuration verification failed"
 		_ = a.writePendingUnlocked(backupDir, intent)
 		return result, fmt.Errorf("%w: previous configuration verification failed", ErrRollbackFailed)
@@ -415,7 +462,7 @@ func (a *Applier) rollbackPendingUnlocked(result ApplyResult, intent PendingAppl
 		return result, fmt.Errorf("%w: verify previous configuration health: %v", ErrRollbackFailed, err)
 	}
 	current, err := readCurrentConfig(configPath)
-	if err != nil || configSHA256(current) != intent.PreviousSHA256 {
+	if err != nil || !matchingConfigMAC(a.configMAC(current), intent.PreviousMAC) {
 		intent.LastError = "previous configuration readback failed"
 		_ = a.writePendingUnlocked(backupDir, intent)
 		return result, fmt.Errorf("%w: previous configuration readback mismatch", ErrRollbackFailed)
@@ -437,6 +484,9 @@ func (a *Applier) rollbackPendingUnlocked(result ApplyResult, intent PendingAppl
 }
 
 func (a *Applier) pendingUnlocked(configPath, backupDir string) (PendingApply, bool, error) {
+	if err := a.requireIntegrityKey(); err != nil {
+		return PendingApply{}, false, err
+	}
 	if err := requireRealDirectory(backupDir); errors.Is(err, os.ErrNotExist) {
 		return PendingApply{}, false, nil
 	} else if err != nil {
@@ -470,6 +520,15 @@ func (a *Applier) pendingUnlocked(configPath, backupDir string) (PendingApply, b
 	if err != nil || len(body) == 0 || len(body) > applyIntentLimit {
 		return PendingApply{}, false, errors.New("invalid Mihomo apply journal")
 	}
+	var envelope struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return PendingApply{}, false, fmt.Errorf("decode Mihomo apply journal: %w", err)
+	}
+	if envelope.Version != applyIntentVersion {
+		return PendingApply{}, false, fmt.Errorf("%w: found v%d, require v%d; finish recovery with the previous FoxOS version before upgrading", ErrUnsupportedApplyJournal, envelope.Version, applyIntentVersion)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	var intent PendingApply
@@ -479,14 +538,17 @@ func (a *Applier) pendingUnlocked(configPath, backupDir string) (PendingApply, b
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return PendingApply{}, false, errors.New("invalid trailing Mihomo apply journal data")
 	}
-	if err := validatePending(intent, configPath, backupDir); err != nil {
+	if err := a.verifyPendingMAC(intent); err != nil {
+		return PendingApply{}, false, err
+	}
+	if err := a.validatePending(intent, configPath, backupDir); err != nil {
 		return PendingApply{}, false, err
 	}
 	return intent, true, nil
 }
 
-func validatePending(intent PendingApply, configPath, backupDir string) error {
-	if intent.Version != applyIntentVersion || !validJournalValue(intent.ID) || !validJournalValue(intent.OperationID) || !validJournalValue(intent.OperationKind) || !validSHA256(intent.TargetSHA256) || intent.CreatedAt.IsZero() {
+func (a *Applier) validatePending(intent PendingApply, configPath, backupDir string) error {
+	if intent.Version != applyIntentVersion || !validJournalValue(intent.ID) || !validJournalValue(intent.OperationID) || !validJournalValue(intent.OperationKind) || !validConfigMAC(intent.TargetMAC) || intent.CreatedAt.IsZero() {
 		return errors.New("invalid Mihomo apply journal identity")
 	}
 	switch intent.Phase {
@@ -494,17 +556,17 @@ func validatePending(intent PendingApply, configPath, backupDir string) error {
 	default:
 		return errors.New("invalid Mihomo apply journal phase")
 	}
-	if intent.RequiresSnapshot != (intent.TargetDigest != "") || (intent.TargetDigest != "" && (!validDigest(intent.TargetDigest) || strings.ToLower(intent.TargetDigest) != intent.TargetDigest)) || len(intent.LastError) > 128 {
+	if intent.RequiresSnapshot != (intent.TargetDigest != "") || (intent.TargetDigest != "" && (!validDigest(intent.TargetDigest) || strings.ToLower(intent.TargetDigest) != intent.TargetDigest)) || !validSnapshotLabel(intent.SnapshotLabel) || (!intent.RequiresSnapshot && intent.SnapshotLabel != "") || len(intent.LastError) > 128 {
 		return errors.New("invalid Mihomo apply journal metadata")
 	}
-	if intent.PreviousSHA256 == "" {
+	if intent.PreviousMAC == "" {
 		if intent.BackupPath != "" {
 			return errors.New("invalid Mihomo apply journal backup")
 		}
 		return nil
 	}
-	if !validSHA256(intent.PreviousSHA256) || intent.BackupPath == "" {
-		return errors.New("invalid Mihomo apply journal previous digest")
+	if !validConfigMAC(intent.PreviousMAC) || intent.BackupPath == "" {
+		return errors.New("invalid Mihomo apply journal previous MAC")
 	}
 	backupPath, err := filepath.Abs(intent.BackupPath)
 	if err != nil || filepath.Dir(backupPath) != backupDir || filepath.Clean(backupPath) == filepath.Clean(configPath) {
@@ -515,13 +577,18 @@ func validatePending(intent PendingApply, configPath, backupDir string) error {
 		return errors.New("invalid Mihomo apply journal backup name")
 	}
 	body, err := readRestrictedConfig(backupPath, backupDir)
-	if err != nil || configSHA256(body) != intent.PreviousSHA256 {
+	if err != nil || !matchingConfigMAC(a.configMAC(body), intent.PreviousMAC) {
 		return errors.New("Mihomo apply journal backup integrity check failed")
 	}
 	return nil
 }
 
 func (a *Applier) writePendingUnlocked(backupDir string, intent PendingApply) error {
+	journalMAC, err := a.pendingMAC(intent)
+	if err != nil {
+		return err
+	}
+	intent.JournalMAC = hex.EncodeToString(journalMAC)
 	body, err := json.Marshal(intent)
 	if err != nil {
 		return err
@@ -684,12 +751,72 @@ func copyFile(source, destination string) error {
 	return syncDirectory(filepath.Dir(destinationPath))
 }
 
-func configSHA256(body []byte) string {
-	digest := sha256.Sum256(body)
-	return hex.EncodeToString(digest[:])
+func (a *Applier) requireIntegrityKey() error {
+	if len(a.IntegrityKey) < sha256.Size {
+		return fmt.Errorf("%w: Mihomo apply integrity key must contain at least 32 bytes", ErrApplyFailed)
+	}
+	return nil
 }
 
-func validSHA256(value string) bool {
+func (a *Applier) configMAC(body []byte) string {
+	mac := hmac.New(sha256.New, a.IntegrityKey)
+	_, _ = mac.Write([]byte(applyConfigMACDomain))
+	_, _ = mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (a *Applier) pendingMAC(intent PendingApply) ([]byte, error) {
+	if err := a.requireIntegrityKey(); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(pendingApplyMACPayload{
+		Version:          intent.Version,
+		ID:               intent.ID,
+		OperationID:      intent.OperationID,
+		OperationKind:    intent.OperationKind,
+		TargetMAC:        intent.TargetMAC,
+		PreviousMAC:      intent.PreviousMAC,
+		TargetDigest:     intent.TargetDigest,
+		SnapshotLabel:    intent.SnapshotLabel,
+		RequiresSnapshot: intent.RequiresSnapshot,
+		BackupPath:       intent.BackupPath,
+		Phase:            intent.Phase,
+		LastError:        intent.LastError,
+		CreatedAt:        intent.CreatedAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(sha256.New, a.IntegrityKey)
+	_, _ = mac.Write([]byte(applyJournalMACDomain))
+	_, _ = mac.Write(payload)
+	return mac.Sum(nil), nil
+}
+
+func (a *Applier) verifyPendingMAC(intent PendingApply) error {
+	expected, err := a.pendingMAC(intent)
+	if err != nil {
+		return err
+	}
+	actual := make([]byte, sha256.Size)
+	decoded, decodeErr := hex.DecodeString(intent.JournalMAC)
+	validEncoding := decodeErr == nil && len(decoded) == sha256.Size && strings.ToLower(intent.JournalMAC) == intent.JournalMAC
+	if validEncoding {
+		copy(actual, decoded)
+	}
+	if !hmac.Equal(expected, actual) || !validEncoding {
+		return errors.New("Mihomo apply journal authentication failed")
+	}
+	return nil
+}
+
+func matchingConfigMAC(left, right string) bool {
+	leftBody, leftErr := hex.DecodeString(left)
+	rightBody, rightErr := hex.DecodeString(right)
+	return leftErr == nil && rightErr == nil && hmac.Equal(leftBody, rightBody)
+}
+
+func validConfigMAC(value string) bool {
 	if len(value) != sha256.Size*2 || strings.ToLower(value) != value {
 		return false
 	}
@@ -703,6 +830,18 @@ func validJournalValue(value string) bool {
 	}
 	for _, char := range value {
 		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '.' && char != '_' && char != '-' && char != ':' {
+			return false
+		}
+	}
+	return true
+}
+
+func validSnapshotLabel(value string) bool {
+	if len(value) > applySnapshotLabelLimit || strings.TrimSpace(value) != value || !utf8.ValidString(value) {
+		return false
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) {
 			return false
 		}
 	}

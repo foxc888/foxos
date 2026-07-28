@@ -63,6 +63,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	mihomoApplyIntegrityKey, err := mihomo.NewApplyIntegrityKey([]byte(runtimeConfig.ConfirmationKey))
+	if err != nil {
+		log.Fatal(err)
+	}
 	recovery, err := upgrade.RecoverDatabase(*databasePath, runtimeConfig.UpgradeStatePath, filepath.Join(runtimeConfig.BackupDir, "upgrade"), version, sqlite.CurrentSchemaVersion())
 	if err != nil {
 		log.Fatal(err)
@@ -166,7 +170,7 @@ func main() {
 				DataDir:    filepath.Dir(runtimeConfig.Mihomo.BaseConfigPath),
 			},
 		}
-		mihomoApplier = &mihomo.Applier{ConfigPath: runtimeConfig.Mihomo.LocalConfigPath, BackupDir: runtimeConfig.Mihomo.BackupDir, Runtime: validatedRuntime}
+		mihomoApplier = &mihomo.Applier{ConfigPath: runtimeConfig.Mihomo.LocalConfigPath, BackupDir: runtimeConfig.Mihomo.BackupDir, Runtime: validatedRuntime, IntegrityKey: mihomoApplyIntegrityKey}
 		configuredMihomoService = &mihomo.Service{Store: store, Applier: mihomoApplier, BaseConfig: baseConfig, DigestKey: []byte(runtimeConfig.ConfirmationKey), ProtectedAddresses: runtimeConfig.Site.ProtectedAddresses()}
 		if recovery.Quiesce {
 			if _, found, err := mihomoApplier.Pending(); err != nil || found {
