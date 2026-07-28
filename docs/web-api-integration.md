@@ -22,14 +22,18 @@ Web UI 只显示 API 返回或浏览器实际完成的检查，不内置会被�
 
 单个接口失败只影响对应区域。旧数据可以在 `stale` 状态下供排障参考，但不能显示为实时或在线。每个资源区域显示 API 来源、最后成功时间和错误。
 
-## Token 生命周期
+## 浏览器会话生命周期
 
-设置页要求至少 32 字符的 `FOXOS_API_TOKEN`。Token：
+设置页要求至少 32 字符的 `FOXOS_API_TOKEN`。登录流程：
 
-- 只保存在当前 JavaScript 页面内存。
-- 不写入 URL、SQLite、`localStorage` 或 `sessionStorage`。
-- 刷新或关闭标签页后清除，需要重新输入。
+- 管理 Token 只发送到同源 `POST /api/v1/session`，成功后立即从 JavaScript 内存清除。
+- 服务端生成随机会话值并放入 HttpOnly、SameSite=Strict Cookie；HTTPS 模式使用 Secure `__Host-` Cookie。Cookie 不包含管理 Token。
+- CSRF 值只保存在页面内存，写请求必须同时满足同源检查和 `X-FoxOS-CSRF`；刷新后通过 Cookie 回读新的页面内存状态。
+- 会话有效期 8 小时，只保存在 FoxOS 进程内；服务重启、过期或设置页主动退出会使它失效。
+- 管理 Token 和 CSRF 不写入 URL、SQLite、`localStorage` 或 `sessionStorage`。
 - 旧版本遗留在 `sessionStorage` 的值只迁移一次，并同时删除两个 Web Storage 中的旧键。
+
+非浏览器自动化仍可直接使用 Bearer Token。当前没有 JWT、多用户、角色或跨实例会话共享。
 
 生产部署中 Web 与 API 通过 `https://<site-hostname>` 同源，业务请求使用相对路径 `/api/v1/...`；LAN HTTP 只跳转，内部 8090 仅 loopback。Vite 开发服务器只把 `/api` 转发到本地开发后端 `127.0.0.1:8090`。
 
@@ -79,4 +83,4 @@ Web UI 只显示 API 返回或浏览器实际完成的检查，不内置会被�
 
 ## 自动化覆盖
 
-Vitest 覆盖站点清单、API 并行降级、Token 生命周期、状态转换、错误引用、策略状态与 Dialog。Playwright 在 1440x900、834x1112、390x844 项目中逐元素检查裁切、桌面/移动交互、键盘、焦点锁定、危险确认、Mihomo 发布成功和回滚。
+Vitest 覆盖站点清单、API 并行降级、浏览器会话/CSRF、状态转换、错误引用、订阅删除策略、策略状态与 Dialog。Playwright 在 1440x900、834x1112、390x844 项目中逐元素检查裁切、桌面/移动交互、键盘、焦点锁定、危险确认、Mihomo 发布成功和回滚。

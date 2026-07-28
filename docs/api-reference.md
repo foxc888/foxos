@@ -1,6 +1,6 @@
 # FoxOS API 参考
 
-所有响应使用 JSON。除健康和站点清单接口外，请求必须携带：
+所有响应使用 JSON。非浏览器客户端访问受保护接口时必须携带：
 
 ```http
 Authorization: Bearer <FOXOS_API_TOKEN>
@@ -8,6 +8,8 @@ Accept: application/json
 ```
 
 写请求使用 `Content-Type: application/json`。服务端限制请求体大小；API 响应设置 `Cache-Control: no-store`。
+
+Web UI 使用同源会话：`POST /api/v1/session` 以管理 Token 换取 8 小时 HttpOnly Cookie 和页面内存 CSRF；`GET /api/v1/session` 回读当前会话，`DELETE /api/v1/session` 主动退出。Cookie 写请求还必须携带 `X-FoxOS-CSRF` 并通过 Origin/Sec-Fetch-Site 检查。会话只存在当前进程，不是 JWT、多用户或持久登录。
 
 ## 健康检查
 
@@ -19,6 +21,16 @@ Accept: application/json
 | GET | `/api/v1/site/ca` | 否 | HTTPS 启用时下载本地 CA PEM |
 
 未配置的可选依赖在 ready 中显示 `not_configured`，不会冒充 `ok`；已配置但不可达会返回 HTTP 503。
+
+## 升级控制
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/system/upgrade/checkpoint` | 排空 HTTP mutation 与完整任务 handler，冻结 SQLite 写入并创建兼容快照 |
+| POST | `/api/v1/system/upgrade/promoted` | 幂等记录 promoted 审计和终态，再解除写冻结 |
+| POST | `/api/v1/system/upgrade/aborted` | 仅允许检查点源版本在 schema 未变化或已恢复时幂等取消，再解除写冻结 |
+
+三个请求都使用 `{"operationId":"<release-id>"}`，需要 Bearer 认证，并在响应中回显同一 `operationId` 与持久状态。checkpoint 后 GET 和这三个控制端点仍可用，其他 HTTP 写请求返回 503 `upgrade_maintenance`；任务 Submit/Retry、worker claim 和 SQLite mutator 同样失败关闭。`aborted` 在旧版本已自动恢复数据库时可返回 `restored`，两者都表示该 operation 不再持有写冻结。调用方必须按同一 operation 重试不确定响应；promoted 无法确认时不得自动回滚已经运行的新槽。
 
 ## 节点与代理组
 
@@ -122,7 +134,7 @@ DHCP 范围首尾计入容量；扩容请求提交目标容量和完整拟议范
 | POST | `/api/v1/mihomo/snapshots/{id}/restore/plan` | 生成恢复计划 |
 | POST | `/api/v1/mihomo/snapshots/{id}/restore` | 提交恢复任务 |
 
-preview 以可信 base YAML 为基线，结构化合并 FoxOS 管理字段并保留 Controller、secret、bind、UI、TUN、DNS 和日志；首次 mixed port 默认 7890。配置 digest 使用确认密钥保护的领域化 HMAC-SHA256，与草稿共同绑定确认令牌，不暴露密码或 UUID 的裸摘要。apply 再次生成并比较 digest，调用真实 Mihomo 二进制校验，然后快照、原子替换、热重载和健康检查。失败时通过仍可访问的 Controller 恢复旧文件；回滚失败单独分类。
+preview 以可信 base YAML 为基线，结构化合并 FoxOS 管理字段并保留 Controller、secret、bind、UI、TUN、DNS 和日志；首次 mixed port 默认 7890。配置 digest 使用确认密钥保护的领域化 HMAC-SHA256，与草稿共同绑定确认令牌，不暴露密码或 UUID 的裸摘要。apply 再次生成并比较 digest，调用真实 Mihomo 二进制校验，持久化操作 journal 后原子替换、热重载、健康检查，再保存 SQLite 快照并按 ID、HMAC digest 和完整 body 回读。只有回读一致才清 journal；保存结果未知时失败关闭并由下次启动对账，不会立即覆盖运行态。明确未提交时才恢复旧文件，且旧文件原子恢复、reload、health 和 digest 回读全部成功后才报告 `ROLLED_BACK`。
 
 草稿规则会与 SQLite 中的节点、代理组和设备策略一起生成。保存节点或组本身不会改变运行配置，必须单独 preview/apply。
 
@@ -133,7 +145,7 @@ preview 以可信 base YAML 为基线，结构化合并 FoxOS 管理字段并保
 | GET | `/api/v1/jobs/{id}` | 状态、进度、尝试次数和脱敏错误分类 |
 | POST | `/api/v1/jobs/{id}/retry` | 仅重试 `FAILED` 或 `ROLLED_BACK` |
 
-任务状态：`QUEUED`、`RUNNING`、`VERIFYING`、`SUCCEEDED`、`FAILED`、`ROLLED_BACK`。创建备份可通过 `Idempotency-Key` 指定幂等键；其他高风险任务使用确认令牌摘要作为幂等键。重启恢复按任务类型和阶段回读，不会统一重新执行中断任务。
+任务状态：`QUEUED`、`RUNNING`、`VERIFYING`、`SUCCEEDED`、`FAILED`、`ROLLED_BACK`。创建备份可通过 `Idempotency-Key` 指定幂等键；其他高风险任务使用确认令牌摘要作为幂等键。启动会按 kind 扫描全部可恢复任务，不受列表 API 的 500 条展示上限影响；所有 kind 恢复并注册成功前 worker、监控、调度和 HTTP 监听都不会启动。重启恢复按任务类型和阶段回读，不会统一重新执行中断任务。
 
 ## 订阅
 
@@ -145,9 +157,9 @@ preview 以可信 base YAML 为基线，结构化合并 FoxOS 管理字段并保
 | POST | `/api/v1/subscriptions/{id}/preview` | 抓取、解析、去重并返回变更计划 |
 | POST | `/api/v1/subscriptions/{id}/update` | 提交确认后的更新任务 |
 | POST | `/api/v1/subscriptions/{id}/delete/plan` | 返回关联节点范围与令牌 |
-| POST | `/api/v1/subscriptions/{id}/delete` | 删除订阅和其自有节点 |
+| POST | `/api/v1/subscriptions/{id}/delete` | 按已签名的 `detach` 或 `cascade` 计划删除 |
 
-抓取仅允许 HTTPS 443、无 URL 凭据和公共 IP；每次连接及重定向重新解析，最多三次重定向、2 MiB、15 秒。失败会保留上一份节点集和错误时间。
+抓取仅允许 HTTPS 443 且无 URL 凭据，默认只允许公共 IP；管理员可以用 `FOXOS_SUBSCRIPTION_PRIVATE_CIDRS` 精确开放 RFC1918/ULA 前缀，但 loopback、link-local、multicast、unspecified 和 metadata 类地址始终拒绝。每次连接及重定向重新解析，最多三次重定向、2 MiB、15 秒。失败会保留上一份节点集和错误时间。
 
 ## 告警、备份与审计
 
@@ -162,15 +174,16 @@ preview 以可信 base YAML 为基线，结构化合并 FoxOS 管理字段并保
 
 备份默认包含 SQLite，配置后同时包含 Mihomo YAML；manifest 保存 SHA-256 并默认保留 20 份。恢复不会用旧备份覆盖任务、确认令牌和审计记录。
 
-审计记录操作者模型（当前为 `api-token`）、来源 IP、目标、变更摘要、关联任务、结果和错误分类。不会保存 Authorization、确认令牌、RouterOS/Mihomo 凭据或节点密钥。
+审计记录操作者模型（`api-token` 或 `browser-session`）、来源 IP、目标、变更摘要、关联任务、结果和错误分类。不会保存 Authorization、Cookie、CSRF、确认令牌、RouterOS/Mihomo 凭据或节点密钥。
 
 ## 错误与安全语义
 
 错误响应包含稳定的 `error` 分类与适合 UI 展示的 `message`。常见状态：
 
 - 400：JSON、limit、幂等键或请求格式错误。
-- 401：Bearer Token 缺失或不匹配。
-- 426：HTTPS 模式下尝试通过普通 HTTP 发送 Bearer 请求。
+- 401：Bearer Token 或浏览器会话缺失、过期或不匹配。
+- 403：浏览器写请求的同源或 CSRF 校验失败。
+- 426：生产 HTTPS 模式下通过普通 HTTP 访问受保护接口。
 - 404：资源不存在。
 - 409：计划过期、引用冲突、确认缺失/重放、失败后已回滚。
 - 422：领域校验、受保护目标或订阅 URL 被拒绝。

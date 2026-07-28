@@ -6,13 +6,13 @@
 
 记录内容包括：
 
-- actor（当前认证模型固定为 `api-token`）与请求来源 IP。
+- actor（`api-token`、`browser-session` 或未认证安全事件）与请求来源 IP。
 - 动作、目标、RouterOS 方法/路径摘要。
 - 设备策略 before/after、订阅增删改数量、备份/Mihomo digest。
 - 脱敏且最大 64 KiB 的 Mihomo Diff。
 - job ID、结果、rolledBack 和稳定 errorClass。
 
-不保存 Authorization、确认令牌、RouterOS/Mihomo 密钥、节点密码/UUID、订阅原始正文或完整分享链接。
+不保存 Authorization、Cookie、CSRF、确认令牌、RouterOS/Mihomo 密钥、节点密码/UUID、订阅原始正文或完整分享链接。
 
 `GET /api/v1/audit-events?limit=100` 接受 1 到 500。
 

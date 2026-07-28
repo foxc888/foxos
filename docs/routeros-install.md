@@ -6,8 +6,8 @@
 
 - RouterOS 7.21+，x86_64 CPU 对应 `architecture-name=x86`。
 - 与 RouterOS 完全同版本的 x86 `container` package。
-- 由设备操作者在物理控制台确认并启用 `container=yes`。
-- 已审核 `site-config.rsc`；其中管理桥、RouterOS 地址和存储已存在且唯一。
+- 由设备操作者按 MikroTik 官方流程确认并启用 `container=yes` 与 `scheduler=yes`；两项 device-mode 更新都可能要求物理确认，FoxOS 脚本不会代为修改。
+- 已从不可变 `site-config.example.rsc` 生成、审核并独立封存 `site-config.rsc`；其中管理桥、RouterOS 地址和存储已存在且唯一。
 - 清单存储在上传后至少有 512 MiB 可用。
 - 清单中的 Mihomo、MosDNS、FoxOS 地址未被占用。
 
@@ -15,7 +15,7 @@
 
 ## 发布资产
 
-Core CI 每个提交生成 `foxos-full-amd64-<sha>.tar.gz` 与外部 `.sha256`。包内包含三张 RouterOS 本地导入镜像、组件 provenance lock、完整 Mihomo/MosDNS 配置、两阶段安装、升级、回滚、只读预检、计划、说明和内部 `SHA256SUMS`。
+Core CI 每个提交生成 `foxos-full-amd64-<sha>.tar.gz` 与外部 `.sha256`。包内包含三张 RouterOS 本地导入镜像、组件 provenance lock、完整 Mihomo/MosDNS 配置、不可变站点模板与封存工具、唯一 full-install 入口、版本化升级、回滚、确认式清理/卸载、只读检查和内部 `SHA256SUMS`。可编辑 `site-config.rsc`、密钥示例和旧 installer 不在包内。
 
 镜像已经转换为 RouterOS 兼容的单层、未压缩 Docker v1 tar。不能把 GitHub ZIP、外层 `.tar.gz` 或 OCI layout 直接交给 `/container/add file=`。
 
@@ -23,18 +23,17 @@ FoxOS、Mihomo、MosDNS 三张 amd64 输入镜像在 workflow 内从固定源码
 
 ## 安装顺序
 
-1. 工作站验证两层 checksum。
-2. 编辑并审核 `site-config.rsc`，上传解压目录内容到清单存储根。
-3. 保存 RouterOS export 与 binary backup。
-4. 每个步骤先 import `site-config.rsc`，再 import `preflight.rsc`，只读。
-5. 重新加载清单，再 import `foxos-plan.rsc`，只读。
-6. 操作者明确确认精确影响与回滚。
-7. import `disk1/foxos-full-install.rsc`。
-8. 等三个容器均为 stopped。
-9. import `disk1/foxos-start-all.rsc`。
-10. 保存首次凭据，导入并信任生成的本地 CA，运行 `foxos-verify.rsc`。
-11. 需要 hostname 时单独执行 DNS plan、精确确认和 apply；不启用或接管 DNS/DHCP。
-12. 完成 live/ready、页面、依赖和测试设备实体验收。
+1. 工作站验证两层 checksum；复制模板为 `site-config.rsc`，编辑后运行 `seal-site-config.sh` 生成独立 `.sha512`。
+2. 上传解压目录、站点清单及其摘要到清单存储根。
+3. 保存脱敏 RouterOS export 和带唯一离线密码、`aes-sha256` 的 binary backup。
+4. import 包内固定的 `load-site-config.rsc`，由它校验清单摘要和赋值白名单，再运行 `foxos-plan.rsc`；plan 自动执行 preflight 与共享 inspector，只读输出逐项 `CREATE/REUSE/FAIL` 和摘要。不得直接 import 可编辑的 `site-config.rsc`。
+5. 操作者核对影响、备份和回滚路径，把计划摘要原样设置为确认值。
+6. import 唯一正式入口 `disk1/foxos-full-install.rsc`；它在首次写入前重新回读并拒绝过期计划。
+7. 等三个容器均为 stopped，再运行可重入 `foxos-start-all.rsc`；此时 autostart 仍关闭。
+8. 导入并信任生成的本地 CA，运行 `foxos-verify.rsc`；全部健康门禁通过后才启用 owned 顺序启动 scheduler。三个容器始终保持 `start-on-boot=no`。
+9. 从 `foxos-env` 安全读取一次 API Token，保存到离线密码库并登录 HTTPS 管理页。
+10. 需要 hostname 时单独执行 DNS plan、精确确认和 apply；不启用或接管 DNS/DHCP。
+11. 完成 live/ready、页面、依赖和测试设备实体验收。
 
 ## 持久数据
 
@@ -45,10 +44,10 @@ FoxOS、Mihomo、MosDNS 三张 amd64 输入镜像在 workflow 内从固定源码
 | `<storage>/foxos-data` | `/data` | SQLite、升级状态、本地 CA/TLS |
 | `<storage>/foxos-backups` | `/backups` | Mihomo/FoxOS/升级检查点备份 |
 
-升级只切换 FoxOS root-dir，复用上述数据。不要在新版本验收前删除旧 root-dir、旧镜像或 rollback 槽位。
+升级使用构建时绑定 release ID 的版本化 FoxOS root-dir，复用上述数据。不要在新版本验收和回滚演练前归档 rollback；归档只把旧槽标记为 retained，不删除 root-dir、镜像或检查点。
 
 ## DNS 和所有权边界
 
 安装脚本不修改 DNS、DHCP、默认路由、NAT、Mangle、FastTrack 或防火墙，也不创建透明代理。MosDNS 保持只读接入。可选 DNS 脚本只添加一条精确确认的 owned A 记录。所有脚本仅复用匹配 `foxos:` comment/marker 的资源，遇到同名用户资源则停止。
 
-当前仓库没有提供自动卸载脚本。卸载或 RouterOS binary restore 都是破坏性操作，必须先列出精确目标、备份和恢复路径，并再次由设备操作者确认。
+`uninstall-plan.rsc` 只读列出精确 owned 资源并生成 SHA-512；`uninstall-apply.rsc` 仅在摘要确认且前态未变化时停止并删除这些 RouterOS 资源。默认保留全部数据、镜像、配置、版本化 root-dir、备份、站点清单和本地 CA。RouterOS binary restore 仍是会重启并覆盖设备配置的独立破坏性操作，只能在维护窗口再次确认。

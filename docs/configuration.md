@@ -9,11 +9,13 @@ FoxOS 只从进程环境读取凭据、站点和依赖端点。真实 Token、�
 | `FOXOS_API_TOKEN` | 至少 32 字符，无首尾空白 |
 | `FOXOS_CONFIRMATION_KEY` | 至少 32 字符，无首尾空白，必须与 API Token 不同 |
 
-API Token 用于 Bearer 认证；确认密钥用于签署高风险计划，并通过带领域前缀的 HMAC-SHA256 保护对外可见的 Mihomo 配置/快照 digest，避免节点密码或 UUID 被裸摘要用于离线猜测。任一缺失或不合格时服务拒绝启动。不要在 Mihomo 任务运行中轮换确认密钥；轮换会使旧确认令牌、运行中任务 digest 和旧发布快照无法验证，必须在维护窗口重新预览并发布配置生成新快照。
+API Token 用于非浏览器 Bearer 认证，并由 Web UI 在同源登录时一次性换取浏览器会话；确认密钥用于签署高风险计划，并通过带领域前缀的 HMAC-SHA256 保护对外可见的 Mihomo 配置/快照 digest，避免节点密码或 UUID 被裸摘要用于离线猜测。任一缺失或不合格时服务拒绝启动。不要在 Mihomo 任务运行中轮换确认密钥；轮换会使旧确认令牌、运行中任务 digest 和旧发布快照无法验证，必须在维护窗口重新预览并发布配置生成新快照。
+
+`FOXOS_ENV` 只接受 `development` 或 `production`。未设置时仅允许 HTTP 绑定 loopback；正式包固定为 `production`，并强制启用 HTTPS、使用持久绝对 backup/TLS 路径和非临时 SQLite 文件；不满足时启动失败。
 
 ## 站点清单
 
-RouterOS 全量包由 `site-config.rsc` 生成以下字段。进程环境必须八项全设或全不设；全不设只用于本地开发并采用默认样例。
+RouterOS 全量包提供不可变 `site-config.example.rsc`；操作者复制为唯一 `site-config.rsc`，编辑后用 `seal-site-config.sh` 生成独立 SHA-512。可编辑清单不得直接 import；固定的 `load-site-config.rsc` 会先校验摘要与 11 项赋值白名单，preflight 再核对当前内容与 loader 证明，然后由安装器生成以下环境。八项 `FOXOS_SITE_*` 必须全设或全不设；全不设只用于本地开发并采用默认样例。
 
 | 变量 | 默认样例 |
 |---|---|
@@ -76,7 +78,7 @@ RouterOS 全量包设置 `FOXOS_HTTPS_ENABLED=true`。可选覆盖仅用于受�
 
 首次启动生成 10 年本地 CA 和 397 天叶证书；叶证书剩余不足 30 天时由同一 CA 续签。CA 不会自动轮换或自动分发信任。LAN HTTP 只跳转，Bearer API 要求真实 HTTPS；内部反向代理使用每进程随机凭据，客户端转发头不能代替它。
 
-本地开发未设置 `FOXOS_HTTPS_ENABLED` 时可使用 `-listen :8090` 普通 HTTP，但不得把这种开发模式用于承载 LAN Bearer Token。
+本地开发未设置 `FOXOS_HTTPS_ENABLED` 时默认只监听 `127.0.0.1:8090`。如需显式开发环境，设置 `FOXOS_ENV=development`；即使如此也应保持 `-listen 127.0.0.1:8090`，不得用普通 HTTP 在 LAN 传输 Bearer Token。
 
 ## 端点安全
 
@@ -88,8 +90,10 @@ RouterOS、Mihomo、Mihomo proxy 和 MosDNS URL：
 - 客户端禁用重定向并设置超时。
 - HTTPS 使用系统信任链，不跳过证书验证。
 
-全量 RouterOS 安装器维护精确 25 键 `foxos-env` allowlist。已有 marker 的安装可补齐缺项，但未知额外键或固定值不一致会失败关闭，不自动覆盖。
+订阅抓取默认只允许 HTTPS 443 公共目标。`FOXOS_SUBSCRIPTION_PRIVATE_CIDRS` 可设置最多 32 个逗号分隔、无空格、canonical 的 RFC1918 或 IPv6 ULA 前缀；它只开放明确网段，不能开放 loopback、link-local、multicast、unspecified 或 metadata 类地址。连接与每次重定向都会重新解析并重新检查，以拒绝 DNS rebinding。
+
+全量 RouterOS 安装器维护精确 27 键 `foxos-env` 基线；站点清单配置非空私网订阅 allowlist 时为 28 键。已有 marker 的安装可补齐缺项，但未知额外键或固定值不一致会失败关闭，不自动覆盖。
 
 ## 浏览器 Token
 
-设置页只把 API Token 保存在当前页面内存，刷新或关闭后清除。不要依赖 Web Storage 持久登录；当前版本没有多用户、角色或服务端会话。
+设置页把 API Token 发送到同源 session 端点后立即从页面内存清除。服务端签发 8 小时随机会话：生产使用 Secure、HttpOnly、SameSite=Strict、`__Host-` Cookie，CSRF 值只在页面内存；刷新会用 Cookie 恢复，服务重启、过期或主动退出后失效。管理 Token、会话值和 CSRF 都不写入 Web Storage。当前版本没有 JWT、多用户、角色、持久会话或跨实例共享。
