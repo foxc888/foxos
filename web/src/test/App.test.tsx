@@ -297,6 +297,10 @@ describe("App", () => {
     const alias = await screen.findByRole("textbox", { name: "别名" });
     fireEvent.change(alias, { target: { value: "Office laptop" } });
     fireEvent.change(screen.getByRole("textbox", { name: "标签" }), { target: { value: "work, trusted" } });
+    fireEvent.click(screen.getByRole("button", { name: "刷新设备" }));
+    expect(await screen.findByText("全部数据源刷新完成")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "别名" })).toHaveValue("Office laptop");
+    expect(screen.getByRole("textbox", { name: "标签" })).toHaveValue("work, trusted");
     fireEvent.click(screen.getByRole("button", { name: "保存画像" }));
     await waitFor(() => expect(savedBody).toEqual({ alias: "Office laptop", vendor: "Framework", tags: ["work", "trusted"] }));
     expect(await screen.findByText(/设备画像已保存到 SQLite 并写入审计；RouterOS 未修改/)).toBeInTheDocument();

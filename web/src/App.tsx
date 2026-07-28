@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -1044,6 +1044,8 @@ function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceI
   const [alias, setAlias] = useState("");
   const [vendor, setVendor] = useState("");
   const [tagsText, setTagsText] = useState("");
+  const [metadataDirty, setMetadataDirty] = useState(false);
+  const metadataDeviceId = useRef<number | undefined>(undefined);
   const [metadataBusy, setMetadataBusy] = useState(false);
   const [history, setHistory] = useState<DevicePresenceEvent[]>([]);
   const [inlineDrafts, setInlineDrafts] = useState<Record<number, { egress: EgressType; targetId: string }>>({});
@@ -1061,16 +1063,24 @@ function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceI
   const protectedAddressSet = new Set(protectedAddresses);
   const managementProtected = Boolean(selected && protectedAddressSet.has(selected.ip));
   const canPrepareEgress = Boolean(siteReady && selected && live && policyResource.phase === "live" && capabilitiesResource.phase === "live" && selectedCapability?.available && selected.fixed && (selectedPolicy?.dhcpServer || selected.dhcpServer) && !managementProtected && targetSourceLive && (!targetRequired || targetId));
+  const selectedTagsText = selected?.tags.join(", ") ?? "";
 
   useEffect(() => {
     setEgress(selectedPolicy?.egress ?? "direct");
     setTargetId(selectedPolicy?.targetId ?? "");
   }, [selected?.id, selectedPolicy?.id, selectedPolicy?.egress, selectedPolicy?.targetId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const selectionChanged = metadataDeviceId.current !== selected?.id;
+    if (!selectionChanged && metadataDirty) return;
+    metadataDeviceId.current = selected?.id;
     setAlias(selected?.alias ?? "");
     setVendor(selected?.vendor ?? "");
-    setTagsText(selected?.tags.join(", ") ?? "");
+    setTagsText(selectedTagsText);
+    if (metadataDirty) setMetadataDirty(false);
+  }, [metadataDirty, selected?.alias, selected?.id, selected?.vendor, selectedTagsText]);
+
+  useEffect(() => {
     setHistory([]);
     if (!selected?.profileTracked || inventoryResource.phase !== "live") {
       setHistoryPhase("unavailable");
@@ -1097,6 +1107,7 @@ function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceI
       setAlias(saved.alias ?? "");
       setVendor(saved.vendor ?? "");
       setTagsText(saved.tags.join(", "));
+      setMetadataDirty(false);
       setDevices((items) => items.map((item) => item.id === selected.id ? {
         ...item,
         alias: saved.alias,
@@ -1247,9 +1258,9 @@ function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceI
               </DetailSection>
               <DetailSection title="设备画像">
                 <div className="profile-form">
-                  <label className="field"><span>别名</span><input disabled={!selected.profileTracked || metadataBusy} maxLength={128} onChange={(event) => setAlias(event.target.value)} value={alias} /></label>
-                  <label className="field"><span>厂商</span><input disabled={!selected.profileTracked || metadataBusy} maxLength={128} onChange={(event) => setVendor(event.target.value)} value={vendor} /></label>
-                  <label className="field full"><span>标签</span><input disabled={!selected.profileTracked || metadataBusy} onChange={(event) => setTagsText(event.target.value)} placeholder="work, trusted" value={tagsText} /></label>
+                  <label className="field"><span>别名</span><input disabled={!selected.profileTracked || metadataBusy} maxLength={128} onChange={(event) => { setAlias(event.target.value); setMetadataDirty(true); }} value={alias} /></label>
+                  <label className="field"><span>厂商</span><input disabled={!selected.profileTracked || metadataBusy} maxLength={128} onChange={(event) => { setVendor(event.target.value); setMetadataDirty(true); }} value={vendor} /></label>
+                  <label className="field full"><span>标签</span><input disabled={!selected.profileTracked || metadataBusy} onChange={(event) => { setTagsText(event.target.value); setMetadataDirty(true); }} placeholder="work, trusted" value={tagsText} /></label>
                   <Button disabled={!selected.profileTracked || inventoryResource.phase !== "live" || metadataBusy} icon={Save} onClick={() => void saveMetadata()} variant="secondary">{metadataBusy ? "保存中…" : "保存画像"}</Button>
                 </div>
                 {!selected.profileTracked ? <div className="warning-note"><AlertTriangle aria-hidden="true" size={16} />SQLite 设备库存不可用，画像编辑已禁用。</div> : null}
