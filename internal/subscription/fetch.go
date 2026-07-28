@@ -32,10 +32,11 @@ func (netResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr,
 }
 
 type Fetcher struct {
-	Resolver  Resolver
-	MaxBytes  int64
-	Timeout   time.Duration
-	UserAgent string
+	Resolver       Resolver
+	AllowedPrivate []netip.Prefix
+	MaxBytes       int64
+	Timeout        time.Duration
+	UserAgent      string
 }
 
 type Result struct {
@@ -46,6 +47,14 @@ type Result struct {
 }
 
 func ValidateURL(raw string) (*url.URL, error) {
+	return validateURL(raw, nil)
+}
+
+func (f Fetcher) ValidateURL(raw string) (*url.URL, error) {
+	return validateURL(raw, f.AllowedPrivate)
+}
+
+func validateURL(raw string, allowedPrivate []netip.Prefix) (*url.URL, error) {
 	if strings.TrimSpace(raw) != raw || raw == "" || len(raw) > 4096 {
 		return nil, ErrInvalidURL
 	}
@@ -57,7 +66,7 @@ func ValidateURL(raw string) (*url.URL, error) {
 	if host == "" || host == "localhost" || strings.HasSuffix(host, ".local") {
 		return nil, ErrBlockedURL
 	}
-	if ip := net.ParseIP(host); ip != nil && !isPublicIP(ip) {
+	if ip := net.ParseIP(host); ip != nil && !isAllowedSubscriptionIP(ip, allowedPrivate) {
 		return nil, ErrBlockedURL
 	}
 	if parsed.Scheme != "https" || (parsed.Port() != "" && parsed.Port() != "443") {
@@ -67,7 +76,7 @@ func ValidateURL(raw string) (*url.URL, error) {
 }
 
 func (f Fetcher) Fetch(ctx context.Context, raw string) (Result, error) {
-	parsed, err := ValidateURL(raw)
+	parsed, err := f.ValidateURL(raw)
 	if err != nil {
 		return Result{}, err
 	}
@@ -75,7 +84,7 @@ func (f Fetcher) Fetch(ctx context.Context, raw string) (Result, error) {
 	if resolver == nil {
 		resolver = netResolver{}
 	}
-	if err := validateResolvedHost(ctx, resolver, parsed.Hostname()); err != nil {
+	if _, err := resolveAllowedHost(ctx, resolver, parsed.Hostname(), f.AllowedPrivate); err != nil {
 		return Result{}, err
 	}
 	maxBytes := f.MaxBytes
@@ -87,20 +96,17 @@ func (f Fetcher) Fetch(ctx context.Context, raw string) (Result, error) {
 		timeout = 15 * time.Second
 	}
 	client := &http.Client{Timeout: timeout}
-	client.CheckRedirect = checkSubscriptionRedirect(resolver)
+	client.CheckRedirect = checkSubscriptionRedirect(resolver, f.AllowedPrivate)
 	client.Transport = &http.Transport{Proxy: nil, DialContext: func(dialCtx context.Context, network, address string) (net.Conn, error) {
 		host, port, splitErr := net.SplitHostPort(address)
 		if splitErr != nil {
 			return nil, splitErr
 		}
-		ips, lookupErr := resolver.LookupIPAddr(dialCtx, host)
+		ips, lookupErr := resolveAllowedHost(dialCtx, resolver, host, f.AllowedPrivate)
 		if lookupErr != nil {
 			return nil, lookupErr
 		}
 		for _, item := range ips {
-			if !isPublicIP(item.IP) {
-				continue
-			}
 			connection, dialErr := (&net.Dialer{Timeout: timeout}).DialContext(dialCtx, network, net.JoinHostPort(item.IP.String(), port))
 			if dialErr == nil {
 				return connection, nil
@@ -138,16 +144,16 @@ func (f Fetcher) Fetch(ctx context.Context, raw string) (Result, error) {
 	return Result{URL: response.Request.URL.String(), Body: body, Digest: fmt.Sprintf("%x", sum[:]), ContentType: response.Header.Get("Content-Type")}, nil
 }
 
-func checkSubscriptionRedirect(resolver Resolver) func(*http.Request, []*http.Request) error {
+func checkSubscriptionRedirect(resolver Resolver, allowedPrivate []netip.Prefix) func(*http.Request, []*http.Request) error {
 	return func(request *http.Request, via []*http.Request) error {
 		if len(via) > 3 {
 			return ErrRedirects
 		}
-		redirect, err := ValidateURL(request.URL.String())
+		redirect, err := validateURL(request.URL.String(), allowedPrivate)
 		if err != nil {
 			return err
 		}
-		if err := validateResolvedHost(request.Context(), resolver, redirect.Hostname()); err != nil {
+		if _, err := resolveAllowedHost(request.Context(), resolver, redirect.Hostname(), allowedPrivate); err != nil {
 			return err
 		}
 		return nil
@@ -155,22 +161,47 @@ func checkSubscriptionRedirect(resolver Resolver) func(*http.Request, []*http.Re
 }
 
 func validateResolvedHost(ctx context.Context, resolver Resolver, host string) error {
+	_, err := resolveAllowedHost(ctx, resolver, host, nil)
+	return err
+}
+
+func resolveAllowedHost(ctx context.Context, resolver Resolver, host string, allowedPrivate []netip.Prefix) ([]net.IPAddr, error) {
 	if ip := net.ParseIP(host); ip != nil {
-		if !isPublicIP(ip) {
-			return ErrBlockedURL
+		if !isAllowedSubscriptionIP(ip, allowedPrivate) {
+			return nil, ErrBlockedURL
 		}
-		return nil
+		return []net.IPAddr{{IP: ip}}, nil
 	}
 	addresses, err := resolver.LookupIPAddr(ctx, host)
 	if err != nil || len(addresses) == 0 {
-		return ErrBlockedURL
+		return nil, ErrBlockedURL
 	}
 	for _, address := range addresses {
-		if !isPublicIP(address.IP) {
-			return ErrBlockedURL
+		if !isAllowedSubscriptionIP(address.IP, allowedPrivate) {
+			return nil, ErrBlockedURL
 		}
 	}
-	return nil
+	return addresses, nil
+}
+
+func isAllowedSubscriptionIP(ip net.IP, allowedPrivate []netip.Prefix) bool {
+	if isPublicIP(ip) {
+		return true
+	}
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsMulticast() || address.IsUnspecified() {
+		return false
+	}
+	for _, prefix := range allowedPrivate {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 func isPublicIP(ip net.IP) bool {

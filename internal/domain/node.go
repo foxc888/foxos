@@ -54,6 +54,16 @@ func (n Node) Validate() error {
 		if (n.Type == "trojan" || n.Type == "hysteria2") && n.Password == "" {
 			return fmt.Errorf("%w: %s password is required", ErrInvalidNode, n.Type)
 		}
+	case "tuic":
+		if n.UUID == "" || n.Password == "" {
+			return fmt.Errorf("%w: tuic uuid and password are required", ErrInvalidNode)
+		}
+	case "wireguard":
+		privateKey, privateOK := n.Extra["private-key"].(string)
+		publicKey, publicOK := n.Extra["public-key"].(string)
+		if !privateOK || !publicOK || strings.TrimSpace(privateKey) == "" || strings.TrimSpace(publicKey) == "" {
+			return fmt.Errorf("%w: wireguard private-key and public-key are required", ErrInvalidNode)
+		}
 	default:
 		return fmt.Errorf("%w: unsupported type %q", ErrInvalidNode, n.Type)
 	}

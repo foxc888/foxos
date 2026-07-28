@@ -221,7 +221,12 @@ func renderNode(node domain.Node) map[string]any {
 	for key, value := range node.Extra {
 		out[key] = value
 	}
-	delete(out, "dialer-proxy")
+	for _, key := range [...]string{
+		"name", "type", "server", "port", "username", "password", "uuid", "cipher",
+		"network", "servername", "sni", "udp", "tls", "skip-cert-verify", "dialer-proxy",
+	} {
+		delete(out, key)
+	}
 	out["name"], out["type"], out["server"], out["port"] = node.Name, node.Type, node.Server, node.Port
 	if node.Username != "" {
 		out["username"] = node.Username
@@ -254,17 +259,42 @@ func renderNode(node domain.Node) map[string]any {
 	if node.SkipCertVerify {
 		out["skip-cert-verify"] = true
 	}
-	if node.Path != "" || node.Host != "" {
-		opts := map[string]any{}
-		if node.Path != "" {
-			opts["path"] = node.Path
-		}
-		if node.Host != "" {
-			opts["headers"] = map[string]any{"Host": node.Host}
-		}
-		out["ws-opts"] = opts
-	}
+	mergeWebSocketOptions(out, node.Path, node.Host)
 	return out
+}
+
+func mergeWebSocketOptions(out map[string]any, path, host string) {
+	opts := make(map[string]any)
+	if configured, ok := out["ws-opts"].(map[string]any); ok {
+		for key, value := range configured {
+			opts[key] = value
+		}
+	}
+	delete(opts, "path")
+
+	headers := make(map[string]any)
+	if configured, ok := opts["headers"].(map[string]any); ok {
+		for key, value := range configured {
+			if !strings.EqualFold(key, "host") {
+				headers[key] = value
+			}
+		}
+	}
+	delete(opts, "headers")
+	if host != "" {
+		headers["Host"] = host
+	}
+	if len(headers) > 0 {
+		opts["headers"] = headers
+	}
+	if path != "" {
+		opts["path"] = path
+	}
+	if len(opts) == 0 {
+		delete(out, "ws-opts")
+		return
+	}
+	out["ws-opts"] = opts
 }
 
 func renderChain(group domain.Group, nodes map[string]domain.Node) ([]map[string]any, map[string]any, error) {

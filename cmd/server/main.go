@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -31,17 +35,31 @@ import (
 
 var version = "dev"
 
+const defaultHTTPListen = "127.0.0.1:8090"
+
 func main() {
-	address := flag.String("listen", ":8090", "HTTP listen address")
+	address := flag.String("listen", defaultHTTPListen, "HTTP listen address")
 	staticDir := flag.String("static", "web/dist", "built frontend directory")
 	databasePath := flag.String("database", "data/foxos.db", "SQLite database path")
 	flag.Parse()
+	processContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	runtimeConfig, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := validateDatabasePath(*databasePath, runtimeConfig.Production); err != nil {
+		log.Fatal(err)
+	}
+	if err := validateHTTPListen(*address, runtimeConfig.HTTPS.Enabled, os.Getenv("FOXOS_ENV") != ""); err != nil {
+		log.Fatal(err)
+	}
 	signer, err := confirmation.New([]byte(runtimeConfig.ConfirmationKey))
+	if err != nil {
+		log.Fatal(err)
+	}
+	subscriptionIdentityHasher, err := subscription.NewIdentityHasher([]byte(runtimeConfig.ConfirmationKey))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -54,16 +72,21 @@ func main() {
 		log.Fatal(err)
 	}
 	defer store.Close()
-	if recovery.Restored {
-		if err := store.SaveAudit(context.Background(), domain.AuditEvent{ID: "upgrade-restored-" + recovery.Checkpoint.OperationID, Action: "upgrade.database_restored", TargetID: recovery.Checkpoint.OperationID, Outcome: domain.AuditSucceeded, Details: map[string]any{"sourceVersion": recovery.Checkpoint.SourceVersion, "restoredByVersion": recovery.Checkpoint.RestoredByVersion, "schemaVersion": recovery.Checkpoint.SchemaVersion}}); err != nil {
-			log.Fatal(err)
-		}
+	if err := upgrade.ReconcileAudits(context.Background(), store, recovery.Checkpoint); err != nil {
+		log.Fatal(err)
 	}
-	jobManager, err := task.New(context.Background(), store)
+	jobManager, err := task.NewPaused(processContext, store)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer jobManager.Close()
+	mutationGate := upgrade.NewMutationGate()
+	upgradeCoordinator := &upgrade.Coordinator{Requests: mutationGate, Tasks: jobManager, Database: store}
+	if recovery.Quiesce {
+		if _, err := upgradeCoordinator.Quiesce(processContext); err != nil {
+			log.Fatal(err)
+		}
+	}
 	app, err := api.New(store, runtimeConfig.APIToken)
 	if err != nil {
 		log.Fatal(err)
@@ -116,6 +139,7 @@ func main() {
 	}
 	var clash api.MihomoReader
 	var mihomoService api.MihomoService
+	var configuredMihomoService *mihomo.Service
 	var mihomoApplier *mihomo.Applier
 	var mihomoMonitor alerting.MihomoReader
 	var mihomoNodeProbe api.MihomoNodeProber
@@ -143,7 +167,15 @@ func main() {
 			},
 		}
 		mihomoApplier = &mihomo.Applier{ConfigPath: runtimeConfig.Mihomo.LocalConfigPath, BackupDir: runtimeConfig.Mihomo.BackupDir, Runtime: validatedRuntime}
-		mihomoService = &mihomo.Service{Store: store, Applier: mihomoApplier, BaseConfig: baseConfig, DigestKey: []byte(runtimeConfig.ConfirmationKey), ProtectedAddresses: runtimeConfig.Site.ProtectedAddresses()}
+		configuredMihomoService = &mihomo.Service{Store: store, Applier: mihomoApplier, BaseConfig: baseConfig, DigestKey: []byte(runtimeConfig.ConfirmationKey), ProtectedAddresses: runtimeConfig.Site.ProtectedAddresses()}
+		if recovery.Quiesce {
+			if _, found, err := mihomoApplier.Pending(); err != nil || found {
+				log.Fatalf("upgrade candidate cannot reconcile a pending Mihomo apply before promotion: found=%t err=%v", found, err)
+			}
+		} else if err := configuredMihomoService.RecoverPending(processContext); err != nil {
+			log.Fatalf("recover pending Mihomo apply: %v", err)
+		}
+		mihomoService = configuredMihomoService
 	}
 	if runtimeConfig.Mihomo.ProxyURL != "" {
 		mihomoExitProbe, err = mihomo.NewExitProbe(runtimeConfig.Mihomo.ProxyURL)
@@ -158,6 +190,36 @@ func main() {
 			log.Fatal(err)
 		}
 		mosdnsReader = client
+	}
+
+	subscriptionFetcher := subscription.Fetcher{UserAgent: "FoxOS subscription updater/1", AllowedPrivate: runtimeConfig.SubscriptionPrivateCIDRs}
+	subscriptionUpdater := subscription.Updater{Sources: store, Nodes: store, Atomic: store, Fetcher: subscriptionFetcher, IdentityHasher: subscriptionIdentityHasher}
+	backupService := backup.Service{Database: store, MihomoPath: runtimeConfig.Mihomo.LocalConfigPath, Directory: runtimeConfig.BackupDir, Retention: 20}
+	if mihomoApplier != nil {
+		backupService.MihomoRestore = func(ctx context.Context, body []byte) error {
+			_, err := mihomoApplier.Apply(ctx, body)
+			return err
+		}
+		backupService.MihomoHealthy = clash.Healthy
+	}
+	upgradeService := &upgrade.Service{Store: store, DatabasePath: *databasePath, StatePath: runtimeConfig.UpgradeStatePath, BackupDir: filepath.Join(runtimeConfig.BackupDir, "upgrade"), Version: version, Quiescer: upgradeCoordinator}
+	if err := registerMihomoJobs(jobManager, mihomoService, store); err != nil {
+		log.Fatal(err)
+	}
+	if err := registerEgressJobs(jobManager, store, egressPlanner, egressExecutor, store); err != nil {
+		log.Fatal(err)
+	}
+	if err := registerBackupJobs(jobManager, backupService, store); err != nil {
+		log.Fatal(err)
+	}
+	if err := registerSubscriptionJobs(jobManager, subscriptionUpdater, store); err != nil {
+		log.Fatal(err)
+	}
+	if err := registerContainerCommandJobs(jobManager, containerCommands, store); err != nil {
+		log.Fatal(err)
+	}
+	if err := jobManager.Start(); err != nil {
+		log.Fatal(err)
 	}
 
 	mux := http.NewServeMux()
@@ -198,34 +260,18 @@ func main() {
 	app.RegisterMihomo(mux, mihomoService, store, signer, store, jobManager, store)
 	app.RegisterMihomoProbes(mux, mihomoNodeProbe, mihomoExitProbe)
 	app.RegisterJobs(mux, jobManager)
-	subscriptionFetcher := subscription.Fetcher{UserAgent: "FoxOS subscription updater/1"}
-	subscriptionUpdater := subscription.Updater{Sources: store, Nodes: store, Fetcher: subscriptionFetcher}
-	app.RegisterSubscriptions(mux, store, store, subscriptionFetcher, signer, store, jobManager, store)
+	app.RegisterSubscriptions(mux, store, store, subscriptionFetcher, signer, subscriptionIdentityHasher, store, jobManager, store)
 	app.RegisterAlerts(mux, store)
-	backupService := backup.Service{Database: store, MihomoPath: runtimeConfig.Mihomo.LocalConfigPath, Directory: runtimeConfig.BackupDir, Retention: 20}
-	if mihomoApplier != nil {
-		backupService.MihomoRestore = func(ctx context.Context, body []byte) error {
-			_, err := mihomoApplier.Apply(ctx, body)
-			return err
-		}
-		backupService.MihomoHealthy = clash.Healthy
-	}
 	app.RegisterBackups(mux, backupService, signer, store, jobManager, store)
-	upgradeService := upgrade.Service{Store: store, DatabasePath: *databasePath, StatePath: runtimeConfig.UpgradeStatePath, BackupDir: filepath.Join(runtimeConfig.BackupDir, "upgrade"), Version: version}
-	app.RegisterUpgrade(mux, upgradeService, store)
-	registerMihomoJobs(jobManager, mihomoService, store)
-	registerEgressJobs(jobManager, store, egressPlanner, egressExecutor, store)
-	registerBackupJobs(jobManager, backupService, store)
-	registerSubscriptionJobs(jobManager, subscriptionUpdater, store)
-	registerContainerCommandJobs(jobManager, containerCommands, store)
-	alertMonitor, err := alerting.Start(context.Background(), alerting.Evaluator{Store: store, RouterOS: routerMonitor, Mihomo: mihomoMonitor, MosDNS: mosdnsReader}, time.Minute, func(err error) {
+	app.RegisterUpgrade(mux, upgradeService)
+	alertMonitor, err := alerting.Start(processContext, alerting.Evaluator{Store: store, RouterOS: routerMonitor, Mihomo: mihomoMonitor, MosDNS: mosdnsReader}, time.Minute, func(err error) {
 		log.Printf("alert evaluation incomplete: %v", err)
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer alertMonitor.Close()
-	subscriptionScheduler, err := subscription.NewScheduler(context.Background(), store, jobManager, time.Minute)
+	subscriptionScheduler, err := subscription.NewScheduler(processContext, store, jobManager, time.Minute)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -234,23 +280,104 @@ func main() {
 		mux.Handle("/", http.FileServer(http.Dir(*staticDir)))
 	}
 
-	handler := securityHeaders(mux)
+	handler := mutationGate.Middleware(securityHeaders(mux))
 	if runtimeConfig.HTTPS.Enabled {
 		log.Printf("FoxOS %s listening on https://%s and redirecting HTTP", version, runtimeConfig.Site.PublicHostname)
-		log.Fatal(gateway.Serve(gateway.ServerConfig{
+		if err := gateway.Serve(processContext, gateway.ServerConfig{
 			InternalListen:     runtimeConfig.HTTPS.InternalListen,
 			PublicListen:       runtimeConfig.HTTPS.PublicListen,
 			HTTPRedirectListen: runtimeConfig.HTTPS.HTTPRedirectListen,
 			PublicHostname:     runtimeConfig.Site.PublicHostname,
+			PublicAddress:      runtimeConfig.Site.FoxOSAddress,
 			CertificatePath:    certificates.CertificatePath,
 			KeyPath:            certificates.KeyPath,
 			ProxyToken:         proxyToken,
 			Backend:            handler,
-		}))
+		}); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	server := &http.Server{Addr: *address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	log.Printf("FoxOS %s listening on %s", version, *address)
-	log.Fatal(server.ListenAndServe())
+	if err := serveHTTP(processContext, server); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func validateDatabasePath(path string, production bool) error {
+	if strings.TrimSpace(path) != path || path == "" || strings.ContainsRune(path, '\x00') {
+		return errors.New("database path is invalid")
+	}
+	if !production {
+		return nil
+	}
+	if path == ":memory:" || !filepath.IsAbs(path) {
+		return errors.New("production database path must be an absolute persistent file path")
+	}
+	parent := filepath.Dir(filepath.Clean(path))
+	info, err := os.Lstat(parent)
+	if err != nil {
+		return fmt.Errorf("inspect production database directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("production database directory must be a real directory")
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("production database path must be a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect production database path: %w", err)
+	}
+	return nil
+}
+
+func validateHTTPListen(address string, httpsEnabled, environmentExplicit bool) error {
+	if httpsEnabled {
+		return nil
+	}
+	if strings.TrimSpace(address) != address || address == "" {
+		return errors.New("HTTP listen address is invalid")
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || port == "" {
+		return errors.New("HTTP listen address is invalid")
+	}
+	if environmentExplicit {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return errors.New("FOXOS_ENV must be explicit before HTTP may listen beyond loopback")
+	}
+	return nil
+}
+
+func serveHTTP(ctx context.Context, server *http.Server) error {
+	if ctx == nil || server == nil {
+		return errors.New("HTTP server and context are required")
+	}
+	errorsChannel := make(chan error, 1)
+	go func() { errorsChannel <- server.ListenAndServe() }()
+	select {
+	case err := <-errorsChannel:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownContext); err != nil {
+			return err
+		}
+		err := <-errorsChannel
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
 }
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -278,11 +405,14 @@ func clashCheck(reader api.MihomoReader) func(context.Context) error {
 	}
 }
 
-func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit api.AuditStore) {
-	if manager == nil || service == nil {
-		return
+func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit api.AuditStore) error {
+	if manager == nil {
+		return errors.New("job manager is unavailable")
 	}
-	_ = manager.RegisterWithRecovery("mihomo.apply", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	if service == nil {
+		return manager.RequireNoRecoverableJobs("mihomo.apply", "mihomo.restore")
+	}
+	if err := manager.RegisterWithRecovery("mihomo.apply", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		event := mihomoAuditEvent(job, "mihomo.apply")
 		draft, err := decodeDraftRequest(job.Request["draft"])
 		if err != nil {
@@ -316,7 +446,7 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 			return failMihomoJobAudit(ctx, audit, event, "mihomo_checkpoint_failed", mihomo.ApplyResult{}, err)
 		}
 		label, _ := job.Request["label"].(string)
-		result, snapshot, err := service.ApplyPreview(ctx, draft, digest, label)
+		result, snapshot, err := service.ApplyPreview(mihomo.WithApplyOperation(ctx, job.Kind, job.ID), draft, digest, label)
 		if err != nil {
 			status, errorClass := mihomoFailure("mihomo_apply", result, err)
 			event.Outcome = domain.AuditFailed
@@ -336,8 +466,10 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 			return map[string]any{"snapshotId": snapshot.ID, "rolledBack": result.RolledBack, "errorClass": "mihomo_audit_finalize_failed"}, domain.JobFailed, errors.New("Mihomo audit finalization failed")
 		}
 		return map[string]any{"snapshotId": snapshot.ID, "rolledBack": result.RolledBack}, domain.JobSucceeded, nil
-	}, recoverMihomoApply(service))
-	_ = manager.RegisterWithRecovery("mihomo.restore", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	}, recoverMihomoApply(service)); err != nil {
+		return fmt.Errorf("register Mihomo apply jobs: %w", err)
+	}
+	if err := manager.RegisterWithRecovery("mihomo.restore", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		event := mihomoAuditEvent(job, "mihomo.restore")
 		id, _ := job.Request["snapshotId"].(string)
 		id = strings.TrimSpace(id)
@@ -356,7 +488,7 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 			return failMihomoJobAudit(ctx, audit, event, "mihomo_restore_checkpoint_failed", mihomo.ApplyResult{}, err)
 		}
 		label, _ := job.Request["label"].(string)
-		result, snapshot, err := service.Restore(ctx, id, label)
+		result, snapshot, err := service.Restore(mihomo.WithApplyOperation(ctx, job.Kind, job.ID), id, label)
 		if err != nil {
 			status, errorClass := mihomoFailure("mihomo_restore", result, err)
 			event.Outcome = domain.AuditFailed
@@ -375,7 +507,10 @@ func registerMihomoJobs(manager *task.Manager, service api.MihomoService, audit 
 			return map[string]any{"snapshotId": snapshot.ID, "rolledBack": result.RolledBack, "errorClass": "mihomo_restore_audit_finalize_failed"}, domain.JobFailed, errors.New("Mihomo audit finalization failed")
 		}
 		return map[string]any{"snapshotId": snapshot.ID, "rolledBack": result.RolledBack}, domain.JobSucceeded, nil
-	}, recoverMihomoRestore(service))
+	}, recoverMihomoRestore(service)); err != nil {
+		return fmt.Errorf("register Mihomo restore jobs: %w", err)
+	}
+	return nil
 }
 
 type mihomoRecoveryService interface {
@@ -478,11 +613,14 @@ func mihomoFailure(prefix string, result mihomo.ApplyResult, err error) (domain.
 	return domain.JobFailed, prefix + "_failed"
 }
 
-func registerEgressJobs(manager *task.Manager, policies api.DevicePolicyStore, planner api.EgressPlanner, executor api.EgressExecutor, audit api.AuditStore) {
-	if manager == nil || policies == nil || planner == nil || executor == nil {
-		return
+func registerEgressJobs(manager *task.Manager, policies api.DevicePolicyStore, planner api.EgressPlanner, executor api.EgressExecutor, audit api.AuditStore) error {
+	if manager == nil {
+		return errors.New("job manager is unavailable")
 	}
-	_ = manager.RegisterWithRecovery("routeros.egress", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	if policies == nil || planner == nil || executor == nil {
+		return manager.RequireNoRecoverableJobs("routeros.egress")
+	}
+	if err := manager.RegisterWithRecovery("routeros.egress", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		auditID, _ := job.Request["auditId"].(string)
 		if auditID == "" {
 			auditID = job.ID + "-audit"
@@ -584,7 +722,10 @@ func registerEgressJobs(manager *task.Manager, policies api.DevicePolicyStore, p
 			return map[string]any{"policyId": plan.PolicyID, "auditId": auditID, "rolledBack": false, "errorClass": "egress_audit_finalize_failed"}, domain.JobFailed, errors.New("egress audit finalization failed")
 		}
 		return map[string]any{"policyId": plan.PolicyID, "auditId": auditID, "rolledBack": false}, domain.JobSucceeded, nil
-	}, recoverEgress(policies, planner))
+	}, recoverEgress(policies, planner)); err != nil {
+		return fmt.Errorf("register RouterOS egress jobs: %w", err)
+	}
+	return nil
 }
 
 func recoverEgress(policies api.DevicePolicyStore, planner api.EgressPlanner) task.Recoverer {
@@ -676,11 +817,14 @@ type containerCommandRequest struct {
 	Command string
 }
 
-func registerContainerCommandJobs(manager *task.Manager, service containerCommandService, audit api.AuditStore) {
-	if manager == nil || service == nil {
-		return
+func registerContainerCommandJobs(manager *task.Manager, service containerCommandService, audit api.AuditStore) error {
+	if manager == nil {
+		return errors.New("job manager is unavailable")
 	}
-	_ = manager.RegisterWithRecovery("routeros.container-command", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	if service == nil {
+		return manager.RequireNoRecoverableJobs("routeros.container-command")
+	}
+	if err := manager.RegisterWithRecovery("routeros.container-command", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		request, err := decodeContainerCommandRequest(job.Request)
 		if err != nil {
 			return map[string]any{"errorClass": "container_command_request_invalid"}, domain.JobFailed, err
@@ -776,7 +920,10 @@ func registerContainerCommandJobs(manager *task.Manager, service containerComman
 			return map[string]any{"containerId": request.ID, "errorClass": "container_command_audit_finalize_failed"}, domain.JobFailed, errors.New("container command audit finalization failed")
 		}
 		return map[string]any{"containerId": request.ID, "owner": request.Owner, "command": request.Command, "status": desiredStatus, "auditId": event.ID}, domain.JobSucceeded, nil
-	}, recoverContainerCommand(service, audit))
+	}, recoverContainerCommand(service, audit)); err != nil {
+		return fmt.Errorf("register RouterOS container jobs: %w", err)
+	}
+	return nil
 }
 
 func recoverContainerCommand(service containerCommandService, audit api.AuditStore) task.Recoverer {
@@ -913,11 +1060,14 @@ func containerRecoveryFailure(ctx context.Context, job domain.Job, request conta
 	return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: errorClass, ErrorMessage: "operation recovery requires manual reconciliation", Result: map[string]any{"phase": "recovery_partial_state", "containerId": request.ID, "command": request.Command}}
 }
 
-func registerBackupJobs(manager *task.Manager, service api.BackupService, audit api.AuditStore) {
-	if manager == nil || service == nil {
-		return
+func registerBackupJobs(manager *task.Manager, service api.BackupService, audit api.AuditStore) error {
+	if manager == nil {
+		return errors.New("job manager is unavailable")
 	}
-	_ = manager.RegisterWithRecovery("backup.create", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	if service == nil {
+		return manager.RequireNoRecoverableJobs("backup.create", "backup.restore")
+	}
+	if err := manager.RegisterWithRecovery("backup.create", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		progress(domain.JobRunning, 10)
 		label, _ := job.Request["label"].(string)
 		if err := task.Checkpoint(ctx, "creating", map[string]any{"operationId": job.ID}); err != nil {
@@ -946,8 +1096,10 @@ func registerBackupJobs(manager *task.Manager, service api.BackupService, audit 
 			_ = audit.SaveAudit(ctx, event)
 		}
 		return map[string]any{"manifest": item, "backupId": item.ID, "operationId": job.ID}, domain.JobSucceeded, nil
-	}, recoverBackupCreate(service))
-	_ = manager.RegisterWithRecovery("backup.restore", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	}, recoverBackupCreate(service)); err != nil {
+		return fmt.Errorf("register backup create jobs: %w", err)
+	}
+	if err := manager.RegisterWithRecovery("backup.restore", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		id, _ := job.Request["backupId"].(string)
 		digest, _ := job.Request["digest"].(string)
 		auditID, _ := job.Request["auditId"].(string)
@@ -963,7 +1115,7 @@ func registerBackupJobs(manager *task.Manager, service api.BackupService, audit 
 		if !ok {
 			return map[string]any{"backupId": id, "errorClass": "backup_recovery_unavailable"}, domain.JobFailed, errors.New("backup recovery service is unavailable")
 		}
-		err := recoveryService.RestoreOperation(ctx, id, digest, job.ID)
+		err := recoveryService.RestoreOperation(mihomo.WithApplyOperation(ctx, job.Kind, job.ID), id, digest, job.ID)
 		if err != nil {
 			event.Outcome = domain.AuditFailed
 			errorClass := "backup_restore_failed"
@@ -988,7 +1140,10 @@ func registerBackupJobs(manager *task.Manager, service api.BackupService, audit 
 			_ = audit.SaveAudit(ctx, event)
 		}
 		return map[string]any{"backupId": id, "operationId": job.ID}, domain.JobSucceeded, nil
-	}, recoverBackupRestore(service))
+	}, recoverBackupRestore(service)); err != nil {
+		return fmt.Errorf("register backup restore jobs: %w", err)
+	}
+	return nil
 }
 
 type backupRecoveryService interface {
@@ -1049,11 +1204,14 @@ func recoverBackupRestore(service api.BackupService) task.Recoverer {
 	}
 }
 
-func registerSubscriptionJobs(manager *task.Manager, updater subscription.Updater, audit api.AuditStore) {
-	if manager == nil || updater.Sources == nil || updater.Nodes == nil || updater.Fetcher == nil {
-		return
+func registerSubscriptionJobs(manager *task.Manager, updater subscription.Updater, audit api.AuditStore) error {
+	if manager == nil {
+		return errors.New("job manager is unavailable")
 	}
-	_ = manager.RegisterWithRecovery("subscription.update", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
+	if updater.Sources == nil || updater.Nodes == nil || updater.Fetcher == nil {
+		return manager.RequireNoRecoverableJobs("subscription.update")
+	}
+	if err := manager.RegisterWithRecovery("subscription.update", func(ctx context.Context, job domain.Job, progress task.Progress) (map[string]any, domain.JobStatus, error) {
 		id, _ := job.Request["subscriptionId"].(string)
 		scheduled, _ := job.Request["scheduled"].(bool)
 		auditID, _ := job.Request["auditId"].(string)
@@ -1086,10 +1244,11 @@ func registerSubscriptionJobs(manager *task.Manager, updater subscription.Update
 		progress(domain.JobVerifying, 20)
 		result, err := updater.ApplyWithCheckpoint(ctx, id, expected, func(phase string, preview subscription.UpdatePreview) error {
 			return task.Checkpoint(ctx, phase, map[string]any{
-				"subscriptionId": id,
-				"digest":         preview.Plan.Digest,
-				"planDigest":     subscription.UpdatePlanDigest(preview.Plan),
-				"nodeCount":      preview.Plan.NodeCount,
+				"subscriptionId":   id,
+				"digest":           preview.Plan.Digest,
+				"planDigest":       subscription.UpdatePlanDigest(preview.Plan),
+				"nodeCount":        preview.Plan.NodeCount,
+				"settingsRevision": preview.Plan.SettingsRevision,
 			})
 		})
 		if err != nil {
@@ -1098,10 +1257,37 @@ func registerSubscriptionJobs(manager *task.Manager, updater subscription.Update
 			if errors.Is(err, subscription.ErrContentChanged) {
 				event.Details["errorClass"] = "subscription_content_changed"
 			}
+			if errors.Is(err, domain.ErrSubscriptionSettingsStale) {
+				event.Details["errorClass"] = "subscription_settings_stale"
+			}
+			failure := map[string]any{"subscriptionId": id, "errorClass": event.Details["errorClass"]}
+			if result.Plan.SubscriptionID != "" {
+				state, readbackErr := updater.Readback(ctx, id, result)
+				failure["readback"] = readbackErr == nil
+				if readbackErr == nil {
+					failure["state"] = state
+					switch state {
+					case subscription.RecoveryCompleted:
+						event.Outcome = domain.AuditSucceeded
+						event.Details["recoveredByReadback"] = true
+						failure["stateCommitted"] = true
+						if audit != nil {
+							_ = audit.SaveAudit(ctx, event)
+						}
+						return failure, domain.JobSucceeded, nil
+					case subscription.RecoveryPreState:
+						failure["oldNodesRetained"] = true
+					case subscription.RecoveryPartial:
+						failure["manualReconciliationRequired"] = true
+					}
+				} else {
+					failure["readbackError"] = "subscription state readback failed"
+				}
+			}
 			if audit != nil {
 				_ = audit.SaveAudit(ctx, event)
 			}
-			return map[string]any{"subscriptionId": id, "oldNodesRetained": true, "errorClass": event.Details["errorClass"]}, domain.JobFailed, err
+			return failure, domain.JobFailed, err
 		}
 		event.Outcome = domain.AuditSucceeded
 		event.Details["digest"] = result.Plan.Digest
@@ -1112,8 +1298,11 @@ func registerSubscriptionJobs(manager *task.Manager, updater subscription.Update
 		if audit != nil {
 			_ = audit.SaveAudit(ctx, event)
 		}
-		return map[string]any{"subscriptionId": id, "digest": result.Plan.Digest, "planDigest": subscription.UpdatePlanDigest(result.Plan), "nodeCount": result.Plan.NodeCount, "oldNodesRetained": false}, domain.JobSucceeded, nil
-	}, recoverSubscriptionUpdate(updater))
+		return map[string]any{"subscriptionId": id, "digest": result.Plan.Digest, "planDigest": subscription.UpdatePlanDigest(result.Plan), "settingsRevision": result.Plan.SettingsRevision, "nodeCount": result.Plan.NodeCount, "oldNodesRetained": false}, domain.JobSucceeded, nil
+	}, recoverSubscriptionUpdate(updater)); err != nil {
+		return fmt.Errorf("register subscription update jobs: %w", err)
+	}
+	return nil
 }
 
 func recoverSubscriptionUpdate(updater subscription.Updater) task.Recoverer {
@@ -1122,24 +1311,26 @@ func recoverSubscriptionUpdate(updater subscription.Updater) task.Recoverer {
 		id = strings.TrimSpace(id)
 		expectedDigest, _ := job.Result["digest"].(string)
 		expectedPlanDigest, _ := job.Result["planDigest"].(string)
-		if value, found := job.Request["plan"]; (expectedDigest == "" || expectedPlanDigest == "") && found && value != nil {
+		expectedSettingsRevision := positiveInt64(job.Result["settingsRevision"])
+		if value, found := job.Request["plan"]; (expectedDigest == "" || expectedPlanDigest == "" || expectedSettingsRevision < 1) && found && value != nil {
 			body, err := json.Marshal(value)
 			if err == nil {
 				var plan subscription.UpdatePlan
 				if json.Unmarshal(body, &plan) == nil {
 					expectedDigest = plan.Digest
 					expectedPlanDigest = subscription.UpdatePlanDigest(plan)
+					expectedSettingsRevision = plan.SettingsRevision
 				}
 			}
 		}
-		if id == "" || expectedDigest == "" || expectedPlanDigest == "" {
+		if id == "" || expectedDigest == "" || expectedPlanDigest == "" || expectedSettingsRevision < 1 {
 			return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: "subscription_recovery_checkpoint_missing", ErrorMessage: "operation recovery failed", Result: map[string]any{"phase": "recovery_checkpoint_missing"}}, nil
 		}
-		state, preview, err := updater.Reconcile(ctx, id, expectedDigest, expectedPlanDigest)
+		state, preview, err := updater.Reconcile(ctx, id, expectedDigest, expectedPlanDigest, expectedSettingsRevision)
 		if err != nil {
 			return task.RecoveryDecision{}, err
 		}
-		result := map[string]any{"subscriptionId": id, "digest": expectedDigest, "planDigest": expectedPlanDigest, "nodeCount": preview.Plan.NodeCount, "readback": true}
+		result := map[string]any{"subscriptionId": id, "digest": expectedDigest, "planDigest": expectedPlanDigest, "settingsRevision": expectedSettingsRevision, "nodeCount": preview.Plan.NodeCount, "readback": true}
 		switch state {
 		case subscription.RecoveryCompleted:
 			result["phase"] = "readback_succeeded"
@@ -1152,6 +1343,30 @@ func recoverSubscriptionUpdate(updater subscription.Updater) task.Recoverer {
 			return task.RecoveryDecision{Status: domain.JobFailed, ErrorClass: "subscription_recovery_partial_state", ErrorMessage: "operation recovery requires manual reconciliation", Result: result}, nil
 		}
 	}
+}
+
+func positiveInt64(value any) int64 {
+	switch typed := value.(type) {
+	case int:
+		if typed > 0 {
+			return int64(typed)
+		}
+	case int64:
+		if typed > 0 {
+			return typed
+		}
+	case float64:
+		converted := int64(typed)
+		if converted > 0 && typed == float64(converted) {
+			return converted
+		}
+	case json.Number:
+		converted, err := typed.Int64()
+		if err == nil && converted > 0 {
+			return converted
+		}
+	}
+	return 0
 }
 
 func decodeDraftRequest(value any) (domain.MihomoDraft, error) {

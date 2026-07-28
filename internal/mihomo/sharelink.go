@@ -41,7 +41,7 @@ func ParseShareLink(raw string) (domain.Node, error) {
 		return domain.Node{}, err
 	}
 	switch strings.ToLower(parsed.Scheme) {
-	case "vless", "trojan", "hysteria2", "hy2", "socks5", "socks", "http", "https":
+	case "vless", "trojan", "hysteria2", "hy2", "tuic", "wireguard", "socks5", "socks", "http", "https":
 		return parseURLNode(parsed)
 	case "ss":
 		return parseSS(raw)
@@ -60,7 +60,7 @@ func parseURLNode(parsed *url.URL) (domain.Node, error) {
 		name = parsed.Hostname()
 	}
 	query := parsed.Query()
-	node := domain.Node{Name: name, Server: parsed.Hostname(), Port: port, UDP: query.Get("udp") == "true", SNI: first(query.Get("sni"), query.Get("peer")), Network: first(query.Get("type"), query.Get("network")), Path: query.Get("path"), Host: query.Get("host")}
+	node := domain.Node{Name: name, Server: parsed.Hostname(), Port: port, UDP: query.Get("udp") == "true", SNI: first(query.Get("sni"), query.Get("peer")), Network: first(query.Get("type"), query.Get("network")), Path: query.Get("path"), Host: query.Get("host"), Extra: shareLinkOptions(query)}
 	switch parsed.Scheme {
 	case "vless":
 		node.Type = "vless"
@@ -80,6 +80,25 @@ func parseURLNode(parsed *url.URL) (domain.Node, error) {
 			node.Password = parsed.User.Username()
 		}
 		node.TLS = true
+	case "tuic":
+		node.Type = "tuic"
+		node.UDP = true
+		node.TLS = true
+		if parsed.User != nil {
+			node.UUID = parsed.User.Username()
+			node.Password, _ = parsed.User.Password()
+		}
+	case "wireguard":
+		node.Type = "wireguard"
+		node.UDP = true
+		if parsed.User != nil {
+			node.Extra["private-key"] = parsed.User.Username()
+		}
+		for queryName, optionName := range map[string]string{"publickey": "public-key", "public-key": "public-key", "presharedkey": "pre-shared-key", "pre-shared-key": "pre-shared-key", "ip": "ip", "ipv6": "ipv6", "reserved": "reserved", "mtu": "mtu"} {
+			if value := query.Get(queryName); value != "" {
+				node.Extra[optionName] = value
+			}
+		}
 	case "socks5", "socks":
 		node.Type = "socks5"
 		if parsed.User != nil {
@@ -100,6 +119,58 @@ func parseURLNode(parsed *url.URL) (domain.Node, error) {
 	return finalizeImportedNode(node)
 }
 
+func shareLinkOptions(query url.Values) map[string]any {
+	options := make(map[string]any)
+	if value := query.Get("flow"); value != "" {
+		options["flow"] = value
+	}
+	if value := first(query.Get("fp"), query.Get("client-fingerprint")); value != "" {
+		options["client-fingerprint"] = value
+	}
+	if value := query.Get("alpn"); value != "" {
+		options["alpn"] = splitNonEmpty(value)
+	}
+	publicKey := query.Get("pbk")
+	shortID := first(query.Get("sid"), query.Get("short-id"))
+	if publicKey != "" || shortID != "" {
+		reality := make(map[string]any)
+		if publicKey != "" {
+			reality["public-key"] = publicKey
+		}
+		if shortID != "" {
+			reality["short-id"] = shortID
+		}
+		options["reality-opts"] = reality
+	}
+	if value := first(query.Get("serviceName"), query.Get("service-name")); value != "" {
+		options["grpc-opts"] = map[string]any{"grpc-service-name": value}
+	}
+	if value := query.Get("packetEncoding"); value != "" {
+		options["packet-encoding"] = value
+	}
+	if query.Get("mux") == "1" || query.Get("mux") == "true" {
+		options["smux"] = map[string]any{"enabled": true}
+	}
+	if value := query.Get("obfs"); value != "" {
+		options["obfs"] = value
+	}
+	if value := first(query.Get("obfs-password"), query.Get("obfsParam")); value != "" {
+		options["obfs-password"] = value
+	}
+	if value := query.Get("congestion_control"); value != "" {
+		options["congestion-controller"] = value
+	}
+	if value := query.Get("udp_relay_mode"); value != "" {
+		options["udp-relay-mode"] = value
+	}
+	if value := query.Get("ed"); value != "" {
+		if amount, err := strconv.Atoi(value); err == nil && amount > 0 {
+			options["ws-opts"] = map[string]any{"max-early-data": amount, "early-data-header-name": first(query.Get("eh"), "Sec-WebSocket-Protocol")}
+		}
+	}
+	return options
+}
+
 type vmessJSON struct {
 	V    string `json:"v"`
 	PS   string `json:"ps"`
@@ -113,6 +184,8 @@ type vmessJSON struct {
 	Path string `json:"path"`
 	TLS  string `json:"tls"`
 	SNI  string `json:"sni"`
+	ALPN string `json:"alpn"`
+	FP   string `json:"fp"`
 }
 
 func parseVMess(encoded string) (domain.Node, error) {
@@ -132,7 +205,17 @@ func parseVMess(encoded string) (domain.Node, error) {
 	if name == "" {
 		name = value.Add
 	}
-	node := domain.Node{Name: name, Type: "vmess", Server: value.Add, Port: port, UUID: value.ID, Network: value.Net, Host: value.Host, Path: value.Path, SNI: value.SNI, TLS: value.TLS != "" && value.TLS != "none"}
+	extra := map[string]any{}
+	if alterID, err := anyPort(value.Aid); err == nil && alterID >= 0 {
+		extra["alterId"] = alterID
+	}
+	if value.FP != "" {
+		extra["client-fingerprint"] = value.FP
+	}
+	if value.ALPN != "" {
+		extra["alpn"] = splitNonEmpty(value.ALPN)
+	}
+	node := domain.Node{Name: name, Type: "vmess", Server: value.Add, Port: port, UUID: value.ID, Cipher: "auto", Network: value.Net, Host: value.Host, Path: value.Path, SNI: value.SNI, TLS: value.TLS != "" && value.TLS != "none", Extra: extra}
 	return finalizeImportedNode(node)
 }
 
@@ -179,7 +262,11 @@ func ssNode(credential, address, fragment string) (domain.Node, error) {
 	if name == "" {
 		name = hostPort.Hostname()
 	}
-	node := domain.Node{Name: name, Type: "ss", Server: hostPort.Hostname(), Port: port, Cipher: methodPassword[0], Password: methodPassword[1], UDP: true}
+	extra := map[string]any{}
+	if plugin := hostPort.Query().Get("plugin"); plugin != "" {
+		extra["plugin"] = plugin
+	}
+	node := domain.Node{Name: name, Type: "ss", Server: hostPort.Hostname(), Port: port, Cipher: methodPassword[0], Password: methodPassword[1], UDP: true, Extra: extra}
 	return finalizeImportedNode(node)
 }
 func finalizeImportedNode(node domain.Node) (domain.Node, error) {
@@ -223,4 +310,15 @@ func first(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func splitNonEmpty(value string) []string {
+	items := strings.FieldsFunc(value, func(character rune) bool { return character == ',' || character == '|' })
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if item = strings.TrimSpace(item); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }

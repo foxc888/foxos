@@ -36,8 +36,11 @@ func NewScheduler(parent context.Context, store ScheduleStore, jobs JobSubmitter
 	}
 	ctx, cancel := context.WithCancel(parent)
 	if _, err := EnqueueDue(ctx, store, jobs, time.Now().UTC()); err != nil {
-		cancel()
-		return nil, err
+		paused, ok := jobs.(interface{ Paused() bool })
+		if !ok || !paused.Paused() {
+			cancel()
+			return nil, err
+		}
 	}
 	scheduler := &Scheduler{cancel: cancel}
 	scheduler.wg.Add(1)

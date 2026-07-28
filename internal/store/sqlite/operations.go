@@ -215,6 +215,31 @@ func (s *Store) Jobs(ctx context.Context, limit int) ([]domain.Job, error) {
 	return items, rows.Err()
 }
 
+func (s *Store) RecoverableJobs(ctx context.Context, kind string) ([]domain.Job, error) {
+	if strings.TrimSpace(kind) == "" || kind != strings.TrimSpace(kind) {
+		return nil, errors.New("recoverable job kind is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id,kind,status,progress,idempotency_key,request_json,result_json,error_class,error_message,attempts,created_at,started_at,finished_at,updated_at
+		FROM jobs
+		WHERE kind=? AND status IN (?,?,?)
+		ORDER BY created_at ASC, id ASC
+	`, kind, domain.JobQueued, domain.JobRunning, domain.JobVerifying)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]domain.Job, 0)
+	for rows.Next() {
+		item, err := s.scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (s *Store) UpdateJob(ctx context.Context, job domain.Job) error {
 	request, err := json.Marshal(job.Request)
 	if err != nil {

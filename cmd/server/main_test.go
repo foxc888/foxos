@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,8 +24,32 @@ import (
 	"github.com/foxc888/foxos/internal/mihomo"
 	"github.com/foxc888/foxos/internal/routeros"
 	"github.com/foxc888/foxos/internal/store/sqlite"
+	"github.com/foxc888/foxos/internal/subscription"
 	"github.com/foxc888/foxos/internal/task"
+	"github.com/foxc888/foxos/internal/upgrade"
 )
+
+const (
+	serverTestAPIToken        = "Q9v!2Lm#8Rk$4Dz%7Hs&1Wc@6Np*3Fx!"
+	serverTestConfirmationKey = "T4m@8Qz!1Vk#7Hs$3Np%9Dc&2Lw*6Ry!"
+)
+
+type synchronizedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(body []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(body)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
 
 func TestSecurityHeaders(t *testing.T) {
 	t.Parallel()
@@ -60,6 +90,395 @@ func TestSecurityHeaders(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestValidateDatabasePathRequiresPersistentProductionLocation(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	valid := filepath.Join(directory, "foxos.db")
+	if err := validateDatabasePath(valid, true); err != nil {
+		t.Fatalf("valid production path: %v", err)
+	}
+	if err := validateDatabasePath("relative.db", true); err == nil {
+		t.Fatal("relative production path should fail")
+	}
+	if err := validateDatabasePath(":memory:", true); err == nil {
+		t.Fatal("in-memory production path should fail")
+	}
+	target := filepath.Join(directory, "target.db")
+	if err := os.WriteFile(target, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "link.db")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDatabasePath(link, true); err == nil {
+		t.Fatal("symlink production database should fail")
+	}
+}
+
+func TestValidateHTTPListenDefaultsToLoopbackWhenEnvironmentIsImplicit(t *testing.T) {
+	t.Parallel()
+	if defaultHTTPListen != "127.0.0.1:8090" {
+		t.Fatalf("default listen=%q", defaultHTTPListen)
+	}
+	if err := validateHTTPListen(defaultHTTPListen, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, unsafe := range []string{":8090", "0.0.0.0:8090", "[::]:8090", "localhost:8090"} {
+		if err := validateHTTPListen(unsafe, false, false); err == nil {
+			t.Fatalf("implicit environment accepted non-literal-loopback listen %q", unsafe)
+		}
+	}
+	if err := validateHTTPListen(":8090", false, true); err != nil {
+		t.Fatalf("explicit development listen rejected: %v", err)
+	}
+}
+
+func TestServerBareStartupListensOnExplicitLoopbackOnly(t *testing.T) {
+	if os.Getenv("FOXOS_SERVER_HELPER") == "1" {
+		return
+	}
+	root := t.TempDir()
+	address := unusedLoopbackAddress(t)
+	command := serverHelperCommand(t, root, []string{"-listen", address, "-database", filepath.Join(root, "foxos.db"), "-static", filepath.Join(root, "missing-static")}, false)
+	var output synchronizedBuffer
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	deadline := time.Now().Add(5 * time.Second)
+	started := false
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			t.Fatalf("server exited before listening: %v\n%s", err, output.String())
+		default:
+		}
+		connection, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
+		if err == nil {
+			_ = connection.Close()
+			started = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !started {
+		_ = command.Process.Kill()
+		<-done
+		t.Fatalf("server did not bind loopback address\n%s", output.String())
+	}
+	if err := command.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("graceful server exit: %v\n%s", err, output.String())
+		}
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		<-done
+		t.Fatal("server did not stop after interrupt")
+	}
+}
+
+func TestServerKeepsUpgradeCandidateReadOnlyUntilTerminalState(t *testing.T) {
+	if os.Getenv("FOXOS_SERVER_HELPER") == "1" {
+		return
+	}
+	for _, test := range []struct {
+		name       string
+		path       string
+		operation  string
+		wantStatus string
+	}{
+		{name: "promotion", path: "/api/v1/system/upgrade/promoted", operation: "candidate-promote-test", wantStatus: "promoted"},
+		{name: "abort", path: "/api/v1/system/upgrade/aborted", operation: "candidate-abort-test", wantStatus: "aborted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			databasePath := filepath.Join(root, "foxos.db")
+			backupDir := filepath.Join(root, "backups", "upgrade")
+			store, err := sqlite.Open(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager, err := task.NewPaused(context.Background(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gate := upgrade.NewMutationGate()
+			coordinator := &upgrade.Coordinator{Requests: gate, Tasks: manager, Database: store}
+			service := &upgrade.Service{Store: store, DatabasePath: databasePath, BackupDir: backupDir, Version: "dev", Quiescer: coordinator}
+			if _, err := service.Create(context.Background(), test.operation); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			address := unusedLoopbackAddress(t)
+			command := serverHelperCommand(t, root, []string{"-listen", address, "-database", databasePath, "-static", filepath.Join(root, "missing-static")}, true)
+			var output synchronizedBuffer
+			command.Stdout = &output
+			command.Stderr = &output
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- command.Wait() }()
+			defer func() {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				_ = command.Process.Signal(os.Interrupt)
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					_ = command.Process.Kill()
+					<-done
+				}
+			}()
+			baseURL := "http://" + address
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				response, requestErr := http.Get(baseURL + "/api/v1/health/live") // #nosec G107 -- test-only loopback URL.
+				if requestErr == nil {
+					_ = response.Body.Close()
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("candidate did not start: %v\n%s", requestErr, output.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			request, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/not-a-route", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("candidate mutation status=%d, want 503", response.StatusCode)
+			}
+
+			request, err = http.NewRequest(http.MethodPost, baseURL+test.path, strings.NewReader(`{"operationId":"`+test.operation+`"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Authorization", "Bearer "+serverTestAPIToken)
+			request.Header.Set("Content-Type", "application/json")
+			response, err = http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var terminal struct {
+				OperationID string `json:"operationId"`
+				Status      string `json:"status"`
+			}
+			decodeErr := json.NewDecoder(response.Body).Decode(&terminal)
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusOK || decodeErr != nil || terminal.OperationID != test.operation || terminal.Status != test.wantStatus {
+				t.Fatalf("terminal response status=%d body=%+v decode=%v\n%s", response.StatusCode, terminal, decodeErr, output.String())
+			}
+
+			response, err = http.Get(baseURL + "/api/v1/health/ready") // #nosec G107 -- test-only loopback URL.
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("ready status=%d after %s", response.StatusCode, test.wantStatus)
+			}
+
+			request, err = http.NewRequest(http.MethodPost, baseURL+"/api/v1/not-a-route", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err = http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusServiceUnavailable {
+				t.Fatalf("candidate mutation gate remained frozen after %s", test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestServerRecoveryFailuresExitBeforeListening(t *testing.T) {
+	if os.Getenv("FOXOS_SERVER_HELPER") == "1" {
+		return
+	}
+	tests := []struct {
+		name      string
+		kind      string
+		request   map[string]any
+		result    map[string]any
+		statement string
+	}{
+		{name: "bad request JSON", kind: "subscription.update", statement: `UPDATE jobs SET request_json='{' WHERE id='broken'`},
+		{name: "bad result JSON", kind: "subscription.update", statement: `UPDATE jobs SET result_json='{' WHERE id='broken'`},
+		{name: "recovery update failure", kind: "backup.create", result: map[string]any{"phase": "creating"}, statement: `CREATE TRIGGER fail_job_update BEFORE UPDATE ON jobs BEGIN SELECT RAISE(FAIL, 'forced update failure'); END`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			databasePath := filepath.Join(root, "foxos.db")
+			store, err := sqlite.Open(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := domain.Job{ID: "broken", Kind: test.kind, Status: domain.JobRunning, Request: test.request, Result: test.result}
+			if _, _, err := store.CreateJob(context.Background(), job); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			mutateServerTestDatabase(t, databasePath, test.statement)
+			address := unusedLoopbackAddress(t)
+			command := serverHelperCommand(t, root, []string{"-listen", address, "-database", databasePath, "-static", filepath.Join(root, "missing-static")}, true)
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("server accepted broken recovery state: %s", output)
+			}
+			if connection, dialErr := net.DialTimeout("tcp", address, 100*time.Millisecond); dialErr == nil {
+				_ = connection.Close()
+				t.Fatal("server listened despite startup recovery failure")
+			}
+			for _, secret := range []string{serverTestAPIToken, serverTestConfirmationKey} {
+				if bytes.Contains(output, []byte(secret)) {
+					t.Fatal("startup output exposed a configured secret")
+				}
+			}
+		})
+	}
+}
+
+type failingRecoveryStore struct{}
+
+func (failingRecoveryStore) CreateJob(context.Context, domain.Job) (domain.Job, bool, error) {
+	return domain.Job{}, false, errors.New("unexpected CreateJob")
+}
+func (failingRecoveryStore) Job(context.Context, string) (domain.Job, error) {
+	return domain.Job{}, errors.New("unexpected Job")
+}
+func (failingRecoveryStore) Jobs(context.Context, int) ([]domain.Job, error) {
+	return nil, errors.New("unexpected Jobs")
+}
+func (failingRecoveryStore) RecoverableJobs(context.Context, string) ([]domain.Job, error) {
+	return nil, errors.New("recovery scan failed")
+}
+func (failingRecoveryStore) UpdateJob(context.Context, domain.Job) error {
+	return errors.New("unexpected UpdateJob")
+}
+
+func TestEveryJobRegistrationPropagatesRecoveryScanFailure(t *testing.T) {
+	t.Parallel()
+	manager, err := task.NewPaused(context.Background(), failingRecoveryStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	tests := []struct {
+		name     string
+		register func() error
+	}{
+		{name: "Mihomo", register: func() error { return registerMihomoJobs(manager, nil, nil) }},
+		{name: "RouterOS egress", register: func() error { return registerEgressJobs(manager, nil, nil, nil, nil) }},
+		{name: "backup", register: func() error { return registerBackupJobs(manager, nil, nil) }},
+		{name: "subscription", register: func() error { return registerSubscriptionJobs(manager, subscription.Updater{}, nil) }},
+		{name: "container", register: func() error { return registerContainerCommandJobs(manager, nil, nil) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.register(); err == nil || !strings.Contains(err.Error(), "recovery scan failed") {
+				t.Fatalf("registration error=%v", err)
+			}
+		})
+	}
+}
+
+func TestFoxOSServerHelperProcess(t *testing.T) {
+	if os.Getenv("FOXOS_SERVER_HELPER") != "1" {
+		return
+	}
+	var arguments []string
+	if err := json.Unmarshal([]byte(os.Getenv("FOXOS_SERVER_ARGS")), &arguments); err != nil {
+		os.Exit(91)
+	}
+	os.Args = append([]string{"foxos-server"}, arguments...)
+	main()
+	os.Exit(0)
+}
+
+func serverHelperCommand(t *testing.T, root string, arguments []string, explicitEnvironment bool) *exec.Cmd {
+	t.Helper()
+	body, err := json.Marshal(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestFoxOSServerHelperProcess$")
+	environment := make([]string, 0, len(os.Environ())+5)
+	for _, item := range os.Environ() {
+		if !strings.HasPrefix(item, "FOXOS_") {
+			environment = append(environment, item)
+		}
+	}
+	environment = append(environment,
+		"FOXOS_SERVER_HELPER=1",
+		"FOXOS_SERVER_ARGS="+string(body),
+		"FOXOS_API_TOKEN="+serverTestAPIToken,
+		"FOXOS_CONFIRMATION_KEY="+serverTestConfirmationKey,
+		"FOXOS_BACKUP_DIR="+filepath.Join(root, "backups"),
+	)
+	if explicitEnvironment {
+		environment = append(environment, "FOXOS_ENV=development")
+	}
+	command.Env = environment
+	command.Dir = root
+	return command
+}
+
+func unusedLoopbackAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return address
+}
+
+func mutateServerTestDatabase(t *testing.T, path, statement string) {
+	t.Helper()
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(statement); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -228,6 +647,94 @@ func TestMihomoApplyJobAuditLifecycle(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMihomoApplyAuditRedactsWireGuardPreSharedKey(t *testing.T) {
+	t.Parallel()
+	const preSharedKey = "audit-fixture-wireguard-pre-shared-key"
+	configStore, err := sqlite.Open(filepath.Join(t.TempDir(), "config.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = configStore.Close() })
+	node := domain.Node{
+		ID: "wireguard-audit", Name: "WireGuard audit", Type: "wireguard", Server: "198.51.100.10", Port: 51820,
+		Extra: map[string]any{
+			"private-key":    "audit-fixture-private-key",
+			"public-key":     "audit-fixture-public-key",
+			"pre-shared-key": preSharedKey,
+		},
+	}
+	if err := configStore.SaveNode(context.Background(), node); err != nil {
+		t.Fatal(err)
+	}
+	draft := domain.MihomoDraft{Mode: "rule", Rules: []string{"MATCH,DIRECT"}}
+	preview, err := (&mihomo.Service{Store: configStore, DigestKey: []byte("0123456789abcdef0123456789abcdef")}).Preview(context.Background(), draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &mihomoJobService{preview: preview, applySnapshot: domain.MihomoSnapshot{ID: "wireguard-snapshot"}}
+	auditStore, manager := newMihomoJobManager(t, service)
+	job, err := manager.Submit(context.Background(), "mihomo.apply", t.Name(), mihomoApplyJobRequest(map[string]any{"mode": draft.Mode, "rules": draft.Rules}, preview.Digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStoredJob(t, manager, job.ID, domain.JobSucceeded)
+	events, err := auditStore.AuditEvents(context.Background(), 10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("audit events=%+v error=%v", events, err)
+	}
+	body, err := json.Marshal(events[0].Details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), preSharedKey) || !strings.Contains(string(body), "pre-shared-key") || !strings.Contains(string(body), "***") {
+		t.Fatalf("WireGuard pre-shared-key audit redaction failed: %s", body)
+	}
+}
+
+func TestMihomoApplyAuditRedactsHysteriaObfsPassword(t *testing.T) {
+	t.Parallel()
+	const obfsPassword = "audit-fixture-hysteria-obfs-password"
+	configStore, err := sqlite.Open(filepath.Join(t.TempDir(), "config.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = configStore.Close() })
+	node := domain.Node{
+		ID: "hysteria-audit", Name: "Hysteria audit", Type: "hysteria2", Server: "198.51.100.20", Port: 443,
+		Password: "audit-fixture-hysteria-password",
+		Extra: map[string]any{
+			"obfs":          "salamander",
+			"obfs-password": obfsPassword,
+		},
+	}
+	if err := configStore.SaveNode(context.Background(), node); err != nil {
+		t.Fatal(err)
+	}
+	draft := domain.MihomoDraft{Mode: "rule", Rules: []string{"MATCH,DIRECT"}}
+	preview, err := (&mihomo.Service{Store: configStore, DigestKey: []byte("0123456789abcdef0123456789abcdef")}).Preview(context.Background(), draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &mihomoJobService{preview: preview, applySnapshot: domain.MihomoSnapshot{ID: "hysteria-snapshot"}}
+	auditStore, manager := newMihomoJobManager(t, service)
+	job, err := manager.Submit(context.Background(), "mihomo.apply", t.Name(), mihomoApplyJobRequest(map[string]any{"mode": draft.Mode, "rules": draft.Rules}, preview.Digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStoredJob(t, manager, job.ID, domain.JobSucceeded)
+	events, err := auditStore.AuditEvents(context.Background(), 10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("audit events=%+v error=%v", events, err)
+	}
+	body, err := json.Marshal(events[0].Details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), obfsPassword) || !strings.Contains(string(body), "obfs-password") || !strings.Contains(string(body), "***") {
+		t.Fatalf("Hysteria obfs-password audit redaction failed: %s", body)
 	}
 }
 

@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -37,5 +38,25 @@ func TestEnqueueDueSchedulesOnlyEnabledDueSources(t *testing.T) {
 	}
 	if queued != 1 || len(jobs.items) != 1 || jobs.items[0].Request["subscriptionId"] != "due" || jobs.items[0].Request["scheduled"] != true {
 		t.Fatalf("queued=%d jobs=%+v", queued, jobs.items)
+	}
+}
+
+type pausedScheduleJobs struct{}
+
+func (pausedScheduleJobs) Submit(context.Context, string, string, map[string]any) (domain.Job, error) {
+	return domain.Job{}, errors.New("paused")
+}
+
+func (pausedScheduleJobs) Paused() bool { return true }
+
+func TestNewSchedulerDefersInitialSubmissionWhileJobManagerIsPaused(t *testing.T) {
+	now := time.Now().UTC()
+	store := scheduleStore{{ID: "due", Enabled: true, Interval: 300, LastAttemptAt: now.Add(-time.Hour)}}
+	scheduler, err := NewScheduler(context.Background(), store, pausedScheduleJobs{}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

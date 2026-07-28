@@ -83,6 +83,96 @@ rules: [MATCH,REJECT]
 	}
 }
 
+func TestGeneratePreservesAdvancedNodeOptionsWhileProtectingChainControl(t *testing.T) {
+	t.Parallel()
+	node := domain.Node{
+		ID: "advanced", Name: "Advanced", Type: "vless", Server: "advanced.example", Port: 443, UUID: "fixture-uuid",
+		Network: "ws", Path: "/canonical", Host: "host.example", TLS: true,
+		Extra: map[string]any{
+			"client-fingerprint": "chrome",
+			"alpn":               []string{"h2", "http/1.1"},
+			"reality-opts":       map[string]any{"public-key": "fixture-public", "short-id": "fixture-short"},
+			"smux":               map[string]any{"enabled": true},
+			"dialer-proxy":       "subscription-controlled",
+			"ws-opts": map[string]any{
+				"max-early-data": 2048,
+				"headers":        map[string]any{"X-Trace": "preserved", "Host": "stale.example"},
+			},
+		},
+	}
+	body, err := Generate(Input{Nodes: []domain.Node{node}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	proxies := document["proxies"].([]any)
+	proxy := proxies[0].(map[string]any)
+	if proxy["dialer-proxy"] != nil || proxy["client-fingerprint"] != "chrome" || proxy["reality-opts"] == nil || proxy["smux"] == nil {
+		t.Fatalf("advanced options were lost or chain control leaked: %+v", proxy)
+	}
+	ws := proxy["ws-opts"].(map[string]any)
+	headers := ws["headers"].(map[string]any)
+	if ws["path"] != "/canonical" || ws["max-early-data"] != 2048 || headers["Host"] != "host.example" || headers["X-Trace"] != "preserved" {
+		t.Fatalf("WebSocket options were not merged: %+v", ws)
+	}
+}
+
+func TestGenerateCanonicalNodeFieldsClearStaleImportedOptions(t *testing.T) {
+	t.Parallel()
+	node := domain.Node{
+		ID: "imported", Name: "Imported", Type: "http", Server: "proxy.example", Port: 8080,
+		Extra: map[string]any{
+			"name": "Stale", "type": "vless", "server": "stale.example", "port": 443,
+			"username": "stale-user", "password": "stale-password", "uuid": "stale-uuid", "cipher": "auto",
+			"network": "ws", "servername": "stale-sni.example", "sni": "stale-alias.example",
+			"udp": true, "tls": true, "skip-cert-verify": true,
+			"ws-opts": map[string]any{
+				"path": "/stale",
+				"headers": map[string]any{
+					"Host": "stale-host.example", "host": "stale-lower.example", "X-Trace": "preserved",
+				},
+				"max-early-data": 2048,
+			},
+		},
+	}
+	body, err := Generate(Input{Nodes: []domain.Node{node}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	proxy := document["proxies"].([]any)[0].(map[string]any)
+	if proxy["name"] != node.Name || proxy["type"] != node.Type || proxy["server"] != node.Server || proxy["port"] != node.Port {
+		t.Fatalf("canonical identity fields were not authoritative: %+v", proxy)
+	}
+	for _, key := range []string{"username", "password", "uuid", "cipher", "network", "servername", "sni", "udp", "tls", "skip-cert-verify"} {
+		if value, found := proxy[key]; found {
+			t.Fatalf("cleared canonical field %q survived with value %#v: %+v", key, value, proxy)
+		}
+	}
+	ws, ok := proxy["ws-opts"].(map[string]any)
+	if !ok || ws["max-early-data"] != 2048 {
+		t.Fatalf("advanced WebSocket options were lost: %+v", proxy)
+	}
+	if value, found := ws["path"]; found {
+		t.Fatalf("cleared WebSocket path survived with value %#v: %+v", value, ws)
+	}
+	headers, ok := ws["headers"].(map[string]any)
+	if !ok || headers["X-Trace"] != "preserved" {
+		t.Fatalf("advanced WebSocket headers were lost: %+v", ws)
+	}
+	for key, value := range headers {
+		if strings.EqualFold(key, "host") {
+			t.Fatalf("cleared WebSocket host survived as %q=%#v: %+v", key, value, headers)
+		}
+	}
+}
+
 func TestGenerateDefaultsMixedPort(t *testing.T) {
 	t.Parallel()
 	body, err := Generate(Input{})

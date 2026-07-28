@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"sort"
@@ -10,19 +11,26 @@ import (
 
 	"github.com/foxc888/foxos/internal/confirmation"
 	"github.com/foxc888/foxos/internal/domain"
+	storepkg "github.com/foxc888/foxos/internal/store/sqlite"
 	"github.com/foxc888/foxos/internal/subscription"
 )
 
 type SubscriptionStore interface {
 	SaveSubscription(context.Context, domain.Subscription) error
+	CreateSubscription(context.Context, domain.Subscription) error
+	UpdateSubscription(context.Context, domain.Subscription) error
 	Subscription(context.Context, string) (domain.Subscription, error)
 	Subscriptions(context.Context) ([]domain.Subscription, error)
 	DeleteSubscription(context.Context, string) error
-	UpdateSubscriptionResult(context.Context, string, string, string, bool) error
+	UpdateSubscriptionResult(context.Context, string, int64, string, string, bool) error
 }
 
 type SubscriptionFetcher interface {
 	Fetch(context.Context, string) (subscription.Result, error)
+}
+
+type subscriptionURLValidator interface {
+	ValidateURL(string) (*url.URL, error)
 }
 
 type subscriptionInput struct {
@@ -34,23 +42,25 @@ type subscriptionInput struct {
 }
 
 type subscriptionOutput struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	URL           string `json:"url"`
-	Enabled       bool   `json:"enabled"`
-	Interval      int    `json:"interval"`
-	LastDigest    string `json:"lastDigest,omitempty"`
-	LastSuccessAt string `json:"lastSuccessAt,omitempty"`
-	LastAttemptAt string `json:"lastAttemptAt,omitempty"`
-	LastError     string `json:"lastError,omitempty"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	URL              string `json:"url"`
+	Enabled          bool   `json:"enabled"`
+	Interval         int    `json:"interval"`
+	LastDigest       string `json:"lastDigest,omitempty"`
+	LastSuccessAt    string `json:"lastSuccessAt,omitempty"`
+	LastAttemptAt    string `json:"lastAttemptAt,omitempty"`
+	LastError        string `json:"lastError,omitempty"`
+	SettingsRevision int64  `json:"settingsRevision"`
 }
 
 func renderSubscription(item domain.Subscription) subscriptionOutput {
-	return subscriptionOutput{ID: item.ID, Name: item.Name, URL: displaySubscriptionURL(item.URL), Enabled: item.Enabled, Interval: item.Interval, LastDigest: item.LastDigest, LastSuccessAt: formatTime(item.LastSuccessAt), LastAttemptAt: formatTime(item.LastAttemptAt), LastError: item.LastError}
+	return subscriptionOutput{ID: item.ID, Name: item.Name, URL: displaySubscriptionURL(item.URL), Enabled: item.Enabled, Interval: item.Interval, LastDigest: item.LastDigest, LastSuccessAt: formatTime(item.LastSuccessAt), LastAttemptAt: formatTime(item.LastAttemptAt), LastError: item.LastError, SettingsRevision: item.SettingsRevision}
 }
 
 type subscriptionDeleteStore interface {
-	DeleteSubscriptionWithNodes(context.Context, string) error
+	DeleteSubscriptionWithNodes(context.Context, string, []string) error
+	DeleteSubscriptionPreservingNodes(context.Context, string, []string) error
 }
 
 type subscriptionEnabledStore interface {
@@ -59,16 +69,18 @@ type subscriptionEnabledStore interface {
 
 type subscriptionDeletePlan struct {
 	Action         string   `json:"action"`
+	Strategy       string   `json:"strategy"`
 	SubscriptionID string   `json:"subscriptionId"`
 	NodeIDs        []string `json:"nodeIds"`
 	NodeCount      int      `json:"nodeCount"`
 }
 
-func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionStore, nodes subscription.NodeStore, fetcher SubscriptionFetcher, signer *confirmation.Signer, replay MihomoReplay, jobs MihomoJobSubmitter, audit AuditStore) {
+func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionStore, nodes subscription.NodeStore, fetcher SubscriptionFetcher, signer *confirmation.Signer, identityHasher subscription.IdentityHasher, replay MihomoReplay, jobs MihomoJobSubmitter, audit AuditStore) {
 	if store == nil {
 		return
 	}
-	updater := subscription.Updater{Sources: store, Nodes: nodes, Fetcher: fetcher}
+	atomic, _ := store.(subscription.AtomicStore)
+	updater := subscription.Updater{Sources: store, Nodes: nodes, Atomic: atomic, Fetcher: fetcher, IdentityHasher: identityHasher}
 	mux.Handle("GET /api/v1/subscriptions", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		items, err := store.Subscriptions(r.Context())
 		if err != nil {
@@ -87,7 +99,7 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 			problem(w, http.StatusBadRequest, "invalid_json", err)
 			return
 		}
-		if _, err := subscription.ValidateURL(input.URL); err != nil {
+		if _, err := validateSubscriptionURL(fetcher, input.URL); err != nil {
 			problem(w, http.StatusUnprocessableEntity, "subscription_url_blocked", err)
 			return
 		}
@@ -101,7 +113,7 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 			input.Interval = 6 * 60 * 60
 		}
 		item := domain.Subscription{ID: input.ID, Name: strings.TrimSpace(input.Name), URL: input.URL, Enabled: input.Enabled, Interval: input.Interval}
-		if err := store.SaveSubscription(r.Context(), item); err != nil {
+		if err := store.CreateSubscription(r.Context(), item); err != nil {
 			problem(w, http.StatusUnprocessableEntity, "subscription_invalid", err)
 			return
 		}
@@ -116,7 +128,7 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 			problem(w, http.StatusBadRequest, "invalid_json", err)
 			return
 		}
-		if _, err := subscription.ValidateURL(input.URL); err != nil {
+		if _, err := validateSubscriptionURL(fetcher, input.URL); err != nil {
 			problem(w, http.StatusUnprocessableEntity, "subscription_url_blocked", err)
 			return
 		}
@@ -133,7 +145,11 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 		item.URL = input.URL
 		item.Enabled = input.Enabled
 		item.Interval = input.Interval
-		if err := store.SaveSubscription(r.Context(), item); err != nil {
+		if err := store.UpdateSubscription(r.Context(), item); err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				problemCode(w, http.StatusNotFound, "subscription_not_found")
+				return
+			}
 			problem(w, http.StatusUnprocessableEntity, "subscription_invalid", err)
 			return
 		}
@@ -200,7 +216,7 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 		problemCode(w, http.StatusConflict, "confirmation_required")
 	})))
 	mux.Handle("POST /api/v1/subscriptions/{id}/preview", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if fetcher == nil || nodes == nil || signer == nil {
+		if fetcher == nil || nodes == nil || signer == nil || identityHasher == nil {
 			problemCode(w, http.StatusServiceUnavailable, "subscription_fetch_unavailable")
 			return
 		}
@@ -219,7 +235,7 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 		writeJSON(w, http.StatusOK, map[string]any{"digest": preview.Plan.Digest, "nodeCount": preview.Plan.NodeCount, "nodes": redactNodeOutputs(preview.Nodes), "plan": preview.Plan, "confirmationToken": token, "expiresInSeconds": 300})
 	})))
 	mux.Handle("POST /api/v1/subscriptions/{id}/update", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if fetcher == nil || nodes == nil || signer == nil || replay == nil || audit == nil {
+		if fetcher == nil || nodes == nil || signer == nil || identityHasher == nil || replay == nil || audit == nil {
 			problemCode(w, http.StatusServiceUnavailable, "subscription_update_unavailable")
 			return
 		}
@@ -272,7 +288,11 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 			event.Outcome = domain.AuditFailed
 			event.Details["errorClass"] = "subscription_update_failed"
 			_ = audit.SaveAudit(r.Context(), event)
-			problem(w, http.StatusConflict, "subscription_update_failed", err)
+			errorCode := "subscription_update_failed"
+			if errors.Is(err, domain.ErrSubscriptionSettingsStale) {
+				errorCode = "subscription_settings_stale"
+			}
+			problem(w, http.StatusConflict, errorCode, err)
 			return
 		}
 		event.Outcome = domain.AuditSucceeded
@@ -284,6 +304,17 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 			problemCode(w, http.StatusServiceUnavailable, "confirmation_unavailable")
 			return
 		}
+		var input struct {
+			Strategy string `json:"strategy"`
+		}
+		if err := decode(r, &input); err != nil {
+			problem(w, http.StatusBadRequest, "invalid_json", err)
+			return
+		}
+		if !validSubscriptionDeleteStrategy(input.Strategy) {
+			problemCode(w, http.StatusUnprocessableEntity, "subscription_delete_strategy_invalid")
+			return
+		}
 		if _, err := store.Subscription(r.Context(), r.PathValue("id")); err != nil {
 			problemCode(w, http.StatusNotFound, "subscription_not_found")
 			return
@@ -293,7 +324,7 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 			problemCode(w, http.StatusInternalServerError, "subscription_nodes_failed")
 			return
 		}
-		plan := subscriptionDeletePlan{Action: "subscription.delete", SubscriptionID: r.PathValue("id"), NodeCount: len(items)}
+		plan := subscriptionDeletePlan{Action: "subscription.delete", Strategy: input.Strategy, SubscriptionID: r.PathValue("id"), NodeCount: len(items)}
 		for _, node := range items {
 			plan.NodeIDs = append(plan.NodeIDs, node.ID)
 		}
@@ -303,7 +334,13 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 			problemCode(w, http.StatusInternalServerError, "confirmation_failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"plan": plan, "confirmationToken": token, "expiresInSeconds": 300, "warnings": []string{"订阅定义和未被引用的来源节点会被删除", "若节点仍被代理组或设备策略引用，删除会整体失败"}})
+		warnings := []string{"执行前会重新核对来源节点集合；计划过期或状态变化时拒绝执行"}
+		if input.Strategy == "detach" {
+			warnings = append(warnings, "来源节点会保留为手工节点，并停止接收该订阅的后续更新")
+		} else {
+			warnings = append(warnings, "所有来源节点会被删除；若任何节点仍被代理组或设备策略引用，事务会整体失败")
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"plan": plan, "confirmationToken": token, "expiresInSeconds": 300, "warnings": warnings})
 	})))
 	mux.Handle("POST /api/v1/subscriptions/{id}/delete", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		deleteStore, ok := store.(subscriptionDeleteStore)
@@ -313,6 +350,7 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 		}
 		var input struct {
 			ConfirmationToken string `json:"confirmationToken"`
+			Strategy          string `json:"strategy"`
 		}
 		if err := decode(r, &input); err != nil {
 			problem(w, http.StatusBadRequest, "invalid_json", err)
@@ -323,7 +361,11 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 			problemCode(w, http.StatusConflict, "subscription_delete_stale")
 			return
 		}
-		plan := subscriptionDeletePlan{Action: "subscription.delete", SubscriptionID: r.PathValue("id"), NodeCount: len(items)}
+		if !validSubscriptionDeleteStrategy(input.Strategy) {
+			problemCode(w, http.StatusUnprocessableEntity, "subscription_delete_strategy_invalid")
+			return
+		}
+		plan := subscriptionDeletePlan{Action: "subscription.delete", Strategy: input.Strategy, SubscriptionID: r.PathValue("id"), NodeCount: len(items)}
 		for _, node := range items {
 			plan.NodeIDs = append(plan.NodeIDs, node.ID)
 		}
@@ -332,7 +374,7 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 			problem(w, http.StatusConflict, "confirmation_invalid", err)
 			return
 		}
-		event := domain.AuditEvent{ID: randomID(), Action: "subscription.delete", TargetID: plan.SubscriptionID, Outcome: domain.AuditStarted, Details: requestAuditDetails(r, map[string]any{"nodeCount": plan.NodeCount, "nodeIds": plan.NodeIDs})}
+		event := domain.AuditEvent{ID: randomID(), Action: "subscription.delete", TargetID: plan.SubscriptionID, Outcome: domain.AuditStarted, Details: requestAuditDetails(r, map[string]any{"strategy": plan.Strategy, "nodeCount": plan.NodeCount, "nodeIds": plan.NodeIDs})}
 		if err := audit.SaveAudit(r.Context(), event); err != nil {
 			problemCode(w, http.StatusInternalServerError, "audit_start_failed")
 			return
@@ -344,17 +386,38 @@ func (s *Server) RegisterSubscriptions(mux *http.ServeMux, store SubscriptionSto
 			problem(w, http.StatusConflict, "confirmation_replayed", err)
 			return
 		}
-		if err := deleteStore.DeleteSubscriptionWithNodes(r.Context(), plan.SubscriptionID); err != nil {
+		var deleteErr error
+		if plan.Strategy == "detach" {
+			deleteErr = deleteStore.DeleteSubscriptionPreservingNodes(r.Context(), plan.SubscriptionID, plan.NodeIDs)
+		} else {
+			deleteErr = deleteStore.DeleteSubscriptionWithNodes(r.Context(), plan.SubscriptionID, plan.NodeIDs)
+		}
+		if deleteErr != nil {
 			event.Outcome = domain.AuditFailed
-			event.Details["errorClass"] = "subscription_delete_failed"
+			errorCode := "subscription_delete_failed"
+			if errors.Is(deleteErr, storepkg.ErrSubscriptionDeletePlanStale) {
+				errorCode = "subscription_delete_stale"
+			}
+			event.Details["errorClass"] = errorCode
 			_ = audit.SaveAudit(r.Context(), event)
-			problem(w, http.StatusConflict, "subscription_delete_failed", err)
+			problem(w, http.StatusConflict, errorCode, deleteErr)
 			return
 		}
 		event.Outcome = domain.AuditSucceeded
 		_ = audit.SaveAudit(r.Context(), event)
-		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "subscriptionId": plan.SubscriptionID, "nodeCount": plan.NodeCount})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "strategy": plan.Strategy, "subscriptionId": plan.SubscriptionID, "nodeCount": plan.NodeCount})
 	})))
+}
+
+func validateSubscriptionURL(fetcher SubscriptionFetcher, raw string) (*url.URL, error) {
+	if validator, ok := fetcher.(subscriptionURLValidator); ok {
+		return validator.ValidateURL(raw)
+	}
+	return subscription.ValidateURL(raw)
+}
+
+func validSubscriptionDeleteStrategy(strategy string) bool {
+	return strategy == "detach" || strategy == "cascade"
 }
 
 func redactNodeOutputs(nodes []domain.Node) []nodeOutput {

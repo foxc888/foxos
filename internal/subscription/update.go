@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -10,14 +11,16 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/foxc888/foxos/internal/domain"
-	"github.com/foxc888/foxos/internal/mihomo"
 )
 
-var ErrContentChanged = errors.New("subscription content changed after preview")
+var (
+	ErrContentChanged                     = errors.New("subscription content changed after preview")
+	ErrPartialParseRequiresConfirmation   = errors.New("subscription contains skipped entries and requires an explicit preview")
+	ErrLargeReductionRequiresConfirmation = errors.New("subscription node count dropped unexpectedly and requires an explicit preview")
+)
 
 type RecoveryState string
 
@@ -29,7 +32,7 @@ const (
 
 type SourceStore interface {
 	Subscription(context.Context, string) (domain.Subscription, error)
-	UpdateSubscriptionResult(context.Context, string, string, string, bool) error
+	UpdateSubscriptionResult(context.Context, string, int64, string, string, bool) error
 }
 
 type NodeStore interface {
@@ -37,64 +40,112 @@ type NodeStore interface {
 	ReplaceSubscriptionNodes(context.Context, string, []domain.Node) error
 }
 
+type AtomicStore interface {
+	ApplySubscriptionUpdate(context.Context, string, []domain.Node, string, int64) error
+}
+
+type IdentityHasher func([]byte) ([sha256.Size]byte, error)
+
+func NewIdentityHasher(key []byte) (IdentityHasher, error) {
+	if len(key) < 32 {
+		return nil, errors.New("subscription identity key must contain at least 32 bytes")
+	}
+	keyCopy := append([]byte(nil), key...)
+	return func(body []byte) ([sha256.Size]byte, error) {
+		mac := hmac.New(sha256.New, keyCopy)
+		_, _ = mac.Write([]byte("foxos/subscription-node-id/v1\x00"))
+		_, _ = mac.Write(body)
+		var digest [sha256.Size]byte
+		copy(digest[:], mac.Sum(nil))
+		return digest, nil
+	}, nil
+}
+
 type RemoteFetcher interface {
 	Fetch(context.Context, string) (Result, error)
 }
 
 type UpdatePlan struct {
-	Action         string   `json:"action"`
-	SubscriptionID string   `json:"subscriptionId"`
-	Digest         string   `json:"digest"`
-	NodeIDs        []string `json:"nodeIds"`
-	RemovedNodeIDs []string `json:"removedNodeIds"`
-	ExistingCount  int      `json:"existingCount"`
-	NodeCount      int      `json:"nodeCount"`
-	AddCount       int      `json:"addCount"`
-	UpdateCount    int      `json:"updateCount"`
-	RemoveCount    int      `json:"removeCount"`
+	Action              string       `json:"action"`
+	SubscriptionID      string       `json:"subscriptionId"`
+	Digest              string       `json:"digest"`
+	NodeIDs             []string     `json:"nodeIds"`
+	RemovedNodeIDs      []string     `json:"removedNodeIds"`
+	ExistingCount       int          `json:"existingCount"`
+	NodeCount           int          `json:"nodeCount"`
+	AddCount            int          `json:"addCount"`
+	UpdateCount         int          `json:"updateCount"`
+	RemoveCount         int          `json:"removeCount"`
+	ParseValidCount     int          `json:"parseValidCount"`
+	ParseSkippedCount   int          `json:"parseSkippedCount"`
+	ParseErrors         []ParseIssue `json:"parseErrors,omitempty"`
+	SuspiciousReduction bool         `json:"suspiciousReduction"`
+	SettingsRevision    int64        `json:"settingsRevision"`
 }
 
 type UpdatePreview struct {
-	Plan  UpdatePlan
-	Nodes []domain.Node
+	Plan     UpdatePlan
+	Nodes    []domain.Node
+	Previous []domain.Node
 }
 
 type Updater struct {
-	Sources SourceStore
-	Nodes   NodeStore
-	Fetcher RemoteFetcher
-	Parser  func([]byte) ([]domain.Node, error)
+	Sources        SourceStore
+	Nodes          NodeStore
+	Atomic         AtomicStore
+	Fetcher        RemoteFetcher
+	Parser         func([]byte) ([]domain.Node, error)
+	IdentityHasher IdentityHasher
 }
 
 func (u Updater) Preview(ctx context.Context, id string) (UpdatePreview, error) {
-	if u.Sources == nil || u.Nodes == nil || u.Fetcher == nil {
-		return UpdatePreview{}, errors.New("subscription updater is not configured")
+	preview, _, err := u.preview(ctx, id)
+	return preview, err
+}
+
+func (u Updater) preview(ctx context.Context, id string) (UpdatePreview, int64, error) {
+	if u.Sources == nil || u.Nodes == nil || u.Fetcher == nil || u.IdentityHasher == nil {
+		return UpdatePreview{}, 0, errors.New("subscription updater is not configured")
 	}
 	item, err := u.Sources.Subscription(ctx, id)
 	if err != nil {
-		return UpdatePreview{}, err
+		return UpdatePreview{}, 0, err
+	}
+	revision := item.SettingsRevision
+	if revision < 1 {
+		return UpdatePreview{}, revision, errors.New("subscription settings revision is invalid")
 	}
 	result, err := u.Fetcher.Fetch(ctx, item.URL)
 	if err != nil {
-		return UpdatePreview{}, err
+		return UpdatePreview{}, revision, err
 	}
 	parser := u.Parser
+	parseResult := ParseResult{Format: "custom"}
+	var parsed []domain.Node
 	if parser == nil {
-		parser = parseNodes
+		parseResult, err = ParseNodes(result.Body)
+		parsed = parseResult.Nodes
+	} else {
+		parsed, err = parser(result.Body)
+		parseResult.Nodes = parsed
 	}
-	parsed, err := parser(result.Body)
 	if err != nil {
-		return UpdatePreview{}, err
-	}
-	prepared, err := prepareNodes(item, parsed)
-	if err != nil {
-		return UpdatePreview{}, err
+		return UpdatePreview{}, revision, err
 	}
 	existing, err := u.Nodes.SubscriptionNodes(ctx, id)
 	if err != nil {
-		return UpdatePreview{}, err
+		return UpdatePreview{}, revision, err
 	}
-	return UpdatePreview{Plan: buildUpdatePlan(id, result.Digest, existing, prepared), Nodes: prepared}, nil
+	prepared, err := prepareNodes(item, parsed, existing, u.IdentityHasher)
+	if err != nil {
+		return UpdatePreview{}, revision, err
+	}
+	plan := buildUpdatePlan(id, item.SettingsRevision, result.Digest, existing, prepared)
+	plan.ParseValidCount = len(parseResult.Nodes)
+	plan.ParseSkippedCount = parseResult.Skipped
+	plan.ParseErrors = append([]ParseIssue(nil), parseResult.Errors...)
+	plan.SuspiciousReduction = suspiciousSubscriptionReduction(len(existing), len(prepared))
+	return UpdatePreview{Plan: plan, Nodes: prepared, Previous: append([]domain.Node(nil), existing...)}, revision, nil
 }
 
 func (u Updater) Apply(ctx context.Context, id string, expected *UpdatePlan) (UpdatePreview, error) {
@@ -102,45 +153,73 @@ func (u Updater) Apply(ctx context.Context, id string, expected *UpdatePlan) (Up
 }
 
 func (u Updater) ApplyWithCheckpoint(ctx context.Context, id string, expected *UpdatePlan, checkpoint func(string, UpdatePreview) error) (UpdatePreview, error) {
-	preview, err := u.Preview(ctx, id)
+	preview, revision, err := u.preview(ctx, id)
 	if err != nil {
-		u.recordFailure(ctx, id, err)
-		return UpdatePreview{}, err
+		return UpdatePreview{}, u.recordFailure(ctx, id, revision, err)
+	}
+	if expected != nil && expected.SettingsRevision != preview.Plan.SettingsRevision {
+		return preview, domain.ErrSubscriptionSettingsStale
 	}
 	if expected != nil && !EqualUpdatePlans(*expected, preview.Plan) {
-		u.recordFailure(ctx, id, ErrContentChanged)
-		return UpdatePreview{}, ErrContentChanged
+		return UpdatePreview{}, u.recordFailure(ctx, id, revision, ErrContentChanged)
+	}
+	if expected == nil && preview.Plan.ParseSkippedCount > 0 {
+		return preview, u.recordFailure(ctx, id, revision, ErrPartialParseRequiresConfirmation)
+	}
+	if expected == nil && preview.Plan.SuspiciousReduction {
+		return preview, u.recordFailure(ctx, id, revision, ErrLargeReductionRequiresConfirmation)
 	}
 	if checkpoint != nil {
 		if err := checkpoint("preview_verified", preview); err != nil {
-			return UpdatePreview{}, err
+			return preview, err
 		}
 	}
-	if err := u.Nodes.ReplaceSubscriptionNodes(ctx, id, preview.Nodes); err != nil {
-		u.recordFailure(ctx, id, err)
-		return UpdatePreview{}, err
+	if u.Atomic == nil {
+		return preview, errors.New("subscription updates require an atomic store")
+	}
+	if err := u.Atomic.ApplySubscriptionUpdate(ctx, id, preview.Nodes, preview.Plan.Digest, preview.Plan.SettingsRevision); err != nil {
+		return preview, u.recordFailure(ctx, id, revision, err)
 	}
 	if checkpoint != nil {
-		if err := checkpoint("nodes_replaced", preview); err != nil {
-			return UpdatePreview{}, err
-		}
-	}
-	if err := u.Sources.UpdateSubscriptionResult(ctx, id, preview.Plan.Digest, "", true); err != nil {
-		return UpdatePreview{}, err
-	}
-	if checkpoint != nil {
-		if err := checkpoint("source_recorded", preview); err != nil {
-			return UpdatePreview{}, err
+		if err := checkpoint("state_committed", preview); err != nil {
+			return preview, err
 		}
 	}
 	return preview, nil
 }
 
+// Readback classifies the state visible after an interrupted apply without
+// fetching the remote source again. It only reports the pre-state when the
+// complete source-owned node set exactly matches the captured preview state.
+func (u Updater) Readback(ctx context.Context, id string, preview UpdatePreview) (RecoveryState, error) {
+	if preview.Plan.SubscriptionID != id || preview.Plan.Digest == "" || u.Sources == nil || u.Nodes == nil {
+		return RecoveryPartial, errors.New("subscription readback requires a complete preview")
+	}
+	current, err := u.Nodes.SubscriptionNodes(ctx, id)
+	if err != nil {
+		return RecoveryPartial, err
+	}
+	item, err := u.Sources.Subscription(ctx, id)
+	if err != nil {
+		return RecoveryPartial, err
+	}
+	if item.SettingsRevision != preview.Plan.SettingsRevision {
+		return RecoveryPartial, nil
+	}
+	if equalNodeSets(current, preview.Nodes) && strings.EqualFold(item.LastDigest, preview.Plan.Digest) && item.LastError == "" {
+		return RecoveryCompleted, nil
+	}
+	if equalNodeSets(current, preview.Previous) && !strings.EqualFold(item.LastDigest, preview.Plan.Digest) {
+		return RecoveryPreState, nil
+	}
+	return RecoveryPartial, nil
+}
+
 // Reconcile proves which side of the subscription replacement transaction is
 // visible after a crash. It may only repair the source result after proving
 // that the complete desired node set is already present.
-func (u Updater) Reconcile(ctx context.Context, id, expectedDigest, expectedPlanDigest string) (RecoveryState, UpdatePreview, error) {
-	if expectedDigest == "" || expectedPlanDigest == "" {
+func (u Updater) Reconcile(ctx context.Context, id, expectedDigest, expectedPlanDigest string, expectedSettingsRevision int64) (RecoveryState, UpdatePreview, error) {
+	if expectedDigest == "" || expectedPlanDigest == "" || expectedSettingsRevision < 1 {
 		return RecoveryPartial, UpdatePreview{}, nil
 	}
 	preview, err := u.Preview(ctx, id)
@@ -148,6 +227,9 @@ func (u Updater) Reconcile(ctx context.Context, id, expectedDigest, expectedPlan
 		return RecoveryPartial, UpdatePreview{}, err
 	}
 	if !strings.EqualFold(preview.Plan.Digest, expectedDigest) {
+		return RecoveryPartial, preview, nil
+	}
+	if preview.Plan.SettingsRevision != expectedSettingsRevision {
 		return RecoveryPartial, preview, nil
 	}
 	current, err := u.Nodes.SubscriptionNodes(ctx, id)
@@ -160,7 +242,7 @@ func (u Updater) Reconcile(ctx context.Context, id, expectedDigest, expectedPlan
 	}
 	if equalNodeSets(current, preview.Nodes) {
 		if !strings.EqualFold(item.LastDigest, expectedDigest) || item.LastError != "" {
-			if err := u.Sources.UpdateSubscriptionResult(ctx, id, expectedDigest, "", true); err != nil {
+			if err := u.Sources.UpdateSubscriptionResult(ctx, id, expectedSettingsRevision, expectedDigest, "", true); err != nil {
 				return RecoveryPartial, preview, err
 			}
 		}
@@ -209,75 +291,102 @@ func equalNodeSets(left, right []domain.Node) bool {
 	return true
 }
 
-func (u Updater) recordFailure(ctx context.Context, id string, cause error) {
+func (u Updater) recordFailure(ctx context.Context, id string, settingsRevision int64, cause error) error {
+	if errors.Is(cause, domain.ErrSubscriptionSettingsStale) {
+		return domain.ErrSubscriptionSettingsStale
+	}
+	if settingsRevision < 1 {
+		return cause
+	}
 	message := "subscription update failed"
 	if errors.Is(cause, ErrContentChanged) {
 		message = "subscription content changed after preview"
 	}
-	_ = u.Sources.UpdateSubscriptionResult(ctx, id, "", message, false)
-}
-
-func parseNodes(body []byte) ([]domain.Node, error) {
-	text := strings.TrimSpace(string(body))
-	if text == "" {
-		return nil, errors.New("subscription is empty")
+	if err := u.Sources.UpdateSubscriptionResult(ctx, id, settingsRevision, "", message, false); err != nil {
+		if errors.Is(err, domain.ErrSubscriptionSettingsStale) {
+			return domain.ErrSubscriptionSettingsStale
+		}
+		return fmt.Errorf("record subscription update failure: %w", err)
 	}
-	return mihomo.ParseShareLinks(text)
+	return cause
 }
 
-func prepareNodes(item domain.Subscription, parsed []domain.Node) ([]domain.Node, error) {
+func suspiciousSubscriptionReduction(existing, desired int) bool {
+	return existing >= 10 && existing-desired >= 5 && desired*2 < existing
+}
+
+func prepareNodes(item domain.Subscription, parsed, existing []domain.Node, identityHasher IdentityHasher) ([]domain.Node, error) {
 	const maxSubscriptionNodes = 4096
 	if len(parsed) > maxSubscriptionNodes {
 		return nil, fmt.Errorf("subscription exceeds %d nodes", maxSubscriptionNodes)
 	}
-	prepared := make([]domain.Node, 0, len(parsed))
-	seen := make(map[string][]domain.Node, len(parsed))
-	names := make(map[string]struct{}, len(parsed))
+	if identityHasher == nil {
+		return nil, errors.New("subscription identity hasher is required")
+	}
+	existingByFingerprint := make(map[string]domain.Node, len(existing))
+	existingIDs := make(map[string]string, len(existing))
+	for _, node := range existing {
+		fingerprint, err := subscriptionNodeFingerprint(item.ID, node, identityHasher)
+		if err != nil {
+			return nil, err
+		}
+		if previous, duplicate := existingByFingerprint[fingerprint]; duplicate && !equivalentSubscriptionNode(previous, node) {
+			return nil, errors.New("subscription identity HMAC collision in existing nodes")
+		}
+		existingByFingerprint[fingerprint] = node
+		existingIDs[node.ID] = fingerprint
+	}
+	type preparedNode struct {
+		node        domain.Node
+		remoteName  string
+		fingerprint string
+	}
+	candidates := make([]preparedNode, 0, len(parsed))
+	seen := make(map[string]domain.Node, len(parsed))
+	generatedIDs := make(map[string]string, len(parsed))
 	for _, node := range parsed {
 		remoteName := strings.TrimSpace(node.Name)
 		if remoteName == "" {
 			remoteName = node.Server
 		}
-		node.ID = ""
-		node.Name = ""
-		node.SubscriptionID = ""
-		body, err := json.Marshal(struct {
-			SubscriptionID string `json:"subscriptionId"`
-			Type           string `json:"type"`
-			Server         string `json:"server"`
-			Port           int    `json:"port"`
-			Cipher         string `json:"cipher,omitempty"`
-			Network        string `json:"network,omitempty"`
-			SNI            string `json:"sni,omitempty"`
-			Path           string `json:"path,omitempty"`
-			Host           string `json:"host,omitempty"`
-			TLS            bool   `json:"tls,omitempty"`
-		}{SubscriptionID: item.ID, Type: node.Type, Server: node.Server, Port: node.Port, Cipher: node.Cipher, Network: node.Network, SNI: node.SNI, Path: node.Path, Host: node.Host, TLS: node.TLS})
+		fingerprint, err := subscriptionNodeFingerprint(item.ID, node, identityHasher)
 		if err != nil {
 			return nil, err
 		}
-		digest := sha256.Sum256(body)
-		fingerprint := hex.EncodeToString(digest[:])
-		duplicate := false
-		for _, previous := range seen[fingerprint] {
+		if previous, duplicate := seen[fingerprint]; duplicate {
 			if equivalentSubscriptionNode(previous, node) {
-				duplicate = true
-				break
+				continue
 			}
+			return nil, errors.New("subscription identity HMAC collision")
 		}
-		if duplicate {
-			continue
-		}
-		seen[fingerprint] = append(seen[fingerprint], node)
-		node.ID = "sub-" + fingerprint[:24]
-		if occurrence := len(seen[fingerprint]); occurrence > 1 {
-			node.ID += "-" + strconv.Itoa(occurrence)
+		seen[fingerprint] = node
+		if previous, found := existingByFingerprint[fingerprint]; found {
+			if !equivalentSubscriptionNode(previous, node) {
+				return nil, errors.New("subscription identity HMAC collision with existing node")
+			}
+			node.ID = previous.ID
+		} else {
+			node.ID = "sub-" + fingerprint[:24]
+			if previousFingerprint, collision := existingIDs[node.ID]; collision && previousFingerprint != fingerprint {
+				return nil, errors.New("subscription node ID collides with a legacy node")
+			}
+			if previousFingerprint, collision := generatedIDs[node.ID]; collision && previousFingerprint != fingerprint {
+				return nil, errors.New("subscription node ID HMAC prefix collision")
+			}
+			generatedIDs[node.ID] = fingerprint
 		}
 		node.SubscriptionID = item.ID
-		node.Name = strings.TrimSpace(item.Name) + " / " + remoteName
+		candidates = append(candidates, preparedNode{node: node, remoteName: remoteName, fingerprint: fingerprint})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].node.ID < candidates[j].node.ID })
+	prepared := make([]domain.Node, 0, len(candidates))
+	names := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		node := candidate.node
+		node.Name = strings.TrimSpace(item.Name) + " / " + candidate.remoteName
 		nameKey := strings.ToLower(node.Name)
 		if _, duplicate := names[nameKey]; duplicate {
-			node.Name += " [" + fingerprint[:6] + "]"
+			node.Name += " [" + candidate.fingerprint[:6] + "]"
 			nameKey = strings.ToLower(node.Name)
 		}
 		names[nameKey] = struct{}{}
@@ -289,19 +398,44 @@ func prepareNodes(item domain.Subscription, parsed []domain.Node) ([]domain.Node
 	if len(prepared) == 0 {
 		return nil, errors.New("subscription has no supported nodes")
 	}
-	sort.Slice(prepared, func(i, j int) bool { return prepared[i].ID < prepared[j].ID })
 	return prepared, nil
 }
 
-func equivalentSubscriptionNode(left, right domain.Node) bool {
-	left.ID, right.ID = "", ""
-	left.Name, right.Name = "", ""
-	left.SubscriptionID, right.SubscriptionID = "", ""
-	return reflect.DeepEqual(left, right)
+func subscriptionNodeFingerprint(subscriptionID string, node domain.Node, identityHasher IdentityHasher) (string, error) {
+	normalized := normalizedSubscriptionNode(node)
+	body, err := json.Marshal(struct {
+		SubscriptionID string      `json:"subscriptionId"`
+		Node           domain.Node `json:"node"`
+	}{SubscriptionID: subscriptionID, Node: normalized}) // #nosec G117 -- keyed HMAC input remains process-local.
+	if err != nil {
+		return "", err
+	}
+	digest, err := identityHasher(body)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest[:]), nil
 }
 
-func buildUpdatePlan(subscriptionID, digest string, existing, desired []domain.Node) UpdatePlan {
-	plan := UpdatePlan{Action: "subscription.update", SubscriptionID: subscriptionID, Digest: digest, ExistingCount: len(existing), NodeCount: len(desired)}
+func normalizedSubscriptionNode(node domain.Node) domain.Node {
+	node.ID = ""
+	node.Name = ""
+	node.SubscriptionID = ""
+	node.Type = strings.ToLower(strings.TrimSpace(node.Type))
+	node.Server = strings.ToLower(strings.TrimSpace(node.Server))
+	node.Cipher = strings.ToLower(strings.TrimSpace(node.Cipher))
+	node.Network = strings.ToLower(strings.TrimSpace(node.Network))
+	node.SNI = strings.ToLower(strings.TrimSpace(node.SNI))
+	node.Host = strings.ToLower(strings.TrimSpace(node.Host))
+	return node
+}
+
+func equivalentSubscriptionNode(left, right domain.Node) bool {
+	return reflect.DeepEqual(normalizedSubscriptionNode(left), normalizedSubscriptionNode(right))
+}
+
+func buildUpdatePlan(subscriptionID string, settingsRevision int64, digest string, existing, desired []domain.Node) UpdatePlan {
+	plan := UpdatePlan{Action: "subscription.update", SubscriptionID: subscriptionID, SettingsRevision: settingsRevision, Digest: digest, ExistingCount: len(existing), NodeCount: len(desired)}
 	existingByID := make(map[string]domain.Node, len(existing))
 	for _, node := range existing {
 		existingByID[node.ID] = node

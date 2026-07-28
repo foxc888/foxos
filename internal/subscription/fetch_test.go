@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"testing"
 )
@@ -85,11 +86,60 @@ func TestFetcherRedirectPolicyLimitsHopsBeforeFollowing(t *testing.T) {
 	for index := range via {
 		via[index] = request.Clone(context.Background())
 	}
-	check := checkSubscriptionRedirect(resolver)
+	check := checkSubscriptionRedirect(resolver, nil)
 	if err := check(request, via[:3]); err != nil {
 		t.Fatalf("third redirect rejected: %v", err)
 	}
 	if err := check(request, via); !errors.Is(err, ErrRedirects) {
 		t.Fatalf("fourth redirect err=%v", err)
 	}
+}
+
+func TestFetcherPrivateAllowlistAppliesToLiteralDNSRedirectAndRebinding(t *testing.T) {
+	t.Parallel()
+	allowed := []netip.Prefix{netip.MustParsePrefix("10.20.0.0/16")}
+	fetcher := Fetcher{AllowedPrivate: allowed}
+	if _, err := fetcher.ValidateURL("https://10.20.1.2/nodes"); err != nil {
+		t.Fatalf("allowlisted literal rejected: %v", err)
+	}
+	for _, raw := range []string{"https://10.21.1.2/nodes", "https://127.0.0.1/nodes", "https://169.254.169.254/latest/meta-data"} {
+		if _, err := fetcher.ValidateURL(raw); !errors.Is(err, ErrBlockedURL) {
+			t.Fatalf("blocked literal %q err=%v", raw, err)
+		}
+	}
+	if _, err := resolveAllowedHost(context.Background(), staticResolver{{IP: net.ParseIP("10.20.1.2")}}, "feed.example", allowed); err != nil {
+		t.Fatalf("allowlisted DNS result rejected: %v", err)
+	}
+	mixed := staticResolver{{IP: net.ParseIP("10.20.1.2")}, {IP: net.ParseIP("10.21.1.2")}}
+	if _, err := resolveAllowedHost(context.Background(), mixed, "feed.example", allowed); !errors.Is(err, ErrBlockedURL) {
+		t.Fatalf("mixed allowed and blocked DNS answers err=%v", err)
+	}
+	redirect := &http.Request{URL: &url.URL{Scheme: "https", Host: "10.21.1.2", Path: "/nodes"}}
+	if err := checkSubscriptionRedirect(staticResolver(nil), allowed)(redirect, nil); !errors.Is(err, ErrBlockedURL) {
+		t.Fatalf("redirect outside allowlist err=%v", err)
+	}
+	resolver := &changingResolver{answers: [][]net.IPAddr{
+		{{IP: net.ParseIP("10.20.1.2")}},
+		{{IP: net.ParseIP("169.254.169.254")}},
+	}}
+	if _, err := resolveAllowedHost(context.Background(), resolver, "feed.example", allowed); err != nil {
+		t.Fatalf("first resolution rejected: %v", err)
+	}
+	if _, err := resolveAllowedHost(context.Background(), resolver, "feed.example", allowed); !errors.Is(err, ErrBlockedURL) {
+		t.Fatalf("rebinding resolution err=%v", err)
+	}
+}
+
+type changingResolver struct {
+	answers [][]net.IPAddr
+	calls   int
+}
+
+func (r *changingResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	index := r.calls
+	if index >= len(r.answers) {
+		index = len(r.answers) - 1
+	}
+	r.calls++
+	return r.answers[index], nil
 }

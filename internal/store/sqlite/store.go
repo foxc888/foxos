@@ -17,20 +17,30 @@ import (
 
 var ErrNotFound = domain.ErrNotFound
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // CurrentSchemaVersion is the newest schema this binary can safely open.
 // Upgrade recovery uses it before migrations run so an older binary never
 // attempts to open a database migrated by a newer release.
 func CurrentSchemaVersion() int { return currentSchemaVersion }
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db   *gatedDB
+	gate *writeGate
+}
 
 func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("database path is required")
 	}
 	if path != ":memory:" {
+		if info, err := os.Lstat(path); err == nil {
+			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+				return nil, errors.New("database path must be a regular file, not a symlink")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return nil, err
 		}
@@ -40,7 +50,13 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db}
+	db.SetMaxIdleConns(1)
+	gate := newWriteGate()
+	store := &Store{db: &gatedDB{DB: db, gate: gate}, gate: gate}
+	if err := store.configure(context.Background(), path); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := store.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -56,6 +72,42 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+func (s *Store) FreezeWrites(ctx context.Context) error {
+	if s == nil || s.gate == nil {
+		return errors.New("database write gate is unavailable")
+	}
+	return s.gate.freeze(ctx)
+}
+
+func (s *Store) ResumeWrites() {
+	if s != nil && s.gate != nil {
+		s.gate.resume()
+	}
+}
+
+func (s *Store) WritesFrozen() bool {
+	return s != nil && s.gate != nil && s.gate.isFrozen()
+}
+
+func (s *Store) configure(ctx context.Context, path string) error {
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;`); err != nil {
+		return fmt.Errorf("configure SQLite safety pragmas: %w", err)
+	}
+	if path != ":memory:" {
+		var mode string
+		if err := s.db.QueryRowContext(ctx, `PRAGMA journal_mode = WAL`).Scan(&mode); err != nil {
+			return fmt.Errorf("enable SQLite WAL: %w", err)
+		}
+		if !strings.EqualFold(mode, "wal") {
+			return fmt.Errorf("enable SQLite WAL: database selected %q journal mode", mode)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA synchronous = NORMAL`); err != nil {
+		return fmt.Errorf("configure SQLite durability: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 	var version int
 	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
@@ -65,10 +117,23 @@ func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
-		PRAGMA foreign_keys = ON;
-		PRAGMA busy_timeout = 5000;
-		CREATE TABLE IF NOT EXISTS schema_migrations (
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		return fmt.Errorf("create schema migration ledger: %w", err)
+	}
+	var existingVersion int
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&existingVersion); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if existingVersion > currentSchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than supported version %d", existingVersion, currentSchemaVersion)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin schema migration: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS schema_migrations (
 			version INTEGER PRIMARY KEY,
 			applied_at TEXT NOT NULL
 		);
@@ -124,6 +189,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			updated_at TEXT NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS jobs_updated_at ON jobs(updated_at DESC);
+		CREATE INDEX IF NOT EXISTS jobs_recovery ON jobs(kind, status, created_at, id);
 		CREATE UNIQUE INDEX IF NOT EXISTS jobs_idempotency_key ON jobs(kind, idempotency_key) WHERE idempotency_key <> '';
 		CREATE TABLE IF NOT EXISTS mihomo_drafts (
 			id TEXT PRIMARY KEY,
@@ -202,8 +268,22 @@ func (s *Store) migrate(ctx context.Context) error {
 			updated_at TEXT NOT NULL
 		);
 		INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(4, CURRENT_TIMESTAMP);
-	`)
-	return err
+		`)
+	if err != nil {
+		return fmt.Errorf("apply schema migrations: %w", err)
+	}
+	if existingVersion < 5 {
+		if _, err := tx.ExecContext(ctx, `
+			ALTER TABLE subscriptions ADD COLUMN settings_revision INTEGER NOT NULL DEFAULT 1;
+			INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(5, CURRENT_TIMESTAMP);
+		`); err != nil {
+			return fmt.Errorf("apply subscription settings revision migration: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit schema migrations: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) SaveNode(ctx context.Context, node domain.Node) error {
@@ -211,6 +291,34 @@ func (s *Store) SaveNode(ctx context.Context, node domain.Node) error {
 		return err
 	}
 	return s.saveNodes(ctx, []domain.Node{node})
+}
+
+func (s *Store) CreateNode(ctx context.Context, node domain.Node) error {
+	if err := node.Validate(); err != nil {
+		return err
+	}
+	body, err := json.Marshal(node) // #nosec G117 -- credentials remain in the mode-0600 local database.
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO nodes(id,name,type,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?)`, node.ID, node.Name, node.Type, string(body), now, now)
+	return err
+}
+
+func (s *Store) UpdateNode(ctx context.Context, node domain.Node) error {
+	if err := node.Validate(); err != nil {
+		return err
+	}
+	body, err := json.Marshal(node) // #nosec G117 -- credentials remain in the mode-0600 local database.
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET name=?,type=?,payload_json=?,updated_at=? WHERE id=?`, node.Name, node.Type, string(body), time.Now().UTC().Format(time.RFC3339Nano), node.ID)
+	if err != nil {
+		return err
+	}
+	return requireUpdatedRow(result)
 }
 
 func (s *Store) SaveNodes(ctx context.Context, nodes []domain.Node) error {
@@ -288,57 +396,150 @@ func (s *Store) Nodes(ctx context.Context) ([]domain.Node, error) {
 }
 
 func (s *Store) DeleteNode(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id=?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
+	defer tx.Rollback()
+	var payload string
+	if err := tx.QueryRowContext(ctx, `SELECT payload_json FROM nodes WHERE id=?`, id).Scan(&payload); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	var node domain.Node
+	if err := json.Unmarshal([]byte(payload), &node); err != nil {
+		return fmt.Errorf("decode node: %w", err)
+	}
+	if node.SubscriptionID != "" {
+		return &ReferenceError{Resource: "node", References: []string{"subscription:" + node.SubscriptionID}}
+	}
+	references, err := nodeReferencesTx(ctx, tx.Tx, map[string]struct{}{id: {}})
 	if err != nil {
 		return err
 	}
-	if affected == 0 {
-		return ErrNotFound
+	if len(references) > 0 {
+		return &ReferenceError{Resource: "node", References: references}
 	}
-	return nil
+	result, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if err := requireUpdatedRow(result); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SaveGroup(ctx context.Context, group domain.Group) error {
 	if err := group.Validate(); err != nil {
 		return err
 	}
-	if err := s.validateGroupReferences(ctx, group); err != nil {
+	return s.writeGroup(ctx, group, "save")
+}
+
+func (s *Store) CreateGroup(ctx context.Context, group domain.Group) error {
+	if err := group.Validate(); err != nil {
 		return err
 	}
+	return s.writeGroup(ctx, group, "create")
+}
+
+func (s *Store) UpdateGroup(ctx context.Context, group domain.Group) error {
+	if err := group.Validate(); err != nil {
+		return err
+	}
+	return s.writeGroup(ctx, group, "update")
+}
+
+func (s *Store) writeGroup(ctx context.Context, group domain.Group, mode string) error {
 	body, err := json.Marshal(group)
 	if err != nil {
 		return err
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := validateGroupReferencesTx(ctx, tx.Tx, group); err != nil {
+		return err
+	}
+	if group.Type != "chain" {
+		references, err := proxyChainPolicyReferences(ctx, tx, group.ID)
+		if err != nil {
+			return err
+		}
+		if len(references) > 0 {
+			return &ReferenceError{Resource: "proxy-chain group", References: references}
+		}
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO proxy_groups(id,name,type,payload_json,created_at,updated_at)
-		VALUES(?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET
-			name=excluded.name,type=excluded.type,payload_json=excluded.payload_json,updated_at=excluded.updated_at
-	`, group.ID, group.Name, group.Type, string(body), now, now)
-	return err
+	var result sql.Result
+	switch mode {
+	case "save":
+		result, err = tx.ExecContext(ctx, `
+			INSERT INTO proxy_groups(id,name,type,payload_json,created_at,updated_at)
+			VALUES(?,?,?,?,?,?)
+			ON CONFLICT(id) DO UPDATE SET
+				name=excluded.name,type=excluded.type,payload_json=excluded.payload_json,updated_at=excluded.updated_at
+		`, group.ID, group.Name, group.Type, string(body), now, now)
+	case "create":
+		result, err = tx.ExecContext(ctx, `INSERT INTO proxy_groups(id,name,type,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?)`, group.ID, group.Name, group.Type, string(body), now, now)
+	case "update":
+		result, err = tx.ExecContext(ctx, `UPDATE proxy_groups SET name=?,type=?,payload_json=?,updated_at=? WHERE id=?`, group.Name, group.Type, string(body), now, group.ID)
+	default:
+		return errors.New("unsupported proxy group write mode")
+	}
+	if err != nil {
+		return err
+	}
+	if mode == "update" {
+		if err := requireUpdatedRow(result); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
-func (s *Store) validateGroupReferences(ctx context.Context, candidate domain.Group) error {
-	nodes, err := s.Nodes(ctx)
+func validateGroupReferencesTx(ctx context.Context, tx *sql.Tx, candidate domain.Group) error {
+	nodeRows, err := tx.QueryContext(ctx, `SELECT id FROM nodes`)
 	if err != nil {
 		return fmt.Errorf("read proxy nodes: %w", err)
 	}
-	groups, err := s.Groups(ctx)
+	nodeIDs := make(map[string]struct{})
+	for nodeRows.Next() {
+		var id string
+		if err := nodeRows.Scan(&id); err != nil {
+			_ = nodeRows.Close()
+			return err
+		}
+		nodeIDs[id] = struct{}{}
+	}
+	if err := nodeRows.Close(); err != nil {
+		return err
+	}
+	groupRows, err := tx.QueryContext(ctx, `SELECT payload_json FROM proxy_groups`)
 	if err != nil {
 		return fmt.Errorf("read proxy groups: %w", err)
 	}
-	nodeIDs := make(map[string]struct{}, len(nodes))
-	for _, node := range nodes {
-		nodeIDs[node.ID] = struct{}{}
-	}
-	byID := make(map[string]domain.Group, len(groups)+1)
-	for _, group := range groups {
+	byID := make(map[string]domain.Group)
+	for groupRows.Next() {
+		var payload string
+		if err := groupRows.Scan(&payload); err != nil {
+			_ = groupRows.Close()
+			return err
+		}
+		var group domain.Group
+		if err := json.Unmarshal([]byte(payload), &group); err != nil {
+			_ = groupRows.Close()
+			return fmt.Errorf("decode proxy group: %w", err)
+		}
 		byID[group.ID] = group
+	}
+	if err := groupRows.Close(); err != nil {
+		return err
 	}
 	byID[candidate.ID] = candidate
 
@@ -410,15 +611,41 @@ func (s *Store) Groups(ctx context.Context) ([]domain.Group, error) {
 }
 
 func (s *Store) DeleteGroup(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM proxy_groups WHERE id=?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM proxy_groups WHERE id=?`, id).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	references, err := groupReferences(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if len(references) > 0 {
+		return &ReferenceError{Resource: "proxy group", References: references}
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM proxy_groups WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if err := requireUpdatedRow(result); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func requireUpdatedRow(result sql.Result) error {
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return err
 	}
-	if affected == 0 {
+	if affected != 1 {
 		return ErrNotFound
 	}
 	return nil
@@ -432,14 +659,25 @@ func (s *Store) SaveDevicePolicy(ctx context.Context, policy domain.DevicePolicy
 	if err != nil {
 		return err
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := validateDevicePolicyTarget(ctx, tx, policy); err != nil {
+		return err
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO device_policies(id,mac_address,static_ip,payload_json,created_at,updated_at)
+	_, err = tx.ExecContext(ctx, `
+			INSERT INTO device_policies(id,mac_address,static_ip,payload_json,created_at,updated_at)
 		VALUES(?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			mac_address=excluded.mac_address,static_ip=excluded.static_ip,payload_json=excluded.payload_json,updated_at=excluded.updated_at
 	`, policy.ID, normalizeStoreMAC(policy.MACAddress), policy.StaticIP, string(body), now, now)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (s *Store) DevicePolicy(ctx context.Context, id string) (domain.DevicePolicy, error) {
 	var payload string
@@ -511,6 +749,12 @@ func (s *Store) SaveAudit(ctx context.Context, event domain.AuditEvent) error {
 		ON CONFLICT(id) DO UPDATE SET outcome=excluded.outcome,details_json=excluded.details_json,updated_at=excluded.updated_at
 	`, event.ID, event.Action, event.TargetID, event.Outcome, string(details), event.CreatedAt.Format(time.RFC3339Nano), event.UpdatedAt.Format(time.RFC3339Nano))
 	return err
+}
+
+// SaveUpgradeAudit persists deterministic lifecycle audit records while all
+// ordinary database writers remain frozen.
+func (s *Store) SaveUpgradeAudit(ctx context.Context, event domain.AuditEvent) error {
+	return s.SaveAudit(allowUpgradeWrite(ctx), event)
 }
 func (s *Store) AuditEvents(ctx context.Context, limit int) ([]domain.AuditEvent, error) {
 	if limit < 1 || limit > 500 {

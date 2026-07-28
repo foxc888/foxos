@@ -53,7 +53,7 @@ func TestValidatedRuntimeRejectsBeforeControllerMutation(t *testing.T) {
 	if err := os.WriteFile(config, []byte("mode: rule\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := (Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: validated}).Apply(context.Background(), []byte("mode: broken\n"))
+	_, err := (&Applier{ConfigPath: config, BackupDir: filepath.Join(root, "backups"), Runtime: validated}).Apply(context.Background(), []byte("mode: broken\n"))
 	if !errors.Is(err, ErrApplyFailed) {
 		t.Fatalf("Apply() error=%v", err)
 	}

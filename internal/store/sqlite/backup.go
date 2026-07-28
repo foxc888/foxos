@@ -27,6 +27,16 @@ var restoredTables = []string{
 }
 
 func (s *Store) BackupDatabase(ctx context.Context, destination string) error {
+	return s.backupDatabase(ctx, destination)
+}
+
+// BackupUpgradeDatabase is the only live-database operation allowed through
+// the write gate while an upgrade checkpoint owns the maintenance barrier.
+func (s *Store) BackupUpgradeDatabase(ctx context.Context, destination string) error {
+	return s.backupDatabase(allowUpgradeWrite(ctx), destination)
+}
+
+func (s *Store) backupDatabase(ctx context.Context, destination string) error {
 	if destination == "" || destination == ":memory:" {
 		return errors.New("backup destination is required")
 	}
@@ -74,7 +84,7 @@ func (s *Store) DatabaseMatchesBackup(ctx context.Context, source string) (retur
 			returnErr = fmt.Errorf("detach backup comparison source: %w", err)
 		}
 	}()
-	if err := validateAttachedSchema(ctx, conn, "foxos_compare"); err != nil {
+	if err := validateAttachedSchema(ctx, conn.Conn, "foxos_compare"); err != nil {
 		return false, err
 	}
 	for _, table := range restoredTables {
@@ -124,7 +134,7 @@ func (s *Store) RestoreDatabase(ctx context.Context, source string) (returnErr e
 	if err := conn.QueryRowContext(ctx, `PRAGMA foxos_restore.integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
 		return errors.New("restore source failed SQLite integrity check")
 	}
-	if err := validateRestoreSchema(ctx, conn); err != nil {
+	if err := validateRestoreSchema(ctx, conn.Conn); err != nil {
 		return err
 	}
 	tx, err := conn.BeginTx(ctx, nil)

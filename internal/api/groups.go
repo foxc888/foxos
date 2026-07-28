@@ -12,6 +12,8 @@ import (
 
 type GroupStore interface {
 	SaveGroup(context.Context, domain.Group) error
+	CreateGroup(context.Context, domain.Group) error
+	UpdateGroup(context.Context, domain.Group) error
 	Group(context.Context, string) (domain.Group, error)
 	Groups(context.Context) ([]domain.Group, error)
 	DeleteGroup(context.Context, string) error
@@ -48,17 +50,26 @@ func (s *Server) RegisterGroups(mux *http.ServeMux, groups GroupStore) {
 			problem(w, 400, "invalid_json", err)
 			return
 		}
-		if input.ID == "" {
-			input.ID = randomID()
+		if input.ID != "" {
+			problemCode(w, http.StatusUnprocessableEntity, "group_id_server_generated")
+			return
 		}
+		input.ID = randomID()
 		group := input.domain()
-		if err := groups.SaveGroup(r.Context(), group); err != nil {
+		if err := groups.CreateGroup(r.Context(), group); err != nil {
 			problem(w, 422, "invalid_group", err)
 			return
 		}
 		writeJSON(w, 201, group)
 	})))
 	mux.Handle("PUT /api/v1/proxy-groups/{id}", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := groups.Group(r.Context(), r.PathValue("id")); errors.Is(err, storepkg.ErrNotFound) {
+			problemCode(w, http.StatusNotFound, "not_found")
+			return
+		} else if err != nil {
+			problemCode(w, http.StatusInternalServerError, "read_failed")
+			return
+		}
 		var input groupInput
 		if err := decode(r, &input); err != nil {
 			problem(w, 400, "invalid_json", err)
@@ -66,29 +77,30 @@ func (s *Server) RegisterGroups(mux *http.ServeMux, groups GroupStore) {
 		}
 		input.ID = r.PathValue("id")
 		group := input.domain()
-		if err := groups.SaveGroup(r.Context(), group); err != nil {
+		if err := groups.UpdateGroup(r.Context(), group); err != nil {
+			if errors.Is(err, storepkg.ErrNotFound) {
+				problemCode(w, http.StatusNotFound, "not_found")
+				return
+			}
+			var referenceErr *storepkg.ReferenceError
+			if errors.As(err, &referenceErr) {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": "group_in_use", "message": referenceErr.Error(), "references": referenceErr.References})
+				return
+			}
 			problem(w, 422, "invalid_group", err)
 			return
 		}
 		writeJSON(w, 200, group)
 	})))
 	mux.Handle("DELETE /api/v1/proxy-groups/{id}", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if references, ok := groups.(interface {
-			GroupReferences(context.Context, string) ([]string, error)
-		}); ok {
-			items, err := references.GroupReferences(r.Context(), r.PathValue("id"))
-			if err != nil {
-				problemCode(w, http.StatusInternalServerError, "reference_check_failed")
-				return
-			}
-			if len(items) > 0 {
-				writeJSON(w, http.StatusConflict, map[string]any{"error": "group_in_use", "message": "proxy group is referenced", "references": items})
-				return
-			}
-		}
 		err := groups.DeleteGroup(r.Context(), r.PathValue("id"))
 		if errors.Is(err, storepkg.ErrNotFound) {
 			problem(w, 404, "not_found", err)
+			return
+		}
+		var referenceErr *storepkg.ReferenceError
+		if errors.As(err, &referenceErr) {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "group_in_use", "message": referenceErr.Error(), "references": referenceErr.References})
 			return
 		}
 		if err != nil {

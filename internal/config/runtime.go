@@ -3,8 +3,10 @@ package config
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -12,15 +14,17 @@ import (
 )
 
 type Runtime struct {
-	APIToken         string // #nosec G117 -- configuration secrets are intentionally held in memory and never serialized.
-	ConfirmationKey  string // #nosec G117 -- configuration secrets are intentionally held in memory and never serialized.
-	RouterOS         Endpoint
-	Mihomo           Mihomo
-	MosDNSURL        string
-	BackupDir        string
-	UpgradeStatePath string
-	Site             site.Config
-	HTTPS            HTTPS
+	Production               bool
+	APIToken                 string // #nosec G117 -- configuration secrets are intentionally held in memory and never serialized.
+	ConfirmationKey          string // #nosec G117 -- configuration secrets are intentionally held in memory and never serialized.
+	RouterOS                 Endpoint
+	Mihomo                   Mihomo
+	MosDNSURL                string
+	BackupDir                string
+	UpgradeStatePath         string
+	Site                     site.Config
+	HTTPS                    HTTPS
+	SubscriptionPrivateCIDRs []netip.Prefix
 }
 
 type Endpoint struct {
@@ -58,6 +62,7 @@ func Load() (Runtime, error) {
 		return Runtime{}, err
 	}
 	cfg := Runtime{
+		Production:       strings.EqualFold(strings.TrimSpace(os.Getenv("FOXOS_ENV")), "production"),
 		APIToken:         os.Getenv("FOXOS_API_TOKEN"),
 		ConfirmationKey:  os.Getenv("FOXOS_CONFIRMATION_KEY"),
 		RouterOS:         Endpoint{URL: os.Getenv("FOXOS_ROUTEROS_URL"), Username: os.Getenv("FOXOS_ROUTEROS_USERNAME"), Password: os.Getenv("FOXOS_ROUTEROS_PASSWORD")},
@@ -68,6 +73,18 @@ func Load() (Runtime, error) {
 		Site:             siteConfig,
 		HTTPS:            https,
 	}
+	environment := strings.ToLower(strings.TrimSpace(os.Getenv("FOXOS_ENV")))
+	if environment == "" {
+		environment = "development"
+	}
+	if environment != "development" && environment != "production" {
+		return Runtime{}, errors.New("FOXOS_ENV must be development or production")
+	}
+	privateCIDRs, err := parsePrivateCIDRs(os.Getenv("FOXOS_SUBSCRIPTION_PRIVATE_CIDRS"))
+	if err != nil {
+		return Runtime{}, err
+	}
+	cfg.SubscriptionPrivateCIDRs = privateCIDRs
 	if cfg.BackupDir == "" {
 		cfg.BackupDir = "backups"
 	}
@@ -79,11 +96,11 @@ func Load() (Runtime, error) {
 			cfg.Mihomo.ValidatorBinary = "/usr/local/bin/mihomo"
 		}
 	}
-	if len(cfg.APIToken) < 32 {
-		return Runtime{}, errors.New("FOXOS_API_TOKEN must contain at least 32 characters")
+	if err := validateSecret("FOXOS_API_TOKEN", cfg.APIToken, 32); err != nil {
+		return Runtime{}, err
 	}
-	if len(cfg.ConfirmationKey) < 32 {
-		return Runtime{}, errors.New("FOXOS_CONFIRMATION_KEY must contain at least 32 characters")
+	if err := validateSecret("FOXOS_CONFIRMATION_KEY", cfg.ConfirmationKey, 32); err != nil {
+		return Runtime{}, err
 	}
 	if cfg.APIToken == cfg.ConfirmationKey {
 		return Runtime{}, errors.New("FOXOS_API_TOKEN and FOXOS_CONFIRMATION_KEY must differ")
@@ -97,6 +114,14 @@ func Load() (Runtime, error) {
 	if cfg.RouterOS.URL != "" && (cfg.RouterOS.Username == "" || cfg.RouterOS.Password == "") {
 		return Runtime{}, errors.New("RouterOS credentials are required when RouterOS is configured")
 	}
+	if cfg.RouterOS.URL != "" && strings.EqualFold(cfg.RouterOS.Username, "admin") {
+		return Runtime{}, errors.New("FOXOS_ROUTEROS_USERNAME must use a dedicated least-privilege account")
+	}
+	if cfg.RouterOS.URL != "" {
+		if err := validateSecret("FOXOS_ROUTEROS_PASSWORD", cfg.RouterOS.Password, 16); err != nil {
+			return Runtime{}, err
+		}
+	}
 	if cfg.RouterOS.URL != "" && !cfg.Site.EndpointMatches(cfg.RouterOS.URL, cfg.Site.RouterAddress, site.RouterOSPort) {
 		return Runtime{}, errors.New("FOXOS_ROUTEROS_URL does not match the site manifest")
 	}
@@ -104,8 +129,8 @@ func Load() (Runtime, error) {
 		return Runtime{}, errors.New("invalid FOXOS_MIHOMO_URL")
 	}
 	if cfg.Mihomo.URL != "" {
-		if len(cfg.Mihomo.Secret) < 32 || len(cfg.Mihomo.Secret) > 4096 || strings.TrimSpace(cfg.Mihomo.Secret) != cfg.Mihomo.Secret {
-			return Runtime{}, errors.New("FOXOS_MIHOMO_SECRET must contain 32 to 4096 characters without surrounding whitespace")
+		if err := validateSecret("FOXOS_MIHOMO_SECRET", cfg.Mihomo.Secret, 32); err != nil {
+			return Runtime{}, err
 		}
 	}
 	if cfg.Mihomo.URL != "" && !cfg.Site.EndpointMatches(cfg.Mihomo.URL, cfg.Site.MihomoAddress, site.MihomoControllerPort) {
@@ -126,7 +151,80 @@ func Load() (Runtime, error) {
 	if cfg.Mihomo.URL != "" && (cfg.Mihomo.BaseConfigPath == "" || cfg.Mihomo.LocalConfigPath == "" || cfg.Mihomo.RuntimeConfigPath == "" || cfg.Mihomo.BackupDir == "" || cfg.Mihomo.ValidatorBinary == "") {
 		return Runtime{}, errors.New("Mihomo base, runtime, validator and backup paths are required when Mihomo is configured")
 	}
+	if cfg.Production {
+		if !cfg.HTTPS.Enabled {
+			return Runtime{}, errors.New("FOXOS_HTTPS_ENABLED must be true in production")
+		}
+		for name, path := range map[string]string{"FOXOS_BACKUP_DIR": cfg.BackupDir, "FOXOS_TLS_DIR": cfg.HTTPS.CertDir} {
+			if !filepath.IsAbs(path) {
+				return Runtime{}, errors.New(name + " must be an absolute persistent path in production")
+			}
+		}
+		if cfg.UpgradeStatePath != "" && !filepath.IsAbs(cfg.UpgradeStatePath) {
+			return Runtime{}, errors.New("FOXOS_UPGRADE_STATE_PATH must be absolute in production")
+		}
+	}
 	return cfg, nil
+}
+
+func validateSecret(name, value string, minimum int) error {
+	if len(value) < minimum || len(value) > 4096 || strings.TrimSpace(value) != value {
+		return errors.New(name + " must contain " + strconv.Itoa(minimum) + " to 4096 characters without surrounding whitespace")
+	}
+	unique := make(map[byte]struct{}, 16)
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x21 || value[index] == 0x7f {
+			return errors.New(name + " contains control or whitespace characters")
+		}
+		unique[value[index]] = struct{}{}
+	}
+	if len(unique) < 8 || repeatedSecret(value) {
+		return errors.New(name + " is a low-entropy or repeated value")
+	}
+	normalized := strings.NewReplacer("-", "", "_", "", ".", "").Replace(strings.ToLower(value))
+	for _, unsafe := range []string{"changeme", "password", "defaultsecret", "defaulttoken", "exampletoken", "insecure"} {
+		if strings.Contains(normalized, unsafe) {
+			return errors.New(name + " contains a known unsafe placeholder")
+		}
+	}
+	return nil
+}
+
+func repeatedSecret(value string) bool {
+	for period := 1; period <= 16 && period*2 <= len(value); period++ {
+		if len(value)%period == 0 && strings.Repeat(value[:period], len(value)/period) == value {
+			return true
+		}
+	}
+	return false
+}
+
+func parsePrivateCIDRs(raw string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	if len(parts) > 32 {
+		return nil, errors.New("FOXOS_SUBSCRIPTION_PRIVATE_CIDRS exceeds 32 entries")
+	}
+	result := make([]netip.Prefix, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != part || part == "" {
+			return nil, errors.New("FOXOS_SUBSCRIPTION_PRIVATE_CIDRS contains an invalid entry")
+		}
+		prefix, err := netip.ParsePrefix(part)
+		if err != nil || prefix != prefix.Masked() || !prefix.Addr().IsPrivate() {
+			return nil, errors.New("FOXOS_SUBSCRIPTION_PRIVATE_CIDRS accepts only canonical RFC1918 or IPv6 ULA prefixes")
+		}
+		key := prefix.String()
+		if _, duplicate := seen[key]; duplicate {
+			return nil, errors.New("FOXOS_SUBSCRIPTION_PRIVATE_CIDRS contains a duplicate prefix")
+		}
+		seen[key] = struct{}{}
+		result = append(result, prefix)
+	}
+	return result, nil
 }
 
 func loadHTTPS() (HTTPS, error) {

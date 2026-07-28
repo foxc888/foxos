@@ -22,9 +22,17 @@ func requestAuditDetails(r *http.Request, details map[string]any) map[string]any
 	details["actor"] = "api-token"
 	source := "unknown"
 	if r != nil {
-		source = r.RemoteAddr
-		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-			source = host
+		security := requestSecurityFromContext(r.Context())
+		if security.actor != "" {
+			details["actor"] = security.actor
+		}
+		if security.source != "" {
+			source = security.source
+		} else {
+			source = r.RemoteAddr
+			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+				source = host
+			}
 		}
 	}
 	details["source"] = source

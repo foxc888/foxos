@@ -1,6 +1,7 @@
 package mihomo
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -23,6 +24,8 @@ var (
 	ErrMihomoSnapshotCorrupt = errors.New("Mihomo snapshot integrity check failed")
 	ErrMihomoDigestKey       = errors.New("Mihomo digest key must contain at least 32 bytes")
 )
+
+const snapshotPersistenceTimeout = 10 * time.Second
 
 const digestDomain = "foxos:mihomo-config:v1\x00"
 
@@ -163,15 +166,16 @@ func (s *Service) ApplyPreview(ctx context.Context, draft domain.MihomoDraft, ex
 	if err != nil {
 		return ApplyResult{}, domain.MihomoSnapshot{}, err
 	}
-	result, applyErr := s.Applier.Apply(ctx, body)
-	snapshot := domain.MihomoSnapshot{ID: id, Digest: digest, Label: label, Body: append([]byte(nil), body...), CreatedAt: nowUTC(s.Now)}
+	operation, err := operationFromContext(ctx, "mihomo.apply", digest)
+	if err != nil {
+		return ApplyResult{}, domain.MihomoSnapshot{}, err
+	}
+	result, applyErr := s.Applier.ApplyPending(ctx, body, operation)
+	snapshot := domain.MihomoSnapshot{ID: id, Digest: digest, Label: strings.TrimSpace(label), Body: append([]byte(nil), body...), CreatedAt: nowUTC(s.Now)}
 	if applyErr != nil {
 		return result, snapshot, applyErr
 	}
-	if err := s.Store.SaveMihomoSnapshot(ctx, snapshot); err != nil {
-		return result, snapshot, fmt.Errorf("save Mihomo snapshot: %w", err)
-	}
-	return result, snapshot, nil
+	return s.persistAppliedSnapshot(ctx, result, snapshot, "save Mihomo snapshot")
 }
 
 func (s *Service) Restore(ctx context.Context, id, label string) (ApplyResult, domain.MihomoSnapshot, error) {
@@ -189,11 +193,15 @@ func (s *Service) Restore(ctx context.Context, id, label string) (ApplyResult, d
 	if !matchingDigest(actual, snapshot.Digest) {
 		return ApplyResult{}, snapshot, ErrMihomoSnapshotCorrupt
 	}
-	result, err := s.Applier.Apply(ctx, snapshot.Body)
+	operation, err := operationFromContext(ctx, "mihomo.restore", actual)
+	if err != nil {
+		return ApplyResult{}, snapshot, err
+	}
+	result, err := s.Applier.ApplyPending(ctx, snapshot.Body, operation)
 	if err != nil {
 		return result, snapshot, err
 	}
-	if label != "" {
+	if label = strings.TrimSpace(label); label != "" {
 		snapshot.Label = label
 	}
 	snapshot.Digest = actual
@@ -202,10 +210,137 @@ func (s *Service) Restore(ctx context.Context, id, label string) (ApplyResult, d
 		return result, snapshot, err
 	}
 	snapshot.CreatedAt = nowUTC(s.Now)
-	if err := s.Store.SaveMihomoSnapshot(ctx, snapshot); err != nil {
-		return result, snapshot, err
+	return s.persistAppliedSnapshot(ctx, result, snapshot, "save restored Mihomo snapshot")
+}
+
+func (s *Service) persistAppliedSnapshot(ctx context.Context, result ApplyResult, snapshot domain.MihomoSnapshot, action string) (ApplyResult, domain.MihomoSnapshot, error) {
+	if err := s.Applier.beginSnapshotSave(result.IntentID); err != nil {
+		compensated, rollbackErr := s.Applier.CompensatePending(result, fmt.Errorf("begin snapshot persistence: %w", err))
+		return compensated, snapshot, rollbackErr
+	}
+	saveCtx, cancelSave := context.WithTimeout(context.Background(), snapshotPersistenceTimeout)
+	saveErr := s.Store.SaveMihomoSnapshot(saveCtx, snapshot)
+	cancelSave()
+	if err := s.Applier.markSnapshotUnconfirmed(result.IntentID); err != nil {
+		return result, snapshot, fmt.Errorf("%w: snapshot save returned but its journal could not be advanced: %v", ErrPendingApply, err)
+	}
+	readCtx, cancelRead := context.WithTimeout(context.Background(), snapshotPersistenceTimeout)
+	stored, err := s.Store.MihomoSnapshot(readCtx, snapshot.ID)
+	cancelRead()
+	if errors.Is(err, domain.ErrNotFound) {
+		cause := saveErr
+		if cause == nil {
+			cause = errors.New("snapshot missing after save")
+		}
+		compensated, rollbackErr := s.Applier.CompensatePending(result, fmt.Errorf("%s: %w", action, cause))
+		return compensated, snapshot, rollbackErr
+	}
+	if err != nil {
+		return result, snapshot, fmt.Errorf("%w: snapshot commit readback failed", ErrPendingApply)
+	}
+	if stored.ID != snapshot.ID || stored.Label != snapshot.Label || !matchingDigest(stored.Digest, snapshot.Digest) || !bytes.Equal(stored.Body, snapshot.Body) {
+		return result, snapshot, fmt.Errorf("%w: snapshot save readback mismatch", ErrPendingApply)
+	}
+	if err := s.Applier.markSnapshotConfirmed(result.IntentID); err != nil {
+		return result, snapshot, fmt.Errorf("%w: snapshot readback succeeded but its journal could not be confirmed: %v", ErrPendingApply, err)
+	}
+	if err := s.Applier.CompletePending(result.IntentID); err != nil {
+		return result, snapshot, fmt.Errorf("%w: snapshot persisted but apply journal cleanup failed: %v", ErrPendingApply, err)
 	}
 	return result, snapshot, nil
+}
+
+// RecoverPending reconciles the filesystem journal before the HTTP server is
+// allowed to listen. A committed snapshot wins; otherwise the old runtime
+// configuration must be restored and verified.
+func (s *Service) RecoverPending(ctx context.Context) error {
+	if s == nil || s.Store == nil || s.Applier == nil || s.Applier.Runtime == nil {
+		return ErrMihomoUnavailable
+	}
+	intent, found, err := s.Applier.Pending()
+	if err != nil || !found {
+		return err
+	}
+
+	current, currentErr := readCurrentConfig(s.Applier.ConfigPath)
+	currentSHA256 := ""
+	if currentErr == nil {
+		currentSHA256 = configSHA256(current)
+	}
+	if intent.Phase == "prepared" && ((intent.PreviousSHA256 == "" && errors.Is(currentErr, os.ErrNotExist)) || (currentErr == nil && currentSHA256 == intent.PreviousSHA256)) {
+		return s.Applier.discardPrepared(intent.ID)
+	}
+	if intent.Phase == "rolled_back" && currentErr == nil && currentSHA256 == intent.PreviousSHA256 {
+		if err := s.Applier.Runtime.Healthy(ctx); err != nil {
+			return fmt.Errorf("verify recovered Mihomo runtime: %w", err)
+		}
+		return s.Applier.CompletePending(intent.ID)
+	}
+
+	if (intent.Phase == "snapshot_save_started" || intent.Phase == "snapshot_unconfirmed" || intent.Phase == "snapshot_confirmed") && currentErr == nil && currentSHA256 == intent.TargetSHA256 {
+		committed, err := s.pendingSnapshotCommitted(ctx, intent, current)
+		if err != nil {
+			return err
+		}
+		if committed {
+			if err := s.Applier.Runtime.Healthy(ctx); err != nil {
+				return fmt.Errorf("verify committed Mihomo runtime: %w", err)
+			}
+			if intent.Phase != "snapshot_confirmed" {
+				if err := s.Applier.markSnapshotConfirmed(intent.ID); err != nil {
+					return err
+				}
+			}
+			return s.Applier.CompletePending(intent.ID)
+		}
+		result, rollbackErr := s.Applier.CompensatePending(ApplyResult{BackupPath: intent.BackupPath, IntentID: intent.ID}, ErrPendingApply)
+		if result.RolledBack {
+			return nil
+		}
+		if rollbackErr == nil {
+			rollbackErr = ErrRollbackFailed
+		}
+		return fmt.Errorf("recover uncommitted Mihomo snapshot: %w", rollbackErr)
+	}
+	if intent.Phase == "snapshot_save_started" || intent.Phase == "snapshot_unconfirmed" || intent.Phase == "snapshot_confirmed" {
+		return ErrPendingApply
+	}
+	if intent.Phase == "external_applied" && !intent.RequiresSnapshot && currentErr == nil && currentSHA256 == intent.TargetSHA256 {
+		if err := s.Applier.Runtime.Healthy(ctx); err != nil {
+			return err
+		}
+		return s.Applier.CompletePending(intent.ID)
+	}
+
+	result, rollbackErr := s.Applier.CompensatePending(ApplyResult{BackupPath: intent.BackupPath, IntentID: intent.ID}, ErrPendingApply)
+	if result.RolledBack {
+		return nil
+	}
+	if rollbackErr == nil {
+		rollbackErr = ErrRollbackFailed
+	}
+	return fmt.Errorf("recover pending Mihomo apply: %w", rollbackErr)
+}
+
+func (s *Service) pendingSnapshotCommitted(ctx context.Context, intent PendingApply, current []byte) (bool, error) {
+	if !intent.RequiresSnapshot {
+		return true, nil
+	}
+	id, err := snapshotID(intent.TargetDigest)
+	if err != nil {
+		return false, err
+	}
+	snapshot, err := s.Store.MihomoSnapshot(ctx, id)
+	if errors.Is(err, domain.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read pending Mihomo snapshot: %w", err)
+	}
+	if !matchingDigest(snapshot.Digest, intent.TargetDigest) || configSHA256(snapshot.Body) != intent.TargetSHA256 || !bytes.Equal(snapshot.Body, current) {
+		return false, errors.New("pending Mihomo snapshot does not match the applied configuration")
+	}
+	return true, nil
 }
 
 // ReconcileApplied closes the crash window between an atomic config replace
@@ -380,13 +515,39 @@ func redactYAML(body []byte) ([]byte, bool) {
 	return redacted, secret
 }
 
+var sensitiveConfigKeys = map[string]struct{}{
+	"accesskey":      {},
+	"accesstoken":    {},
+	"apikey":         {},
+	"authentication": {},
+	"authorization":  {},
+	"clientsecret":   {},
+	"obfspassword":   {},
+	"password":       {},
+	"presharedkey":   {},
+	"privatekey":     {},
+	"psk":            {},
+	"refreshtoken":   {},
+	"secret":         {},
+	"token":          {},
+	"uuid":           {},
+}
+
 func isSecretKey(key string) bool {
-	for _, candidate := range []string{"password", "uuid", "secret", "token", "private-key", "psk"} {
-		if strings.Contains(key, candidate) {
-			return true
+	_, sensitive := sensitiveConfigKeys[normalizeConfigKey(key)]
+	return sensitive
+}
+
+func normalizeConfigKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	var normalized strings.Builder
+	normalized.Grow(len(key))
+	for _, character := range key {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			normalized.WriteRune(character)
 		}
 	}
-	return false
+	return normalized.String()
 }
 
 func unifiedDiff(old, current string) string {

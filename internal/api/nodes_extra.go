@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/foxc888/foxos/internal/domain"
-	"github.com/foxc888/foxos/internal/mihomo"
 	storepkg "github.com/foxc888/foxos/internal/store/sqlite"
+	"github.com/foxc888/foxos/internal/subscription"
 )
 
 type AtomicNodeStore interface {
@@ -32,11 +32,12 @@ func (s *Server) importNodes(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "invalid_json", err)
 		return
 	}
-	nodes, err := mihomo.ParseShareLinks(input.Links)
+	parsed, err := subscription.ParseNodes([]byte(input.Links))
 	if err != nil {
 		problem(w, http.StatusUnprocessableEntity, "invalid_share_links", err)
 		return
 	}
+	nodes := parsed.Nodes
 	for index := range nodes {
 		nodes[index].ID = randomID()
 	}
@@ -53,7 +54,7 @@ func (s *Server) importNodes(w http.ResponseWriter, r *http.Request) {
 	for _, node := range nodes {
 		outputs = append(outputs, output(node))
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"imported": len(outputs), "nodes": outputs})
+	writeJSON(w, http.StatusCreated, map[string]any{"format": parsed.Format, "imported": len(outputs), "skipped": parsed.Skipped, "errors": parsed.Errors, "nodes": outputs})
 }
 
 func (s *Server) probeNode(w http.ResponseWriter, r *http.Request) {
