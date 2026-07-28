@@ -10,6 +10,172 @@ report() {
   failed=1
 }
 
+workflow_job_body() {
+  local workflow=$1
+  local job=$2
+  awk -v marker="  ${job}:" '
+    $0 == marker { inside = 1; next }
+    inside && $0 ~ /^  [[:alnum:]_-]+:$/ { exit }
+    inside { print }
+  ' "$workflow"
+}
+
+workflow_actions_pinned_contract() {
+  local workflow=$1
+  local ref
+  while IFS= read -r ref; do
+    [[ "$ref" == ./* ]] && continue
+    [[ "$ref" =~ ^[^@[:space:]]+@[0-9a-f]{40}$ ]] || return 1
+  done < <(awk '
+    $1 == "-" && $2 == "uses:" { print $3 }
+    $1 == "uses:" { print $2 }
+  ' "$workflow")
+}
+
+dockerfile_base_images_pinned_contract() {
+  local dockerfile=$1
+  local image
+  while IFS= read -r image; do
+    [[ "$image" == scratch ]] && continue
+    [[ "$image" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || return 1
+  done < <(awk '$1 == "FROM" { print $2 }' "$dockerfile")
+}
+
+core_ci_go_tools_contract() {
+  local workflow=$1
+  local body install_line test_line
+  body=$(workflow_job_body "$workflow" go)
+  rg -Fq -- '- name: Install Go test tools' <<< "$body" || return 1
+  install_line=$(awk '/apt-get install --yes ripgrep/ { print NR; exit }' <<< "$body")
+  test_line=$(awk '/go test / { print NR; exit }' <<< "$body")
+  [[ -n "$install_line" && -n "$test_line" ]] && ((install_line < test_line))
+}
+
+release_context_script_contract() {
+  local script=$1
+  local invariant
+  for invariant in \
+    'release_branch=agent/foxos-core' \
+    'repository_default_branch()' \
+    '/repos/${GITHUB_REPOSITORY}' \
+    '.default_branch | select(type == "string" and length > 0)' \
+    'git check-ref-format "$branch_ref_candidate"' \
+    'default_branch_ref="refs/heads/${default_branch}"' \
+    "semver_pattern='^v" \
+    "release_ruleset_name='FoxOS immutable release tags'" \
+    "release_tag_pattern='refs/tags/v*'" \
+    'release_actor_id=137797974' \
+    'release_environment=release' \
+    'GITHUB_REF_PROTECTED' \
+    '/rulesets?includes_parents=false&targets=tag&per_page=100&page=${page}' \
+    '["creation", "update", "deletion", "non_fast_forward"]' \
+    '.bypass_actors[0].actor_type == "User"' \
+    '.bypass_actors[0].actor_id == ($actor_id | tonumber)' \
+    '/immutable-releases' \
+    ".enabled == true" \
+    '/environments/${release_environment}' \
+    '.type == "required_reviewers"' \
+    '.prevent_self_review == true' \
+    '.reviewers[0].type == "User"' \
+    '.reviewers[0].reviewer.id != ($actor_id | tonumber)' \
+    '/deployment-branch-policies?per_page=100' \
+    '.branch_policies[0].type == "tag"' \
+    'git ls-remote --heads origin "$branch_ref"' \
+    'git ls-remote --heads origin "$default_branch_ref"' \
+    'git fetch --quiet --no-tags origin "$default_branch_ref"' \
+    'git diff --quiet "$fetched_sha" "$GITHUB_SHA" -- .github/workflows' \
+    'git ls-remote origin "refs/tags/${tag}^{}"' \
+    '/actions/workflows/${workflow}/runs?head_sha=${GITHUB_SHA}&event=push&status=success' \
+    'require_successful_push_run core-ci.yml' \
+    'require_successful_push_run codeql.yml' \
+    '/code-scanning/alerts' \
+    "--data-urlencode 'state=open'" \
+    'for severity in critical high' \
+    '/releases?per_page=100&page=${page}' \
+    'select(.tag_name == $tag)' \
+    'a draft or published release already uses tag' \
+    'release branch moved during validation' \
+    'default branch moved during validation' \
+    'repository default branch changed during validation' \
+    'release tag moved during validation'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+}
+
+release_publisher_script_contract() {
+  local script=$1
+  local invariant rc_behavior stable_behavior
+  for invariant in \
+    'require_release_absent' \
+    '/releases?per_page=100&page=${page}' \
+    'a draft or published release already uses tag' \
+    'draft: true' \
+    'generate_release_notes: true' \
+    'make_latest: "false"' \
+    '--data-binary "@${asset}"' \
+    '.digest == $digest' \
+    '/assets?per_page=100' \
+    '--request PATCH' \
+    '{draft: false, prerelease: $prerelease, make_latest: $make_latest}' \
+    '.immutable == true' \
+    '/releases/latest' \
+    'did not reach the required prerelease/latest state' \
+    '.browser_download_url' \
+    'anonymous download identity mismatch' \
+    'sha256sum --check "$checksum_name"' \
+    'draft_owned' \
+    '--request DELETE' \
+    'Published immutable release'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+  ! rg -Fq 'target_commitish' "$script" || return 1
+  rc_behavior=$("$script" --classify-tag v1.2.3-rc.4)
+  stable_behavior=$("$script" --classify-tag v1.2.3)
+  [[ "$rc_behavior" == $'prerelease=true\nmake_latest=false' ]] \
+    && [[ "$stable_behavior" == $'prerelease=false\nmake_latest=true' ]] \
+    && ! "$script" --classify-tag v1.2.3-rc.01 >/dev/null 2>&1
+}
+
+release_workflow_contract() {
+  local workflow=$1
+  local context_line quality_line codeql_line verify_line revalidate_line publish_line
+  local invariant
+  for invariant in \
+    'group: foxos-release-${{ github.ref }}' \
+    'cancel-in-progress: false' \
+    '  release-context:' \
+    'name: Validate immutable release context' \
+    'fetch-depth: 0' \
+    'run: scripts/check-release-context.sh' \
+    "if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')" \
+    'environment: release' \
+    'name: Verify exact release asset allowlist' \
+    'name: Revalidate immutable release context' \
+    'name: Publish immutable GitHub release' \
+    'run: scripts/publish-release-assets.sh release-assets'; do
+    rg -Fq -- "$invariant" "$workflow" || return 1
+  done
+  [[ "$(rg -Fc 'needs: release-context' "$workflow")" == 2 ]] || return 1
+  [[ "$(rg -Fc 'run: scripts/check-release-context.sh' "$workflow")" == 2 ]] || return 1
+  ! rg -Fq 'workflow_dispatch:' "$workflow" || return 1
+  ! rg -Fq 'softprops/action-gh-release' "$workflow" || return 1
+
+  local codeql_body
+  codeql_body=$(workflow_job_body "$workflow" codeql)
+  for invariant in 'contents: read' 'packages: read' 'security-events: write'; do
+    rg -Fq -- "$invariant" <<< "$codeql_body" || return 1
+  done
+
+  context_line=$(rg -n '^  release-context:$' "$workflow" | cut -d: -f1)
+  quality_line=$(rg -n '^  quality:$' "$workflow" | cut -d: -f1)
+  codeql_line=$(rg -n '^  codeql:$' "$workflow" | cut -d: -f1)
+  verify_line=$(rg -n -F 'name: Verify exact release asset allowlist' "$workflow" | cut -d: -f1)
+  revalidate_line=$(rg -n -F 'name: Revalidate immutable release context' "$workflow" | cut -d: -f1)
+  publish_line=$(rg -n -F 'name: Publish immutable GitHub release' "$workflow" | cut -d: -f1)
+  [[ -n "$context_line" && -n "$quality_line" && -n "$codeql_line" && -n "$verify_line" && -n "$revalidate_line" && -n "$publish_line" ]] \
+    && ((context_line < quality_line && context_line < codeql_line && verify_line < revalidate_line && revalidate_line < publish_line))
+}
+
 quick_install_upload_manifest_contract() {
   local guide=$1
   local actual expected
@@ -19,6 +185,9 @@ quick_install_upload_manifest_contract() {
     'disk1/site-config.example.rsc'
     'disk1/seal-site-config.sh'
     'disk1/load-site-config.rsc'
+    'disk1/chr-envlists-smoke.md'
+    'disk1/chr-envlists-smoke.rsc'
+    'disk1/foxos-doctor.rsc'
     'disk1/mihomo_amd64.tar'
     'disk1/mosdns-amd64.tar'
     'disk1/foxos-upgrade-<release-id>/foxos-amd64.tar'
@@ -57,13 +226,233 @@ quick_install_upload_manifest_contract() {
     'disk1/QUICK-INSTALL.md'
   )
   actual=$(awk '
-    /^## 3\. 上传并保存回滚点$/ { section = 1; next }
+    /^## 3\. 先备份、检查零碰撞，再上传$/ { section = 1; next }
     section && /^```text$/ { manifest = 1; next }
     manifest && /^```$/ { exit }
     manifest { print }
   ' "$guide" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort)
   expected=$(printf '%s\n' "${expected_entries[@]}" | LC_ALL=C sort)
   [[ "$actual" == "$expected" ]]
+}
+
+quick_install_collision_manifest_contract() {
+  local guide=$1
+  local actual expected
+  local expected_entries=(
+    'QUICK-INSTALL.md'
+    'RELEASE-MANIFEST.txt'
+    'SHA256SUMS'
+    'chr-envlists-smoke.md'
+    'chr-envlists-smoke.rsc'
+    'foxos-dns-apply.rsc'
+    'foxos-dns-plan.rsc'
+    'foxos-doctor.rsc'
+    'foxos-full-install.rsc'
+    'foxos-install-inspect.rsc'
+    'foxos-plan.rsc'
+    'foxos-start-all.rsc'
+    'foxos-uninstall-inspect.rsc'
+    'foxos-verify.rsc'
+    'load-site-config.rsc'
+    'mihomo-config'
+    'mihomo_amd64.tar'
+    'mosdns-amd64.tar'
+    'mosdns-config'
+    'preflight.rsc'
+    'provenance'
+    'seal-site-config.sh'
+    'site-config.example.rsc'
+    'site-config.rsc'
+    'site-config.rsc.sha512'
+    'foxos-upgrade-<release-id>'
+    'uninstall-apply.rsc'
+    'uninstall-plan.rsc'
+  )
+  actual=$(sed -n 's/^:local uploadTargets {\(.*\)}$/\1/p' "$guide" \
+    | tr ';' '\n' \
+    | sed 's/^"//; s/"$//' \
+    | sed '/^[[:space:]]*$/d' \
+    | LC_ALL=C sort)
+  expected=$(printf '%s\n' "${expected_entries[@]}" | LC_ALL=C sort)
+  [[ "$actual" == "$expected" ]]
+}
+
+quick_install_download_contract() {
+  local guide=$1
+  local ci release
+  local ci_mkdir ci_unzip ci_cd_download ci_outer_checksum ci_extract ci_cd_bundle ci_inner_checksum
+  local release_outer_checksum release_extract release_cd_bundle release_inner_checksum
+
+  ci=$(awk '
+    /^### Core CI artifact$/ { inside = 1; next }
+    inside && /^### / { exit }
+    inside { print }
+  ' "$guide")
+  release=$(awk '
+    /^### GitHub Release$/ { inside = 1; next }
+    inside && /^## / { exit }
+    inside { print }
+  ' "$guide")
+
+  for invariant in \
+    'ci_commit="REPLACE_WITH_40_CHARACTER_COMMIT_SHA"' \
+    'ci_artifact="foxos-full-amd64-${ci_commit}"' \
+    'ci_download_dir="${ci_artifact}-download"' \
+    'mkdir -- "${ci_download_dir}"' \
+    'unzip "${ci_artifact}.zip" -d "${ci_download_dir}"' \
+    'cd "${ci_download_dir}"' \
+    'sha256sum --check "${ci_artifact}.tar.gz.sha256"' \
+    'tar -xzf "${ci_artifact}.tar.gz"' \
+    'cd "${ci_artifact}"' \
+    'sha256sum --check SHA256SUMS'; do
+    rg -Fq -- "$invariant" <<< "$ci" || return 1
+  done
+  for invariant in \
+    'release_id="REPLACE_WITH_RELEASE_TAG"' \
+    'release_artifact="foxos-full-amd64-${release_id}"' \
+    'sha256sum --check "${release_artifact}.tar.gz.sha256"' \
+    'tar -xzf "${release_artifact}.tar.gz"' \
+    'cd "${release_artifact}"' \
+    'sha256sum --check SHA256SUMS'; do
+    rg -Fq -- "$invariant" <<< "$release" || return 1
+  done
+
+  ci_mkdir=$(rg -n -F 'mkdir -- "${ci_download_dir}"' <<< "$ci" | head -n1 | cut -d: -f1)
+  ci_unzip=$(rg -n -F 'unzip "${ci_artifact}.zip" -d "${ci_download_dir}"' <<< "$ci" | head -n1 | cut -d: -f1)
+  ci_cd_download=$(rg -n -F 'cd "${ci_download_dir}"' <<< "$ci" | head -n1 | cut -d: -f1)
+  ci_outer_checksum=$(rg -n -F 'sha256sum --check "${ci_artifact}.tar.gz.sha256"' <<< "$ci" | head -n1 | cut -d: -f1)
+  ci_extract=$(rg -n -F 'tar -xzf "${ci_artifact}.tar.gz"' <<< "$ci" | head -n1 | cut -d: -f1)
+  ci_cd_bundle=$(rg -n -F 'cd "${ci_artifact}"' <<< "$ci" | head -n1 | cut -d: -f1)
+  ci_inner_checksum=$(rg -n -F 'sha256sum --check SHA256SUMS' <<< "$ci" | head -n1 | cut -d: -f1)
+  release_outer_checksum=$(rg -n -F 'sha256sum --check "${release_artifact}.tar.gz.sha256"' <<< "$release" | head -n1 | cut -d: -f1)
+  release_extract=$(rg -n -F 'tar -xzf "${release_artifact}.tar.gz"' <<< "$release" | head -n1 | cut -d: -f1)
+  release_cd_bundle=$(rg -n -F 'cd "${release_artifact}"' <<< "$release" | head -n1 | cut -d: -f1)
+  release_inner_checksum=$(rg -n -F 'sha256sum --check SHA256SUMS' <<< "$release" | head -n1 | cut -d: -f1)
+
+  [[ -n "$ci_mkdir" && -n "$ci_unzip" && -n "$ci_cd_download" && -n "$ci_outer_checksum" \
+    && -n "$ci_extract" && -n "$ci_cd_bundle" && -n "$ci_inner_checksum" \
+    && -n "$release_outer_checksum" && -n "$release_extract" && -n "$release_cd_bundle" && -n "$release_inner_checksum" ]] \
+    && ((ci_mkdir < ci_unzip \
+      && ci_unzip < ci_cd_download \
+      && ci_cd_download < ci_outer_checksum \
+      && ci_outer_checksum < ci_extract \
+      && ci_extract < ci_cd_bundle \
+      && ci_cd_bundle < ci_inner_checksum \
+      && release_outer_checksum < release_extract \
+      && release_extract < release_cd_bundle \
+      && release_cd_bundle < release_inner_checksum)) \
+    && ! rg -Fq 'unzip ' <<< "$release" \
+    && ! rg -Fq 'ci_download_dir' <<< "$release" \
+    && ! rg -Fq '跳过 ZIP' "$guide"
+}
+
+quick_install_preupload_safety_contract() {
+  local guide=$1
+  local export_line backup_line export_download_line backup_download_line
+  local backup_dir_line collision_line collision_guard_line winbox_line scp_line
+  local invariant
+  for invariant in \
+    '封存唯一站点清单 -> 加密备份并下载 -> 零碰撞检查 -> 上传 -> 只读 doctor/plan' \
+    '/export hide-sensitive file=before-foxos-YYYYMMDD-HHMM' \
+    '/system/backup/save name=before-foxos-YYYYMMDD-HHMM password="<unique-offline-password>" encryption=aes-sha256' \
+    'backup_dir="../routeros-backups/${backup_id}"' \
+    'umask 077' \
+    'mkdir -p -- "$backup_dir"' \
+    'chmod 700 "$backup_dir"' \
+    'test -s "${backup_dir}/${backup_id}.rsc" && test -s "${backup_dir}/${backup_id}.backup"' \
+    '`backup_dir` 必须位于当前 bundle 目录之外，也不能是它的子目录' \
+    ':set uploadCollisions ($uploadCollisions + $count)' \
+    'UPLOAD-COLLISIONS total=' \
+    '任何计数不为零都必须中止' \
+    '不要删除、改名或直接覆盖'; do
+    rg -Fq -- "$invariant" "$guide" || return 1
+  done
+
+  export_line=$(rg -n -F '/export hide-sensitive file=before-foxos-YYYYMMDD-HHMM' "$guide" | head -n1 | cut -d: -f1)
+  backup_line=$(rg -n -F '/system/backup/save name=before-foxos-YYYYMMDD-HHMM' "$guide" | head -n1 | cut -d: -f1)
+  backup_dir_line=$(rg -n -F 'backup_dir="../routeros-backups/${backup_id}"' "$guide" | head -n1 | cut -d: -f1)
+  export_download_line=$(rg -n -F 'scp "admin@${router_address}:${backup_id}.rsc" "${backup_dir}/${backup_id}.rsc"' "$guide" | head -n1 | cut -d: -f1)
+  backup_download_line=$(rg -n -F 'scp "admin@${router_address}:${backup_id}.backup" "${backup_dir}/${backup_id}.backup"' "$guide" | head -n1 | cut -d: -f1)
+  collision_line=$(rg -n -F ':local uploadCollisions 0' "$guide" | head -n1 | cut -d: -f1)
+  collision_guard_line=$(rg -n -F ':if ($uploadCollisions > 0) do={' "$guide" | head -n1 | cut -d: -f1)
+  winbox_line=$(rg -n -F '零碰撞后，使用 WinBox 时' "$guide" | head -n1 | cut -d: -f1)
+  scp_line=$(rg -n -F 'scp -r ./* "admin@${router_address}:${storage_root}/"' "$guide" | head -n1 | cut -d: -f1)
+
+  [[ -n "$export_line" && -n "$backup_line" && -n "$backup_dir_line" && -n "$export_download_line" && -n "$backup_download_line" \
+    && -n "$collision_line" && -n "$collision_guard_line" && -n "$winbox_line" && -n "$scp_line" ]] \
+    && ((export_line < backup_line \
+      && backup_line < backup_dir_line \
+      && backup_dir_line < export_download_line \
+      && backup_dir_line < backup_download_line \
+      && export_download_line < collision_line \
+      && backup_download_line < collision_line \
+      && collision_line < collision_guard_line \
+      && collision_guard_line < winbox_line \
+      && collision_guard_line < scp_line)) \
+    && ! rg -Fq '"./${backup_id}.' "$guide"
+}
+
+chr_envlists_smoke_contract() {
+  local script=$1
+  local confirmation_line first_write residual_line failure_line pass_line
+  local invariant
+  for invariant in \
+    ':if ($boardName != "CHR") do={' \
+    ':if ($architecture != "x86") do={' \
+    ':if ($containerPackageVersion != $versionBase) do={' \
+    ':if ($FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR") do={' \
+    '/container/envs/add list=$envListName key=$envKey value=$runID' \
+    '/container/envs get $envItem value] != $runID' \
+    '/container/add name=$containerName file=$imagePath interface=$vethName root-dir=$rootDirectory envlists=$envListName logging=no start-on-boot=no comment=$owner' \
+    ':local containerEnvLists [/container get $container envlists]' \
+    '$containerEnvLists != $envListName' \
+    '[/container get $cleanupByName .id] != [/container get $cleanupByOwner .id]' \
+    '[/container get $cleanupByName interface] != $vethName' \
+    '[/container get $cleanupByName root-dir] != $rootDirectory' \
+    '[/interface/veth get $cleanupVeth comment] != $owner' \
+    '[/container/envs get $cleanupEnvItems value] != $runID' \
+    '/container/remove $cleanupContainer' \
+    '/interface/veth/remove $cleanupVeth' \
+    '/container/envs/remove $cleanupEnvItems' \
+    'CLEANUP residual-containers=' \
+    'CHR_ENVLISTS_SMOKE PASS'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+
+  confirmation_line=$(rg -n -F ':if ($FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR") do={' "$script" | head -n1 | cut -d: -f1)
+  first_write=$(rg -n '^[[:space:]]*/(container/envs/add|interface/veth/add|container/add)[[:space:]]' "$script" | head -n1 | cut -d: -f1)
+  residual_line=$(rg -n -F ':local residualContainers ' "$script" | head -n1 | cut -d: -f1)
+  failure_line=$(rg -n -F ':if ($operationComplete = false || [:len $primaryFailure] > 0 || $cleanupFailed || $residualContainers > 0 || $residualVeths > 0 || $residualEnvs > 0 || $residualRoots > 0) do={' "$script" | head -n1 | cut -d: -f1)
+  pass_line=$(rg -n -F ':put ("CHR_ENVLISTS_SMOKE PASS ' "$script" | head -n1 | cut -d: -f1)
+  [[ -n "$confirmation_line" && -n "$first_write" && -n "$residual_line" && -n "$failure_line" && -n "$pass_line" ]] \
+    && ((confirmation_line < first_write && first_write < residual_line && residual_line < failure_line && failure_line < pass_line)) \
+    && ! rg -Fq 'FoxOSSiteManifestVersion' "$script" \
+    && ! rg -n '^[[:space:]]*/container/start([[:space:]]|$)|^[[:space:]]*/interface/bridge(/port)?/(add|set|remove)([[:space:]]|$)|^[[:space:]]*/system/device-mode/update([[:space:]]|$)|start-on-boot=yes' "$script" >/dev/null
+}
+
+foxos_doctor_contract() {
+  local script=$1
+  local invariant
+  for invariant in \
+    'PASS|doctor|name=foxos-doctor|mode=read-only|scope=host-prerequisites' \
+    ':if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1) do={' \
+    'NEEDS-ACTION|site-manifest|reason=load-sealed-site-config-first' \
+    'PASS|routeros-version|' \
+    'PASS|architecture|' \
+    'PASS|container-package|' \
+    'PASS|device-mode-container|' \
+    'PASS|device-mode-scheduler|' \
+    'CONFLICT|footprint-containers|' \
+    'CONFLICT|footprint-env-lists|' \
+    'CONFLICT|footprint-files|' \
+    'CONFLICT|summary|needs-action-count=' \
+    'NEEDS-ACTION|summary|needs-action-count=' \
+    'PASS|summary|needs-action-count=0|conflict-count=0|first-install=ready-for-plan'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+
+  ! rg -n '^[[:space:]]*/[A-Za-z0-9_/-]+/(add|set|remove|enable|disable|update|start|stop|reset|move|run)([[:space:]]|$)|^[[:space:]]*/(import|tool/fetch|system/reboot|system/package/apply-changes)([[:space:]]|$)' "$script" >/dev/null \
+    && ! rg -n '/container/envs get .* value\]|/user get .* password\]|/system/script get .* source\]|/file get .* contents\]|/log/print|/export|show-sensitive' "$script" >/dev/null
 }
 
 upgrade_promote_api_contract() {
@@ -404,6 +793,35 @@ uninstall_snapshot_contract() {
     && rg -Fq '容器完整身份在删除前变化' "$script"
 }
 
+retained_state_install_contract() {
+  local script=$1
+  local env_line data_line backups_line guard_line material_line
+  env_line=$( (rg -n -F ':local envItems [/container/envs find where list="foxos-env"]' "$script" || true) | head -n1 | cut -d: -f1 )
+  data_line=$( (rg -n -F ':local persistedDataRoot [/file find where name=($storageRoot . "/foxos-data")]' "$script" || true) | head -n1 | cut -d: -f1 )
+  backups_line=$( (rg -n -F ':local persistedBackupRoot [/file find where name=($storageRoot . "/foxos-backups")]' "$script" || true) | head -n1 | cut -d: -f1 )
+  guard_line=$( (rg -n -F ':if ([:len $envItems] = 0 && ([:len $persistedDataRoot] > 0 || [:len $persistedBackupRoot] > 0)) do={' "$script" || true) | head -n1 | cut -d: -f1 )
+  material_line=$( (rg -n -F ':set material ($material . "|retained-roots=" . [:len $persistedDataRoot] . ":" . [:len $persistedBackupRoot])' "$script" || true) | head -n1 | cut -d: -f1 )
+  [[ -n "$env_line" && -n "$data_line" && -n "$backups_line" && -n "$guard_line" && -n "$material_line" \
+    && "$env_line" -lt "$guard_line" && "$data_line" -lt "$guard_line" && "$backups_line" -lt "$guard_line" && "$guard_line" -lt "$material_line" ]] \
+    && rg -Fq 'FAIL retained foxos-data or foxos-backups exists without foxos-env' "$script"
+}
+
+pending_journal_uninstall_contract() {
+  local inspector=$1
+  local apply=$2
+  local inspector_find inspector_guard stopped_guard apply_find first_protected_mutation
+  inspector_find=$( (rg -n -F ':local pendingMihomoApplyJournal [/file find where name=($FoxOSSiteStorageRoot . "/foxos-backups/mihomo/.foxos-mihomo-apply.json")]' "$inspector" || true) | head -n1 | cut -d: -f1 )
+  inspector_guard=$( (rg -n -F ':if ([:len $pendingMihomoApplyJournal] > 0) do={' "$inspector" || true) | head -n1 | cut -d: -f1 )
+  stopped_guard=$( (rg -n -F ':if ($allStopped = false) do={' "$apply" || true) | head -n1 | cut -d: -f1 )
+  apply_find=$( (rg -n -F ':local pendingMihomoApplyJournalAfterStop [/file find where name=($FoxOSSiteStorageRoot . "/foxos-backups/mihomo/.foxos-mihomo-apply.json")]' "$apply" || true) | head -n1 | cut -d: -f1 )
+  first_protected_mutation=$( (rg -n '^[[:space:]]*/(system/scheduler[[:space:]]+(set|remove)|container/remove|container/envs/remove)' "$apply" || true) | head -n1 | cut -d: -f1 )
+  [[ -n "$inspector_find" && -n "$inspector_guard" && "$inspector_find" -lt "$inspector_guard" \
+    && -n "$stopped_guard" && -n "$apply_find" && -n "$first_protected_mutation" \
+    && "$stopped_guard" -lt "$apply_find" && "$apply_find" -lt "$first_protected_mutation" ]] \
+    && rg -Fq ':if ([:len $pendingMihomoApplyJournalAfterStop] > 0) do={' "$apply" \
+    && rg -Fq 'scheduler、env 与 confirmation key 均保留' "$apply"
+}
+
 uninstall_predelete_contract() {
   local script=$1
   local last_snapshot inspector_lines inspector_count second_inspector digest_guard first_resource_write binding
@@ -665,7 +1083,9 @@ for rest_negative in '0.0.0.0/0' '0.0.0.0/0,10.0.0.0/24' '10.0.0.0/24,203.0.113.
 done
 
 while IFS= read -r -d '' script; do
-  [[ "$(basename "$script")" == "site-config.example.rsc" ]] && continue
+  case "$(basename "$script")" in
+    site-config.example.rsc|chr-envlists-smoke.rsc) continue ;;
+  esac
   if ! rg -Fq 'FoxOSSiteManifestVersion' "$script"; then
     report "script does not require the imported site manifest: $(basename "$script")"
   fi
@@ -731,6 +1151,25 @@ for invariant in \
     report "install inspector cannot validate a resumable owned prefix: $invariant"
   fi
 done
+if ! retained_state_install_contract "$rsc_root/foxos-install-inspect.rsc"; then
+  report "install inspector can rotate the confirmation key over retained FoxOS data or backups"
+fi
+if ! pending_journal_uninstall_contract "$rsc_root/foxos-uninstall-inspect.rsc" "$rsc_root/uninstall-apply.rsc"; then
+  report "uninstall does not preserve containers, env and the confirmation key around a pending Mihomo apply journal"
+fi
+if ! chr_envlists_smoke_contract "$rsc_root/chr-envlists-smoke.rsc"; then
+  report "CHR envlists smoke does not preserve confirmation, isolation, readback and zero-residual cleanup contracts"
+fi
+if ! foxos_doctor_contract "$rsc_root/foxos-doctor.rsc"; then
+  report "FoxOS doctor is not strictly read-only or does not preserve its output contract"
+fi
+for guide_invariant in \
+  'foxos-backups/mihomo/.foxos-mihomo-apply.json' \
+  '不能把保留的 `foxos-data` 或 `foxos-backups` 当作全新安装直接覆盖'; do
+  if ! rg -Fq "$guide_invariant" "$rsc_root/QUICK-INSTALL.md"; then
+    report "QUICK-INSTALL omits the retained-state key lifecycle invariant: $guide_invariant"
+  fi
+done
 
 first_install_write=$(rg -n '^[[:space:]]*/(container/envs add|container/mounts add|user(/group)? add|file set|interface/veth add|interface/bridge/port add|container/add)' "$rsc_root/foxos-full-install.rsc" | head -n1 | cut -d: -f1)
 install_inspection=$(rg -n '/foxos-install-inspect\.rsc' "$rsc_root/foxos-full-install.rsc" | head -n1 | cut -d: -f1)
@@ -739,7 +1178,7 @@ if [[ -z "$first_install_write" || -z "$install_inspection" || -z "$install_conf
   report "the full installer can write before shared inspection and digest confirmation"
 fi
 if rg -n '^[[:space:]]*/(container(/[^[:space:]]+)?|user(/group)?|file|interface/(veth|bridge/port)|system/(script|scheduler))[[:space:]/]+(add|set|remove|enable|disable|start|stop)' \
-  "$rsc_root/preflight.rsc" "$rsc_root/foxos-plan.rsc" "$rsc_root/foxos-install-inspect.rsc" \
+  "$rsc_root/preflight.rsc" "$rsc_root/foxos-doctor.rsc" "$rsc_root/foxos-plan.rsc" "$rsc_root/foxos-install-inspect.rsc" \
   "$rsc_root/upgrade-inspect.rsc" "$rsc_root/upgrade-plan.rsc" \
   "$rsc_root/upgrade-promote-inspect.rsc" "$rsc_root/upgrade-promote-plan.rsc" \
   "$rsc_root/rollback-inspect.rsc" "$rsc_root/rollback-plan.rsc" \
@@ -963,6 +1402,15 @@ quick_install="$rsc_root/QUICK-INSTALL.md"
 if ! quick_install_upload_manifest_contract "$quick_install"; then
   report "standalone QUICK-INSTALL upload manifest does not exactly match the release bundle contract"
 fi
+if ! quick_install_collision_manifest_contract "$quick_install"; then
+  report "standalone QUICK-INSTALL collision allowlist does not exactly cover every top-level upload target"
+fi
+if ! quick_install_download_contract "$quick_install"; then
+  report "standalone QUICK-INSTALL does not provide independent executable Core CI and GitHub Release verification paths"
+fi
+if ! quick_install_preupload_safety_contract "$quick_install"; then
+  report "standalone QUICK-INSTALL can upload before backups are downloaded and every target is proven collision-free"
+fi
 if ! upgrade_promote_api_contract "$rsc_root/upgrade-promote.rsc"; then
   report "upgrade promote does not preserve idempotent checkpoint/promote/abort recovery ordering"
 fi
@@ -1087,6 +1535,48 @@ if "$rsc_root/seal-site-config.sh" "$site_seal_root/same-line/site-config.rsc" >
 fi
 
 mkdir -p -- "$site_seal_root/lifecycle"
+sed '/FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR"/d' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-confirmation-missing.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-confirmation-missing.rsc"; then
+  report "CHR envlists smoke contract accepted a script without the destructive confirmation gate"
+fi
+sed '/:local containerEnvLists \[\/container get \$container envlists\]/d' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-envlists-readback-missing.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-envlists-readback-missing.rsc"; then
+  report "CHR envlists smoke contract accepted a script without envlists readback"
+fi
+sed '/\[\/container get \$cleanupByName \.id\] != \[\/container get \$cleanupByOwner \.id\]/d' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-cleanup-binding-missing.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-cleanup-binding-missing.rsc"; then
+  report "CHR envlists smoke contract accepted identity-unbound cleanup"
+fi
+sed 's/ || \$residualRoots > 0//' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-residual-root-guard-missing.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-residual-root-guard-missing.rsc"; then
+  report "CHR envlists smoke contract accepted PASS with an incomplete residual guard"
+fi
+cp -- "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-container-start-added.rsc"
+printf '%s\n' '/container/start [find where name="unexpected"]' >> "$site_seal_root/lifecycle/smoke-container-start-added.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-container-start-added.rsc"; then
+  report "CHR envlists smoke contract accepted a container start"
+fi
+
+sed '/PASS|summary|needs-action-count=0|conflict-count=0|first-install=ready-for-plan/d' \
+  "$rsc_root/foxos-doctor.rsc" > "$site_seal_root/lifecycle/doctor-pass-summary-missing.rsc"
+if foxos_doctor_contract "$site_seal_root/lifecycle/doctor-pass-summary-missing.rsc"; then
+  report "FoxOS doctor contract accepted a script without the PASS summary"
+fi
+cp -- "$rsc_root/foxos-doctor.rsc" "$site_seal_root/lifecycle/doctor-write-added.rsc"
+printf '%s\n' '/system/device-mode/update container=yes' >> "$site_seal_root/lifecycle/doctor-write-added.rsc"
+if foxos_doctor_contract "$site_seal_root/lifecycle/doctor-write-added.rsc"; then
+  report "FoxOS doctor contract accepted a RouterOS write"
+fi
+cp -- "$rsc_root/foxos-doctor.rsc" "$site_seal_root/lifecycle/doctor-secret-read-added.rsc"
+printf '%s\n' ':put [/container/envs get [find where key="SECRET"] value]' >> "$site_seal_root/lifecycle/doctor-secret-read-added.rsc"
+if foxos_doctor_contract "$site_seal_root/lifecycle/doctor-secret-read-added.rsc"; then
+  report "FoxOS doctor contract accepted a sensitive env value read"
+fi
+
 sed '/disk1\/mihomo-config\/base.yaml/d' "$quick_install" > "$site_seal_root/lifecycle/quick-install-missing-config.md"
 if quick_install_upload_manifest_contract "$site_seal_root/lifecycle/quick-install-missing-config.md"; then
   report "QUICK-INSTALL manifest accepted a missing required runtime config"
@@ -1100,6 +1590,32 @@ awk '
 ' "$quick_install" > "$site_seal_root/lifecycle/quick-install-extra-config.md"
 if quick_install_upload_manifest_contract "$site_seal_root/lifecycle/quick-install-extra-config.md"; then
   report "QUICK-INSTALL manifest accepted an unexpected runtime config"
+fi
+sed 's/;"site-config.rsc.sha512"//' "$quick_install" > "$site_seal_root/lifecycle/quick-install-collision-target-missing.md"
+if quick_install_collision_manifest_contract "$site_seal_root/lifecycle/quick-install-collision-target-missing.md"; then
+  report "QUICK-INSTALL collision allowlist accepted a missing top-level upload target"
+fi
+sed '/cd "${release_artifact}"/d' "$quick_install" > "$site_seal_root/lifecycle/quick-install-release-cd-missing.md"
+if quick_install_download_contract "$site_seal_root/lifecycle/quick-install-release-cd-missing.md"; then
+  report "QUICK-INSTALL download contract accepted a Release path that never enters the extracted bundle"
+fi
+sed '/cd "${ci_download_dir}"/d' "$quick_install" > "$site_seal_root/lifecycle/quick-install-ci-cd-missing.md"
+if quick_install_download_contract "$site_seal_root/lifecycle/quick-install-ci-cd-missing.md"; then
+  report "QUICK-INSTALL download contract accepted a Core CI path that never enters the artifact download directory"
+fi
+sed '/\/system\/backup\/save name=before-foxos-YYYYMMDD-HHMM/d' "$quick_install" > "$site_seal_root/lifecycle/quick-install-backup-missing.md"
+if quick_install_preupload_safety_contract "$site_seal_root/lifecycle/quick-install-backup-missing.md"; then
+  report "QUICK-INSTALL pre-upload contract accepted a missing encrypted backup"
+fi
+sed 's|"${backup_dir}/${backup_id}\.|"./${backup_id}.|g' \
+  "$quick_install" > "$site_seal_root/lifecycle/quick-install-backup-inside-bundle.md"
+if quick_install_preupload_safety_contract "$site_seal_root/lifecycle/quick-install-backup-inside-bundle.md"; then
+  report "QUICK-INSTALL pre-upload contract accepted backups downloaded inside the upload glob"
+fi
+awk 'NR == 1 { print "scp -r ./* \"admin@${router_address}:${storage_root}/\"" } { print }' \
+  "$quick_install" > "$site_seal_root/lifecycle/quick-install-early-scp.md"
+if quick_install_preupload_safety_contract "$site_seal_root/lifecycle/quick-install-early-scp.md"; then
+  report "QUICK-INSTALL pre-upload contract accepted SCP before backup and collision gates"
 fi
 sed '/:for promotedAttempt from=1 to=6 do={/d' \
   "$rsc_root/upgrade-promote.rsc" > "$site_seal_root/lifecycle/promote-retry-missing.rsc"
@@ -1290,6 +1806,21 @@ sed '/:global FoxOSUninstallContainerCount/d' \
   "$rsc_root/uninstall-apply.rsc" > "$site_seal_root/lifecycle/uninstall-container-count-global-missing.rsc"
 if uninstall_snapshot_contract "$site_seal_root/lifecycle/uninstall-container-count-global-missing.rsc"; then
   report "missing uninstall container-count binding was not rejected"
+fi
+sed '/:local persistedDataRoot /d' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/install-retained-data-check-missing.rsc"
+if retained_state_install_contract "$site_seal_root/lifecycle/install-retained-data-check-missing.rsc"; then
+  report "missing retained-data reinstall guard was not rejected"
+fi
+sed '/:local pendingMihomoApplyJournal /d' \
+  "$rsc_root/foxos-uninstall-inspect.rsc" > "$site_seal_root/lifecycle/uninstall-journal-plan-check-missing.rsc"
+if pending_journal_uninstall_contract "$site_seal_root/lifecycle/uninstall-journal-plan-check-missing.rsc" "$rsc_root/uninstall-apply.rsc"; then
+  report "missing pending-journal uninstall plan guard was not rejected"
+fi
+sed '/:local pendingMihomoApplyJournalAfterStop /d' \
+  "$rsc_root/uninstall-apply.rsc" > "$site_seal_root/lifecycle/uninstall-journal-post-stop-check-missing.rsc"
+if pending_journal_uninstall_contract "$rsc_root/foxos-uninstall-inspect.rsc" "$site_seal_root/lifecycle/uninstall-journal-post-stop-check-missing.rsc"; then
+  report "missing post-stop pending-journal guard was not rejected"
 fi
 for snapshot_case in \
   'mihomo-runtime-mount|:local mihomoRuntimeMountSnapshot [/container/mounts find where list="foxos-mihomo-runtime"]|:set mountID $mihomoRuntimeMountSnapshot' \
@@ -1492,6 +2023,29 @@ for workflow in core-ci.yml release.yml; do
     report "$workflow does not run the shared bundle component contract"
   fi
 done
+for workflow in "$repo_root"/.github/workflows/*.yml; do
+  if ! workflow_actions_pinned_contract "$workflow"; then
+    report "workflow contains an external action that is not pinned to a commit SHA: $(basename "$workflow")"
+  fi
+done
+if ! dockerfile_base_images_pinned_contract "$repo_root/Dockerfile"; then
+  report "Dockerfile contains a non-scratch base image that is not pinned to a registry digest"
+fi
+if ! core_ci_go_tools_contract "$repo_root/.github/workflows/core-ci.yml"; then
+  report "Core CI does not install ripgrep in the Go job before bundle-backed tests"
+fi
+if ! release_context_script_contract "$repo_root/scripts/check-release-context.sh"; then
+  report "release context script does not fail closed on branch, tag, checks, alerts and release identity"
+fi
+if ! "$repo_root/scripts/test-release-context.sh"; then
+  report "release context behavior tests did not preserve ruleset, environment, check and release-absence gates"
+fi
+if ! release_publisher_script_contract "$repo_root/scripts/publish-release-assets.sh"; then
+  report "release publisher does not preserve create-only assets, digest readback and RC/latest semantics"
+fi
+if ! release_workflow_contract "$repo_root/.github/workflows/release.yml"; then
+  report "release workflow does not preserve immutable first-publish semantics"
+fi
 if ! rg -Fq '  workflow_call:' "$repo_root/.github/workflows/codeql.yml"; then
   report "CodeQL workflow is not reusable by the release gate"
 fi
@@ -1502,6 +2056,29 @@ if [[ "$(rg -F 'needs: [quality, codeql]' "$repo_root/.github/workflows/release.
   || ! rg -Fq 'needs: [codeql, binaries, routeros-images]' "$repo_root/.github/workflows/release.yml"; then
   report "release artifacts are not fully gated on Core CI and CodeQL"
 fi
+workflow_negative_root=$(mktemp -d "/tmp/foxos-workflow-negative.XXXXXX")
+sed '/apt-get install --yes ripgrep/d' "$repo_root/.github/workflows/core-ci.yml" > "$workflow_negative_root/core-ci.yml"
+if core_ci_go_tools_contract "$workflow_negative_root/core-ci.yml"; then
+  report "Core CI tool-order contract accepted a workflow without ripgrep installation"
+fi
+sed '/run: scripts\/publish-release-assets.sh release-assets/d' "$repo_root/.github/workflows/release.yml" > "$workflow_negative_root/release.yml"
+if release_workflow_contract "$workflow_negative_root/release.yml"; then
+  report "release workflow contract accepted a workflow without the create-only publisher"
+fi
+printf '%s\n' 'steps:' '  - uses: actions/checkout@v7' > "$workflow_negative_root/unpinned-action.yml"
+if workflow_actions_pinned_contract "$workflow_negative_root/unpinned-action.yml"; then
+  report "workflow action pin contract accepted a mutable tag"
+fi
+printf '%s\n' 'FROM alpine:3.22' > "$workflow_negative_root/unpinned.Dockerfile"
+if dockerfile_base_images_pinned_contract "$workflow_negative_root/unpinned.Dockerfile"; then
+  report "Dockerfile base image pin contract accepted a mutable tag"
+fi
+cp -- "$repo_root/scripts/publish-release-assets.sh" "$workflow_negative_root/publisher-target-commitish.sh"
+printf '%s\n' '# target_commitish' >> "$workflow_negative_root/publisher-target-commitish.sh"
+if release_publisher_script_contract "$workflow_negative_root/publisher-target-commitish.sh"; then
+  report "release publisher contract accepted target_commitish"
+fi
+rm -rf -- "$workflow_negative_root"
 bundle_negative_root=$(mktemp -d "/tmp/foxos-bundle-negative.XXXXXX")
 printf 'duplicate archive fixture\n' > "$bundle_negative_root/duplicate.tar"
 if FOXOS_IMAGE="$bundle_negative_root/duplicate.tar" \

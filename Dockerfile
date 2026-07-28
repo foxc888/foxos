@@ -78,14 +78,14 @@ VOLUME ["/cus/mosdns"]
 EXPOSE 53/tcp 53/udp 9099/tcp
 ENTRYPOINT ["/usr/bin/mosdns", "start", "-d", "/cus/mosdns", "-c", "/cus/mosdns/config_custom.yaml"]
 
-FROM node:22-alpine AS web
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
 RUN npm run typecheck && npm run build
 
-FROM golang:1.25.12-alpine AS server
+FROM golang:1.25.12-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587 AS server
 WORKDIR /src
 ARG FOXOS_VERSION=dev
 RUN apk add --no-cache ca-certificates
@@ -96,7 +96,7 @@ RUN go mod tidy \
     && go mod verify \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${FOXOS_VERSION:-dev}" -o /out/foxos ./cmd/server
 
-FROM alpine:3.22 AS foxos-runtime
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS foxos-runtime
 LABEL org.opencontainers.image.title="foxos" \
       io.foxos.component="foxos"
 RUN apk add --no-cache ca-certificates libcap tzdata \

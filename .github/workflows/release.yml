@@ -4,25 +4,47 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: foxos-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  release-context:
+    name: Validate immutable release context
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      security-events: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Verify branch, tag, checks and release absence
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GOVERNANCE_TOKEN }}
+        run: scripts/check-release-context.sh
+
   quality:
     name: Required quality gates
+    needs: release-context
     uses: ./.github/workflows/core-ci.yml
     permissions:
       contents: read
 
   codeql:
     name: Required CodeQL gates
+    needs: release-context
     uses: ./.github/workflows/codeql.yml
     permissions:
       contents: read
-      security-events: write
       packages: read
+      security-events: write
 
   binaries:
     name: Build FoxOS binary (${{ matrix.goarch }})
@@ -38,8 +60,8 @@ jobs:
           - goarch: arm64
             artifact: foxos-linux-arm64
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.25.x"
           cache: true
@@ -50,7 +72,7 @@ jobs:
           CGO_ENABLED: "0"
         run: go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o "${{ matrix.artifact }}" ./cmd/server
       - name: Generate binary SBOM
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: ${{ matrix.artifact }}
@@ -58,7 +80,7 @@ jobs:
           output: ${{ matrix.artifact }}.cdx.json
       - name: Generate binary checksums
         run: sha256sum "${{ matrix.artifact }}" "${{ matrix.artifact }}.cdx.json" > "${{ matrix.artifact }}.SHA256SUMS"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -82,14 +104,14 @@ jobs:
           - platform: linux/arm64
             name: foxos-arm64.tar
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.24.x"
           cache: true
       - name: Install bundle tools
         run: sudo apt-get update -qq && sudo apt-get install --yes ripgrep
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - name: Build FoxOS image archive
         run: docker buildx build --platform "${{ matrix.platform }}" --target foxos-runtime --build-arg FOXOS_VERSION="${GITHUB_REF_NAME}" --output "type=docker,dest=${{ matrix.name }}" .
       - name: Build amd64 Mihomo and MosDNS image archives
@@ -98,7 +120,7 @@ jobs:
           docker buildx build --platform linux/amd64 --target mihomo-runtime --tag "foxos-mihomo-release:${GITHUB_SHA}" --output type=docker,dest=mihomo-amd64.tar .
           docker buildx build --platform linux/amd64 --target mosdns-runtime --tag "foxos-mosdns-release:${GITHUB_SHA}" --output type=docker,dest=mosdns-amd64.tar .
       - name: Scan FoxOS release image
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: ${{ matrix.name }}
           scanners: vuln
@@ -107,7 +129,7 @@ jobs:
           exit-code: "1"
       - name: Scan Mihomo release image
         if: matrix.platform == 'linux/amd64'
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: mihomo-amd64.tar
           scanners: vuln
@@ -116,7 +138,7 @@ jobs:
           exit-code: "1"
       - name: Scan MosDNS release image
         if: matrix.platform == 'linux/amd64'
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: mosdns-amd64.tar
           scanners: vuln
@@ -124,21 +146,21 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
       - name: Generate FoxOS image SBOM
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: ${{ matrix.name }}
           format: cyclonedx
           output: ${{ matrix.name }}.cdx.json
       - name: Generate Mihomo image SBOM
         if: matrix.platform == 'linux/amd64'
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: mihomo-amd64.tar
           format: cyclonedx
           output: mihomo-amd64.tar.cdx.json
       - name: Generate MosDNS image SBOM
         if: matrix.platform == 'linux/amd64'
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: mosdns-amd64.tar
           format: cyclonedx
@@ -163,7 +185,7 @@ jobs:
           test -s "dist/foxos-full-amd64-${release_id}.tar.gz"
           test -s "dist/foxos-full-amd64-${release_id}.tar.gz.sha256"
           echo "archive=dist/foxos-full-amd64-${release_id}.tar.gz" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.name }}
           path: |
@@ -178,7 +200,7 @@ jobs:
             mosdns-amd64.tar.SHA256SUMS
           if-no-files-found: error
           retention-days: 30
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: matrix.platform == 'linux/amd64'
         with:
           name: foxos-full-routeros-bundle
@@ -190,35 +212,41 @@ jobs:
 
   publish:
     name: Publish GitHub release assets
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
     needs: [codeql, binaries, routeros-images]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
+    environment: release
     permissions:
+      actions: read
       contents: write
+      security-events: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - name: Download amd64 FoxOS binary artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: foxos-linux-amd64
           path: release-assets
       - name: Download arm64 FoxOS binary artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: foxos-linux-arm64
           path: release-assets
       - name: Download amd64 RouterOS image artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: foxos-amd64.tar
           path: release-assets
       - name: Download arm64 RouterOS image artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: foxos-arm64.tar
           path: release-assets
       - name: Download full RouterOS bundle artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: foxos-full-routeros-bundle
           path: release-assets
@@ -268,9 +296,11 @@ jobs:
             sha256sum --check "$checksum"
           done
           sha256sum --check "$bundle.sha256"
-      - name: Create or update release
-        uses: softprops/action-gh-release@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          generate_release_notes: true
-          files: release-assets/*
+      - name: Revalidate immutable release context
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GOVERNANCE_TOKEN }}
+        run: scripts/check-release-context.sh
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/publish-release-assets.sh release-assets

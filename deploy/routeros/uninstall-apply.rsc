@@ -52,15 +52,6 @@
 }
 :if ([:len $ownedContainers] != $FoxOSUninstallContainerCount) do={ :error "容器删除集在摘要回读后变化；停止卸载" }
 
-:local scheduler $schedulerSnapshot
-:local currentScheduler [/system/scheduler find where name="foxos-start-sequence"]
-:if ([:len $currentScheduler] != [:len $scheduler] || ([:len $scheduler] = 1 && [/system/scheduler get $currentScheduler .id] != [/system/scheduler get $scheduler .id])) do={ :error "冷启动 scheduler ID 在摘要确认后变化" }
-:if ([:len $scheduler] > 0) do={
-  :if ([:len $scheduler] != 1 || [/system/scheduler get $scheduler comment] != "foxos:start-sequence" || [/system/scheduler get $scheduler on-event] != "foxos-start-sequence" || [/system/scheduler get $scheduler start-time] != "startup" || [/system/scheduler get $scheduler interval] != "0s" || [/system/scheduler get $scheduler policy] != "read,write,test") do={ :error "冷启动 scheduler 回读冲突" }
-  /system/scheduler set $scheduler disabled=yes
-  /system/scheduler remove $scheduler
-}
-
 :foreach containerID in=$ownedContainers do={
   :local owner [/container get $containerID comment]
   :local containerName [/container get $containerID name]
@@ -86,6 +77,20 @@
 }
 :if ($allStopped = false) do={ :error "至少一个 FoxOS 容器在 60 秒内未停止；未删除任何容器或网络资源" }
 :if ([:len [/container find where comment~"^foxos:"]] != [:len $ownedContainers]) do={ :error "容器删除集在停止等待期间变化；未删除任何容器" }
+:local pendingMihomoApplyJournalAfterStop [/file find where name=($FoxOSSiteStorageRoot . "/foxos-backups/mihomo/.foxos-mihomo-apply.json")]
+:if ([:len $pendingMihomoApplyJournalAfterStop] > 0) do={
+  :error "停止期间出现 pending Mihomo apply journal；容器保持 stopped，scheduler、env 与 confirmation key 均保留，必须先恢复并清除 journal"
+}
+
+:local scheduler $schedulerSnapshot
+:local currentScheduler [/system/scheduler find where name="foxos-start-sequence"]
+:if ([:len $currentScheduler] != [:len $scheduler] || ([:len $scheduler] = 1 && [/system/scheduler get $currentScheduler .id] != [/system/scheduler get $scheduler .id])) do={ :error "冷启动 scheduler ID 在摘要确认后变化" }
+:if ([:len $scheduler] > 0) do={
+  :if ([:len $scheduler] != 1 || [/system/scheduler get $scheduler comment] != "foxos:start-sequence" || [/system/scheduler get $scheduler on-event] != "foxos-start-sequence" || [/system/scheduler get $scheduler start-time] != "startup" || [/system/scheduler get $scheduler interval] != "0s" || [/system/scheduler get $scheduler policy] != "read,write,test") do={ :error "冷启动 scheduler 回读冲突" }
+  /system/scheduler set $scheduler disabled=yes
+  /system/scheduler remove $scheduler
+}
+
 :foreach containerID in=$ownedContainers do={
   :local owner [/container get $containerID comment]
   :local containerName [/container get $containerID name]

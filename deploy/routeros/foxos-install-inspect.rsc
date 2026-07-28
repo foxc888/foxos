@@ -33,6 +33,14 @@
 
 :local envState "CREATE"
 :local envItems [/container/envs find where list="foxos-env"]
+:local persistedDataRoot [/file find where name=($storageRoot . "/foxos-data")]
+:local persistedBackupRoot [/file find where name=($storageRoot . "/foxos-backups")]
+:if ([:len $envItems] = 0 && ([:len $persistedDataRoot] > 0 || [:len $persistedBackupRoot] > 0)) do={
+  :set envState "FAIL"
+  :set failed true
+  :if ($FoxOSInstallInspectVerbose) do={ :put "FAIL retained foxos-data or foxos-backups exists without foxos-env; restore the original confirmation key or archive the retained state before a fresh install" }
+}
+:set material ($material . "|retained-roots=" . [:len $persistedDataRoot] . ":" . [:len $persistedBackupRoot])
 :local envMarkers [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER"]
 :local existingInstall false
 :local completeInstall false

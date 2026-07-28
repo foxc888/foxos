@@ -77,6 +77,9 @@ cp -- "$repo_root/mihomo/install/mosdns-container.lock.json" "$stage_root/proven
 cp -- "$repo_root/deploy/routeros/site-config.example.rsc" "$stage_root/site-config.example.rsc"
 install -m 0755 -- "$repo_root/deploy/routeros/seal-site-config.sh" "$stage_root/seal-site-config.sh"
 cp -- "$repo_root/deploy/routeros/load-site-config.rsc" "$stage_root/load-site-config.rsc"
+cp -- "$repo_root/deploy/routeros/chr-envlists-smoke.md" "$stage_root/chr-envlists-smoke.md"
+cp -- "$repo_root/deploy/routeros/chr-envlists-smoke.rsc" "$stage_root/chr-envlists-smoke.rsc"
+cp -- "$repo_root/deploy/routeros/foxos-doctor.rsc" "$stage_root/foxos-doctor.rsc"
 sed "s/__FOXOS_RELEASE_ID__/$release_id/g" "$repo_root/deploy/routeros/preflight.rsc" > "$stage_root/preflight.rsc"
 sed "s/__FOXOS_RELEASE_ID__/$release_id/g" "$repo_root/deploy/routeros/foxos-install-inspect.rsc" > "$stage_root/foxos-install-inspect.rsc"
 cp -- "$repo_root/deploy/routeros/foxos-plan.rsc" "$stage_root/foxos-plan.rsc"
@@ -158,6 +161,8 @@ printf '%s\n' \
   "image-inputs: explicit FoxOS, Mihomo, and MosDNS archives built by the caller" \
   "component-provenance: provenance/*.lock.json" \
   "release-gate: Core CI and Release workflows scan all three input images with Trivy" \
+  "chr-compatibility-gate: chr-envlists-smoke.rsc on a disposable exact-version CHR" \
+  "host-doctor: load-site-config.rsc then foxos-doctor.rsc (strictly read-only)" \
   "integrity: verify SHA256SUMS before upload" \
   "routeros-validation: static checks only; physical-device acceptance is pending" \
   > "$stage_root/RELEASE-MANIFEST.txt"
@@ -165,8 +170,11 @@ printf '%s\n' \
 expected_roots=(
   QUICK-INSTALL.md
   RELEASE-MANIFEST.txt
+  chr-envlists-smoke.md
+  chr-envlists-smoke.rsc
   foxos-dns-apply.rsc
   foxos-dns-plan.rsc
+  foxos-doctor.rsc
   foxos-full-install.rsc
   foxos-install-inspect.rsc
   foxos-start-all.rsc

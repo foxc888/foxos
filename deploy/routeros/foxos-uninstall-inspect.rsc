@@ -21,6 +21,16 @@
 :local failed false
 :local remaining 0
 :local material ("foxos-uninstall-v2|" . $FoxOSSiteManagementBridge . "|" . $FoxOSSiteStorageRoot . "|" . $FoxOSSiteFoxOSAddress . "|" . $FoxOSSitePublicHostname)
+:set FoxOSUninstallCurrentDigest ""
+:set FoxOSUninstallRemainingCount 0
+:local pendingMihomoApplyJournal [/file find where name=($FoxOSSiteStorageRoot . "/foxos-backups/mihomo/.foxos-mihomo-apply.json")]
+:if ([:len $pendingMihomoApplyJournal] > 0) do={
+  :set failed true
+  :set material ($material . "|mihomo-apply-journal=PRESENT")
+  :if ($FoxOSUninstallInspectVerbose) do={ :put "FAIL pending Mihomo apply journal must be recovered and cleared before uninstall" }
+} else={
+  :set material ($material . "|mihomo-apply-journal=ABSENT")
+}
 :local activeCount 0
 :local mihomoCount 0
 :local mosdnsCount 0

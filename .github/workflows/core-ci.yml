@@ -20,13 +20,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.24.x"
           cache: true
+      - name: Install Go test tools
+        run: sudo apt-get update -qq && sudo apt-get install --yes ripgrep
       - name: Verify module metadata
         run: |
           go mod tidy
@@ -42,7 +44,7 @@ jobs:
         run: go test -race -shuffle=on -count=1 ./...
       - name: Upload Go coverage
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: foxos-go-coverage-${{ github.sha }}
           path: coverage.out
@@ -54,14 +56,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           # The v2.12 linter binary and its analyzers require Go 1.25 to run.
           # Application builds and tests remain pinned to Go 1.24.
           go-version: "1.25.x"
           cache: true
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: v2.12.2
           args: --timeout=5m
@@ -71,8 +73,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           # Scanner toolchains require Go >=1.25; they still analyze the
           # Go 1.24 module built and tested by the application job.
@@ -88,7 +90,7 @@ jobs:
         run: '"$(go env GOPATH)/bin/gosec" -fmt sarif -out gosec.sarif ./...'
       - name: Upload gosec report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: foxos-gosec-${{ github.sha }}
           path: gosec.sarif
@@ -103,8 +105,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22.x"
           cache: npm
@@ -128,8 +130,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22.x"
           cache: npm
@@ -144,7 +146,7 @@ jobs:
         run: npm run test:e2e
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: foxos-playwright-${{ github.sha }}
           path: |
@@ -158,8 +160,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.25.x"
           cache: false
@@ -187,12 +189,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.24.x"
           cache: true
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22.x"
           cache: npm
@@ -214,14 +216,14 @@ jobs:
     timeout-minutes: 30
     needs: [go, go-lint, go-security, web, playwright, repository-safety, network-namespace]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.24.x"
           cache: true
       - name: Install bundle tools
         run: sudo apt-get update -qq && sudo apt-get install --yes ripgrep
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - name: Build amd64 release images
         run: |
           docker buildx build --platform linux/amd64 --target foxos-runtime --tag "foxos-ci:${GITHUB_SHA}" --build-arg FOXOS_VERSION="${GITHUB_SHA}" --output type=docker,dest=foxos-amd64.tar .
@@ -295,7 +297,7 @@ jobs:
           docker image inspect --format '{{.Config.User}}' "foxos-ci:${GITHUB_SHA}" | grep -Fx '10001:10001'
           docker image inspect --format '{{json .Config.Cmd}}' "foxos-ci:${GITHUB_SHA}" | grep -Fx '["-static","/app/web","-database","/data/foxos.db"]'
       - name: Scan FoxOS image
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: foxos-amd64.tar
           scanners: vuln
@@ -303,7 +305,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
       - name: Scan Mihomo runtime image
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: mihomo-amd64.tar
           scanners: vuln
@@ -311,7 +313,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
       - name: Scan MosDNS runtime image
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: mosdns-amd64.tar
           scanners: vuln
@@ -328,7 +330,7 @@ jobs:
           test -s "dist/foxos-full-amd64-${GITHUB_SHA}.tar.gz"
           test -s "dist/foxos-full-amd64-${GITHUB_SHA}.tar.gz.sha256"
           tar -tzf "dist/foxos-full-amd64-${GITHUB_SHA}.tar.gz" | grep -Fx "foxos-full-amd64-${GITHUB_SHA}/SHA256SUMS"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: foxos-full-amd64-${{ github.sha }}
           path: |
