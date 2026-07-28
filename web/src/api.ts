@@ -413,14 +413,21 @@ export type SubscriptionUpdatePlan = {
   addCount: number;
   updateCount: number;
   removeCount: number;
+	parseValidCount: number;
+	parseSkippedCount: number;
+	parseErrors?: Array<{ index: number; protocol?: string; reason: string }>;
+	suspiciousReduction: boolean;
 };
 
 export type SubscriptionDeletePlan = {
   action: "subscription.delete";
+	strategy: SubscriptionDeleteStrategy;
   subscriptionId: string;
   nodeIds: string[];
   nodeCount: number;
 };
+
+export type SubscriptionDeleteStrategy = "detach" | "cascade";
 
 export type Alert = {
   id: string;
@@ -445,7 +452,43 @@ export type BackupManifest = {
 };
 
 const tokenKey = "foxos.apiToken";
-let apiToken = migrateLegacyToken();
+export type BrowserSession = {
+  csrfToken: string;
+  expiresAt: string;
+};
+
+let apiToken = "";
+let csrfToken = "";
+let sessionExpiresAt = "";
+let sessionState: "unknown" | "authenticated" | "none" = "unknown";
+let sessionEpoch = 0;
+let sessionProbe: { epoch: number; promise: Promise<boolean> } | null = null;
+let legacyToken = migrateLegacyToken();
+const sessionInvalidationListeners = new Set<() => void>();
+
+function nextSessionEpoch(): number {
+	sessionEpoch += 1;
+	sessionProbe = null;
+	return sessionEpoch;
+}
+
+function clearSessionState(state: "unknown" | "none" = "none"): void {
+	apiToken = "";
+	csrfToken = "";
+	sessionExpiresAt = "";
+	sessionState = state;
+}
+
+export function subscribeSessionInvalidation(listener: () => void): () => void {
+	sessionInvalidationListeners.add(listener);
+	return () => sessionInvalidationListeners.delete(listener);
+}
+
+function invalidateCurrentSession(): void {
+	nextSessionEpoch();
+	clearSessionState();
+	for (const listener of sessionInvalidationListeners) listener();
+}
 
 function migrateLegacyToken(): string {
   if (typeof window === "undefined") return "";
@@ -469,33 +512,170 @@ export function saveApiToken(token: string): void {
   if (value.length < 32) {
     throw new Error("FoxOS API Token 至少需要 32 个字符");
   }
+	nextSessionEpoch();
+	clearSessionState();
 	apiToken = value;
+	clearLegacyStorage();
+}
+
+function clearLegacyStorage(): void {
+	if (typeof window === "undefined") return;
 	try {
 		window.localStorage.removeItem(tokenKey);
 		window.sessionStorage.removeItem(tokenKey);
 	} catch {
-		// Storage may be disabled; the token remains available only in memory.
+		// Storage may be disabled. Authentication state remains memory-only.
+	}
+}
+
+function validSession(value: unknown): value is BrowserSession {
+	if (!value || typeof value !== "object") return false;
+	const candidate = value as Partial<BrowserSession>;
+	return typeof candidate.csrfToken === "string" && candidate.csrfToken.length === 64
+		&& typeof candidate.expiresAt === "string" && !Number.isNaN(Date.parse(candidate.expiresAt));
+}
+
+async function responseError(response: Response): Promise<ApiError> {
+	const problem = await response.json().catch(() => null) as { message?: string; error?: string; references?: unknown } | null;
+	const references = Array.isArray(problem?.references) ? problem.references.filter((item): item is string => typeof item === "string") : [];
+	return new ApiError(problem?.message ?? `FoxOS API 请求失败（${response.status}）`, response.status, problem?.error, references);
+}
+
+async function createBrowserSession(token: string): Promise<BrowserSession> {
+	const value = token.trim();
+	if (value.length < 32) throw new Error("FoxOS API Token 至少需要 32 个字符");
+	const epoch = nextSessionEpoch();
+	const response = await fetch(new URL("/api/v1/session", window.location.origin), {
+		method: "POST",
+		credentials: "same-origin",
+		headers: { Accept: "application/json", "Content-Type": "application/json" },
+		body: JSON.stringify({ token: value }),
+	});
+	if (!response.ok) {
+		const error = await responseError(response);
+		throw error;
+	}
+	const session = await response.json() as unknown;
+	if (!validSession(session)) throw new Error("FoxOS 返回了无效的浏览器会话");
+	if (epoch !== sessionEpoch) throw new Error("浏览器会话已变化，请重试");
+	csrfToken = session.csrfToken;
+	sessionExpiresAt = session.expiresAt;
+	sessionState = "authenticated";
+	apiToken = "";
+	legacyToken = "";
+	clearLegacyStorage();
+	return session;
+}
+
+export async function authenticateApiToken(token: string): Promise<BrowserSession> {
+	return createBrowserSession(token);
+}
+
+export async function restoreBrowserSession(): Promise<boolean> {
+	if (apiToken) return true;
+	if (sessionState === "authenticated" && csrfToken && Date.parse(sessionExpiresAt) > Date.now()) return true;
+	if (sessionState === "none" && !legacyToken) return false;
+	const invalidateOnUnauthorized = sessionState === "authenticated";
+	const epoch = sessionEpoch;
+	if (sessionProbe?.epoch === epoch) return sessionProbe.promise;
+	const promise = (async () => {
+		try {
+			const response = await fetch(new URL("/api/v1/session", window.location.origin), {
+				credentials: "same-origin",
+				headers: { Accept: "application/json" },
+			});
+			if (epoch !== sessionEpoch) return restoreBrowserSession();
+			if (response.ok) {
+				const session = await response.json() as unknown;
+				if (!validSession(session)) throw new Error("FoxOS 返回了无效的浏览器会话");
+				if (epoch !== sessionEpoch) return restoreBrowserSession();
+				csrfToken = session.csrfToken;
+				sessionExpiresAt = session.expiresAt;
+				sessionState = "authenticated";
+				legacyToken = "";
+				return true;
+			}
+			if (response.status !== 401) throw await responseError(response);
+			if (epoch !== sessionEpoch) return restoreBrowserSession();
+			if (legacyToken) {
+				const token = legacyToken;
+				legacyToken = "";
+				await createBrowserSession(token);
+				return true;
+			}
+			if (invalidateOnUnauthorized) invalidateCurrentSession();
+			else sessionState = "none";
+			return false;
+		} catch (error) {
+			if (epoch !== sessionEpoch) return restoreBrowserSession();
+			sessionState = "unknown";
+			throw error;
+		} finally {
+			if (sessionProbe?.epoch === epoch) sessionProbe = null;
+		}
+	})();
+	sessionProbe = { epoch, promise };
+	return promise;
+}
+
+export async function deleteBrowserSession(): Promise<void> {
+	let logoutCSRF = csrfToken;
+	const epoch = nextSessionEpoch();
+	clearSessionState("unknown");
+	legacyToken = "";
+	clearLegacyStorage();
+	try {
+		if (!logoutCSRF) {
+			const probe = await fetch(new URL("/api/v1/session", window.location.origin), {
+				credentials: "same-origin",
+				headers: { Accept: "application/json" },
+			});
+			if (probe.status === 401) {
+				if (epoch === sessionEpoch) clearSessionState();
+				return;
+			}
+			if (!probe.ok) throw await responseError(probe);
+			const session = await probe.json() as unknown;
+			if (!validSession(session)) throw new Error("FoxOS 返回了无效的浏览器会话");
+			logoutCSRF = session.csrfToken;
+		}
+		const response = await fetch(new URL("/api/v1/session", window.location.origin), {
+			method: "DELETE",
+			credentials: "same-origin",
+			headers: { Accept: "application/json", "X-FoxOS-CSRF": logoutCSRF },
+		});
+		if (!response.ok && response.status !== 401) throw await responseError(response);
+		if (epoch === sessionEpoch) clearSessionState();
+	} catch (error) {
+		if (epoch === sessionEpoch) {
+			csrfToken = logoutCSRF;
+			sessionState = logoutCSRF ? "authenticated" : "unknown";
+		}
+		throw error;
 	}
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = getApiToken();
-  if (!token) {
-    throw new Error("尚未配置 FoxOS API Token");
-  }
+	let token = getApiToken();
+	  if (!token && !await restoreBrowserSession()) throw new Error("尚未建立 FoxOS 浏览器会话");
+	token = getApiToken();
+	const epoch = sessionEpoch;
+  const method = (init?.method ?? "GET").toUpperCase();
   const response = await fetch(new URL(path, window.location.origin), {
     ...init,
+		credentials: "same-origin",
     headers: {
       Accept: "application/json",
-      Authorization: `Bearer ${token}`,
+			...(token ? { Authorization: `Bearer ${token}` } : {}),
+			...(!token && !["GET", "HEAD", "OPTIONS"].includes(method) ? { "X-FoxOS-CSRF": csrfToken } : {}),
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     },
   });
-  if (!response.ok) {
-    const problem = await response.json().catch(() => null) as { message?: string; error?: string; references?: unknown } | null;
-    const references = Array.isArray(problem?.references) ? problem.references.filter((item): item is string => typeof item === "string") : [];
-    throw new ApiError(problem?.message ?? `FoxOS API 请求失败（${response.status}）`, response.status, problem?.error, references);
+	  if (!response.ok) {
+			const error = await responseError(response);
+			if (response.status === 401 && epoch === sessionEpoch) invalidateCurrentSession();
+			throw error;
   }
   if (response.status === 204) {
     return undefined as T;
@@ -620,7 +800,7 @@ export async function createNode(input: {
   return request<ApiNode>("/api/v1/nodes", { method: "POST", body: JSON.stringify(input) });
 }
 
-export async function importNodeLinks(links: string): Promise<{ imported: number; nodes: ApiNode[] }> {
+export async function importNodeLinks(links: string): Promise<{ format: string; imported: number; skipped: number; errors: Array<{ index: number; protocol?: string; reason: string }>; nodes: ApiNode[] }> {
   return request("/api/v1/nodes/import", { method: "POST", body: JSON.stringify({ links }) });
 }
 
@@ -750,12 +930,12 @@ export async function setSubscriptionEnabled(id: string, enabled: boolean): Prom
   return request<Subscription>(`/api/v1/subscriptions/${encodeURIComponent(id)}/enabled`, { method: "PATCH", body: JSON.stringify({ enabled }) });
 }
 
-export async function planSubscriptionDelete(id: string): Promise<{ plan: SubscriptionDeletePlan; confirmationToken: string; expiresInSeconds: number; warnings: string[] }> {
-  return request(`/api/v1/subscriptions/${encodeURIComponent(id)}/delete/plan`, { method: "POST" });
+export async function planSubscriptionDelete(id: string, strategy: SubscriptionDeleteStrategy): Promise<{ plan: SubscriptionDeletePlan; confirmationToken: string; expiresInSeconds: number; warnings: string[] }> {
+	return request(`/api/v1/subscriptions/${encodeURIComponent(id)}/delete/plan`, { method: "POST", body: JSON.stringify({ strategy }) });
 }
 
-export async function deleteSubscription(id: string, confirmationToken: string): Promise<{ status: string; subscriptionId: string; nodeCount: number }> {
-  return request(`/api/v1/subscriptions/${encodeURIComponent(id)}/delete`, { method: "POST", body: JSON.stringify({ confirmationToken }) });
+export async function deleteSubscription(id: string, strategy: SubscriptionDeleteStrategy, confirmationToken: string): Promise<{ status: string; strategy: SubscriptionDeleteStrategy; subscriptionId: string; nodeCount: number }> {
+	return request(`/api/v1/subscriptions/${encodeURIComponent(id)}/delete`, { method: "POST", body: JSON.stringify({ strategy, confirmationToken }) });
 }
 
 export async function previewSubscription(id: string): Promise<{ digest: string; nodeCount: number; nodes: Array<{ id: string; name: string; type: string; server: string; port: number; hasCredential: boolean }>; plan: SubscriptionUpdatePlan; confirmationToken: string; expiresInSeconds: number }> {

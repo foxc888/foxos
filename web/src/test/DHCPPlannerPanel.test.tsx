@@ -100,4 +100,51 @@ describe("DHCPPlannerPanel", () => {
     expect(screen.getByText("VLAN 拆分 · 300")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+
+	it("requires a new expansion plan after execution fails", async () => {
+		let planCalls = 0;
+		let executeCalls = 0;
+		const plan: DHCPExpansionPlan = {
+			serverName: "dhcp-lan",
+			poolId: "*10",
+			poolName: "lan-pool",
+			network: "10.0.0.0/24",
+			currentRanges: "10.0.0.100-10.0.0.200",
+			proposedRanges: "10.0.0.50-10.0.0.200",
+			requestedCapacity: 150,
+			suggestedRanges: [{ start: "10.0.0.50", end: "10.0.0.99", capacity: 50 }],
+			before: capacity,
+			after: { ...capacity, dynamicCapacity: 150 },
+			alternatives: [],
+			stateDigest: "d".repeat(64),
+			warnings: [],
+			executable: true,
+			requiresConfirmation: true,
+		};
+		server.use(
+			http.get("/api/v1/routeros/dhcp/address-plan", () => HttpResponse.json({ configured: true, plan: { stateDigest: "d".repeat(64), ready: true, servers: [capacity] } })),
+			http.post("/api/v1/routeros/plans/dhcp-expansion", () => {
+				planCalls += 1;
+				return HttpResponse.json({ plan, confirmationToken: `dhcp-${planCalls}`, expiresInSeconds: 300 });
+			}),
+			http.post("/api/v1/routeros/plans/dhcp-expansion/execute", () => {
+				executeCalls += 1;
+				return HttpResponse.json({ error: "plan_stale", message: "地址池前态已变化" }, { status: 409 });
+			}),
+		);
+		render(<DHCPPlannerPanel notify={vi.fn()} />);
+		await screen.findByText("容量偏高");
+		fireEvent.change(screen.getByLabelText("目标安全动态容量"), { target: { value: "150" } });
+		fireEvent.change(screen.getByLabelText("完整拟议范围"), { target: { value: plan.proposedRanges } });
+		fireEvent.click(screen.getByRole("button", { name: "生成精确计划" }));
+		let dialog = await screen.findByRole("dialog", { name: "确认 DHCP 地址池扩容" });
+		fireEvent.click(within(dialog).getByRole("checkbox"));
+		fireEvent.click(within(dialog).getByRole("button", { name: "确认扩展地址池" }));
+		await waitFor(() => expect(executeCalls).toBe(1));
+		expect(screen.queryByRole("dialog", { name: "确认 DHCP 地址池扩容" })).not.toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "生成精确计划" }));
+		dialog = await screen.findByRole("dialog", { name: "确认 DHCP 地址池扩容" });
+		expect(dialog).toBeInTheDocument();
+		expect(planCalls).toBe(2);
+	});
 });

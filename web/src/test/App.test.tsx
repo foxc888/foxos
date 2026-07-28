@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import App from "../App";
-import { saveApiToken, type DevicePolicy, type EgressPlan } from "../api";
+import { loadLiveResources, saveApiToken, type DevicePolicy, type EgressPlan } from "../api";
 import { server } from "./setup";
 
 function appHandlers({ mihomoStatus = 200, dynamic = true }: { mihomoStatus?: number; dynamic?: boolean } = {}) {
@@ -84,6 +84,94 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { level: 2, name: "地址容量" })).toBeInTheDocument();
     expect(screen.getByText("dhcp-lan")).toBeInTheDocument();
   });
+
+	it("clears protected React state when the current session receives a 401", async () => {
+		let nodeReads = 0;
+		server.use(
+			http.get("/api/v1/nodes", () => {
+				nodeReads += 1;
+				if (nodeReads === 1) return HttpResponse.json([{ id: "node-a", name: "Node A", type: "vless", server: "node-a.invalid", port: 443, hasCredential: true }]);
+				return HttpResponse.json({ error: "unauthorized", message: "浏览器会话已失效" }, { status: 401 });
+			}),
+			...appHandlers(),
+		);
+		window.history.replaceState(null, "", "#proxies");
+		render(<App />);
+
+		expect(await screen.findByRole("row", { name: /Node A/ })).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "刷新节点" }));
+		expect(await screen.findByRole("heading", { level: 1, name: "设置" })).toBeInTheDocument();
+		expect(screen.getAllByText("尚未建立浏览器会话", { exact: true }).length).toBeGreaterThan(0);
+
+		window.history.pushState(null, "", "#proxies");
+		fireEvent.popState(window);
+		expect(await screen.findByRole("heading", { level: 1, name: "代理与订阅" })).toBeInTheDocument();
+		expect(screen.queryByRole("row", { name: /Node A/ })).not.toBeInTheDocument();
+	});
+
+	it("updates the mounted settings page when the global session is invalidated", async () => {
+		let nodeReads = 0;
+		let expired = false;
+		server.use(
+			http.get("/api/v1/nodes", () => {
+				nodeReads += 1;
+				return expired
+					? HttpResponse.json({ error: "unauthorized", message: "浏览器会话已失效" }, { status: 401 })
+					: HttpResponse.json([]);
+			}),
+			...appHandlers(),
+		);
+		window.history.replaceState(null, "", "#settings");
+		render(<App />);
+
+		expect(await screen.findByText("HttpOnly 浏览器会话有效")).toBeInTheDocument();
+		await waitFor(() => expect(nodeReads).toBeGreaterThan(0));
+		expired = true;
+		await loadLiveResources(["nodes"]);
+
+		expect(await screen.findByText("尚未建立浏览器会话", { exact: true })).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "注销会话" })).not.toBeInTheDocument();
+	});
+
+	it("keeps the public site manifest and CA download visible after sign-out", async () => {
+		let sessionDeletes = 0;
+		server.use(
+			http.get("/api/v1/session", () => HttpResponse.json({ csrfToken: "c".repeat(64), expiresAt: "2099-01-01T00:00:00Z" })),
+			http.delete("/api/v1/session", () => {
+				sessionDeletes += 1;
+				return new HttpResponse(null, { status: 204 });
+			}),
+			...appHandlers(),
+		);
+		window.history.replaceState(null, "", "#settings");
+		render(<App />);
+
+		expect(await screen.findByText("192.168.50.0/24")).toBeInTheDocument();
+		expect(screen.getByRole("link", { name: "下载本地 CA" })).toBeInTheDocument();
+		fireEvent.click(await screen.findByRole("button", { name: "注销会话" }));
+
+		await waitFor(() => expect(sessionDeletes).toBe(1));
+		expect(await screen.findByText("尚未建立浏览器会话", { exact: true })).toBeInTheDocument();
+		expect(screen.getByText("192.168.50.0/24")).toBeInTheDocument();
+		expect(screen.getByRole("link", { name: "下载本地 CA" })).toBeInTheDocument();
+	});
+
+	it("keeps the existing authenticated UI when a replacement token is rejected", async () => {
+		server.use(
+			http.post("/api/v1/session", () => HttpResponse.json({ error: "unauthorized", message: "Token 无效" }, { status: 401 })),
+			...appHandlers(),
+		);
+		window.history.replaceState(null, "", "#settings");
+		render(<App />);
+
+		expect(await screen.findByText("HttpOnly 浏览器会话有效")).toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText("API Token"), { target: { value: "x".repeat(40) } });
+		fireEvent.click(screen.getByRole("button", { name: "重新建立会话" }));
+
+		expect(await screen.findByText("Token 无效")).toBeInTheDocument();
+		expect(screen.getByText("HttpOnly 浏览器会话有效")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "注销会话" })).toBeInTheDocument();
+	});
 
   it("marks a successfully loaded non-service resource as live", async () => {
     server.use(...appHandlers());
@@ -252,7 +340,107 @@ describe("App", () => {
     expect(await screen.findByText(/出口策略已执行、回读并持久化/)).toBeInTheDocument();
   });
 
-  it("persists two ordered chain nodes without publishing Mihomo", async () => {
+	it("requires a new egress plan after execution fails", async () => {
+		let planCalls = 0;
+		let executeCalls = 0;
+		server.use(
+			...appHandlers({ dynamic: false }),
+			http.post("/api/v1/routeros/plans/egress/:id", async ({ request }) => {
+				planCalls += 1;
+				const policy = await request.json() as DevicePolicy;
+				const plan: EgressPlan = { policyId: policy.id, staticIp: policy.staticIp, egress: policy.egress, policy, stateDigest: "d".repeat(64), operations: [], warnings: [], requiresConfirmation: true };
+				return HttpResponse.json({ plan, confirmationToken: `egress-${planCalls}`, expiresInSeconds: 300 });
+			}),
+			http.post("/api/v1/routeros/plans/egress/:id/execute", () => {
+				executeCalls += 1;
+				return HttpResponse.json({ error: "plan_stale", message: "设备出口前态已变化" }, { status: 409 });
+			}),
+		);
+		window.history.replaceState(null, "", "#devices");
+		render(<App />);
+		const prepare = await screen.findByRole("button", { name: "生成应用计划" });
+		await waitFor(() => expect(prepare).toBeEnabled());
+		fireEvent.click(prepare);
+		let dialog = await screen.findByRole("dialog", { name: "确认设备出口变更" });
+		fireEvent.click(within(dialog).getByRole("checkbox"));
+		fireEvent.click(within(dialog).getByRole("button", { name: "确认应用出口策略" }));
+		await waitFor(() => expect(executeCalls).toBe(1));
+		expect(screen.queryByRole("dialog", { name: "确认设备出口变更" })).not.toBeInTheDocument();
+		fireEvent.click(prepare);
+		dialog = await screen.findByRole("dialog", { name: "确认设备出口变更" });
+		expect(dialog).toBeInTheDocument();
+		expect(planCalls).toBe(2);
+	});
+
+	it("requires a new device-binding plan after execution fails", async () => {
+		let planCalls = 0;
+		let executeCalls = 0;
+		server.use(
+			...appHandlers(),
+			http.post("/api/v1/routeros/plans/device-binding", async ({ request }) => {
+				planCalls += 1;
+				const input = await request.json() as { id: string };
+				return HttpResponse.json({ plan: { policyId: input.id, operations: [{ method: "POST", path: "/rest/ip/dhcp-server/lease/*1/make-static", summary: "固定当前动态租约" }], warnings: ["执行前重读租约"], requiresConfirmation: true }, confirmationToken: `binding-${planCalls}`, expiresInSeconds: 300 });
+			}),
+			http.post("/api/v1/routeros/plans/device-binding/execute", () => {
+				executeCalls += 1;
+				return HttpResponse.json({ error: "plan_stale", message: "DHCP 租约前态已变化" }, { status: 409 });
+			}),
+		);
+		window.history.replaceState(null, "", "#devices");
+		render(<App />);
+		const prepare = await screen.findByRole("button", { name: "生成固定 IP 计划" });
+		await waitFor(() => expect(prepare).toBeEnabled());
+		fireEvent.click(prepare);
+		let dialog = await screen.findByRole("dialog", { name: "确认固定设备 IP" });
+		fireEvent.click(within(dialog).getByRole("checkbox"));
+		fireEvent.click(within(dialog).getByRole("button", { name: "确认写入 RouterOS" }));
+		await waitFor(() => expect(executeCalls).toBe(1));
+		expect(screen.queryByRole("dialog", { name: "确认固定设备 IP" })).not.toBeInTheDocument();
+		fireEvent.click(prepare);
+		dialog = await screen.findByRole("dialog", { name: "确认固定设备 IP" });
+		expect(dialog).toBeInTheDocument();
+		expect(planCalls).toBe(2);
+		});
+
+		it("accepts a retried task that advances to RUNNING before list readback", async () => {
+		let retried = false;
+		const failed = { id: "job-retry", kind: "subscription.update", status: "FAILED", progress: 100, attempts: 1, errorMessage: "old failure", createdAt: "2026-07-27T00:00:00Z", updatedAt: "2026-07-27T00:00:01Z" };
+		server.use(
+			http.get("/api/v1/jobs", () => HttpResponse.json(retried ? [{ ...failed, status: "RUNNING", progress: 25, attempts: 2, errorMessage: "", updatedAt: "2026-07-27T00:00:02Z" }] : [failed])),
+			http.post("/api/v1/jobs/job-retry/retry", () => {
+				retried = true;
+				return HttpResponse.json({ ...failed, status: "QUEUED", progress: 0, attempts: 2, errorMessage: "", updatedAt: "2026-07-27T00:00:02Z" });
+			}),
+			...appHandlers(),
+		);
+		window.history.replaceState(null, "", "#operations");
+		render(<App />);
+
+		const row = await screen.findByRole("row", { name: /subscription\.update/ });
+		fireEvent.click(within(row).getByRole("button", { name: "重试" }));
+		await waitFor(() => expect(within(row).getByText("RUNNING")).toBeInTheDocument());
+		expect(await screen.findByText(/任务列表回读为 RUNNING/)).toBeInTheDocument();
+			expect(within(row).queryByRole("button", { name: "等待回读" })).not.toBeInTheDocument();
+		});
+
+		it("re-enables retry when the server explicitly rejects the request", async () => {
+			const failed = { id: "job-rejected", kind: "subscription.update", status: "FAILED", progress: 100, attempts: 1, errorMessage: "old failure", createdAt: "2026-07-27T00:00:00Z", updatedAt: "2026-07-27T00:00:01Z" };
+			server.use(
+				http.get("/api/v1/jobs", () => HttpResponse.json([failed])),
+				http.post("/api/v1/jobs/job-rejected/retry", () => HttpResponse.json({ error: "job_not_retryable", message: "任务当前不可重试" }, { status: 409 })),
+				...appHandlers(),
+			);
+			window.history.replaceState(null, "", "#operations");
+			render(<App />);
+
+			const row = await screen.findByRole("row", { name: /job-rejected/ });
+			fireEvent.click(within(row).getByRole("button", { name: "重试" }));
+			expect(await screen.findByText("任务当前不可重试")).toBeInTheDocument();
+			await waitFor(() => expect(within(row).getByRole("button", { name: "重试" })).toBeEnabled());
+		});
+
+	  it("persists two ordered chain nodes without publishing Mihomo", async () => {
     let savedBody: unknown;
     let publishCalls = 0;
     server.use(

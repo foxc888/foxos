@@ -77,11 +77,12 @@ export function DHCPPlannerPanel({ notify }: { notify: Notice }) {
 
   const execute = async () => {
     if (!preview || !confirmationToken) return;
+		const execution = { plan: preview, token: confirmationToken };
+		setPreview(null);
+		setConfirmationToken("");
     setBusy(true);
     try {
-      await executeDHCPExpansion(preview, confirmationToken);
-      setPreview(null);
-      setConfirmationToken("");
+			await executeDHCPExpansion(execution.plan, execution.token);
       await load(false);
       notify("DHCP 地址池已执行、回读并写入审计");
     } catch (error) {

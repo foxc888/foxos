@@ -6,11 +6,19 @@ does not claim acceptance against a physical RouterOS host.
 ## Evidence
 
 - Desktop screenshot: `docs/screenshots/overview-desktop.jpg`
-- Browser: Codex in-app Browser against the local Vite build and an isolated
-  mock FoxOS API
+- Browser: Playwright against the local Vite build and an isolated mock FoxOS
+  API, plus the Codex in-app Browser against the production `web/dist` served
+  by a real local FoxOS Go process
 - Viewports: 1440x900 desktop, 834x1112 tablet, and 390x844 mobile
+- Automated browser gate: 55/55 Vitest assertions passed; the three-viewport
+  Playwright suite passed 83 tests with 25 intentional capability skips, and
+  five critical asynchronous workflows passed 25/25 across five repeats
 - Browser console: no application warnings or errors; only Vite connection and
   React development-mode messages were present
+- Real runtime smoke: session login, HttpOnly cookie restore after reload,
+  settings/site readback, proxy-page independent failure states, logout, and a
+  separate CSRF reject/accept matrix passed. RouterOS and Mihomo were left
+  unconfigured, and no dangerous write was issued against a real dependency.
 
 ## Visual direction
 
@@ -36,8 +44,9 @@ legible without turning operational sections into decorative cards.
 - Each live data surface exposes its source, last update, loading, unavailable,
   and stale state.
 - Enabling the RouterOS failure fixture left Mihomo, MosDNS, and SQLite-backed
-  node data live. The overview reported 11 of 12 sources live and retained the
-  previous RouterOS values as stale instead of substituting demo data.
+  node data live. The overview derived its live-source count from the current
+  fixture and retained previous RouterOS values as stale instead of substituting
+  demo data; this document does not cache a fixed source count.
 - A live non-service data source uses the normal status marker; unavailable and
   stale resources use their own markers. This regression is covered in Vitest.
 - Mihomo publish confirmation lists the hash, changed-line count, affected
@@ -67,4 +76,5 @@ change plan, backups, an upload channel, and explicit operator confirmation.
 ## Result
 
 Passed for automated desktop, tablet, mobile, keyboard, failure-isolation, and
-rollback UI acceptance. Physical RouterOS acceptance remains pending.
+rollback UI acceptance, plus local Go runtime authentication and readback.
+CHR and physical RouterOS acceptance remain pending.

@@ -7,17 +7,41 @@ type MockOptions = {
   routesFailure?: boolean;
   mihomoProbeFailure?: boolean;
   mihomoRollback?: boolean;
+	mihomoFailure?: boolean;
+	mihomoDraftUnavailableOnce?: boolean;
+	subscriptionLifecycle?: boolean;
+	jobReadbackDelayMs?: number;
+	holdSecondNodeRead?: boolean;
+	staleNodeRead401?: boolean;
+	failedJobInitially?: boolean;
+	jobRetryReadback?: "ok" | "503" | "stale" | "running";
+	subscriptionCreateReadbackFailure?: boolean;
+	subscriptionCreateReadbackMissing?: boolean;
 };
 
 type MockCalls = {
   containerCommands: unknown[];
   deviceMetadata: unknown[];
   egressExecutions: unknown[];
-  mihomoApply: number;
+	mihomoApply: number;
+	delayedNodeReads: number;
+	completedNodeReads: number;
+	expireCurrentSession: () => void;
+	releaseNodeRead: () => void;
   resourceReads: Record<string, number>;
+  sessionCreates: number;
+	sessionDeletes: number;
+	subscriptionCreates: unknown[];
+	subscriptionDeletes: Array<{ id: string; strategy: string; outcome: string }>;
+	subscriptionNodeCounts: Record<string, number>;
+	subscriptionRetries: number;
+	subscriptionUpdates: unknown[];
 };
 
 const observedAt = "2026-07-27T00:00:00Z";
+const e2eToken = "e2e-token-".padEnd(40, "x");
+const e2eSession = "e2e-browser-session";
+const e2eCSRF = "c".repeat(64);
 
 const node = {
   id: "node-test",
@@ -28,24 +52,49 @@ const node = {
   hasCredential: true,
 };
 
-async function json(route: Route, body: unknown, status = 200) {
+async function json(route: Route, body: unknown, status = 200, headers: Record<string, string> = {}) {
   await route.fulfill({
     status,
     contentType: "application/json; charset=utf-8",
+    headers,
     body: JSON.stringify(body),
   });
 }
 
 async function mockApi(page: Page, options: MockOptions = {}) {
   let jobReads = 0;
+	let mihomoDraftReads = 0;
   let containerStatus = "running";
   let containerCommand = "";
   let storedPolicy: Record<string, unknown> | undefined;
-  const calls: MockCalls = { containerCommands: [], deviceMetadata: [], egressExecutions: [], mihomoApply: 0, resourceReads: {} };
+	let subscriptionJobCreated = false;
+	let subscriptionJobStatus = "FAILED";
+	let nodeReadCount = 0;
+	let currentSessionExpired = false;
+	let subscriptionCreateReadbackFailed = false;
+	let releaseNodeRead = () => {};
+	const nodeReadGate = new Promise<void>((resolve) => { releaseNodeRead = resolve; });
+	const subscriptions: Array<{ id: string; name: string; url: string; enabled: boolean; interval: number; lastSuccessAt?: string }> = options.subscriptionLifecycle ? [
+		{ id: "source-primary", name: "Primary", url: "https://subscriptions.example.invalid/primary", enabled: true, interval: 3600, lastSuccessAt: observedAt },
+		{ id: "source-detach", name: "Detach source", url: "https://subscriptions.example.invalid/detach", enabled: true, interval: 3600, lastSuccessAt: observedAt },
+		{ id: "source-cascade", name: "Cascade source", url: "https://subscriptions.example.invalid/cascade", enabled: true, interval: 3600, lastSuccessAt: observedAt },
+	] : [];
+	const calls: MockCalls = {
+		containerCommands: [], deviceMetadata: [], egressExecutions: [], mihomoApply: 0, delayedNodeReads: 0, completedNodeReads: 0, expireCurrentSession: () => { currentSessionExpired = true; }, releaseNodeRead, resourceReads: {}, sessionCreates: 0, sessionDeletes: 0,
+		subscriptionCreates: [], subscriptionDeletes: [], subscriptionNodeCounts: options.subscriptionLifecycle ? { "source-primary": 2, "source-detach": 2, "source-cascade": 2 } : {}, subscriptionRetries: 0, subscriptionUpdates: [],
+	};
+	if (options.failedJobInitially) subscriptionJobCreated = true;
+	const subscriptionJob = () => ({
+		id: "job-subscription", kind: "subscription.update", status: subscriptionJobStatus, progress: subscriptionJobStatus === "FAILED" ? 100 : 0,
+		attempts: subscriptionJobStatus === "FAILED" ? 1 : 2, errorClass: subscriptionJobStatus === "FAILED" ? "subscription_source_changed" : "",
+		errorMessage: subscriptionJobStatus === "FAILED" ? "远端内容变化，旧节点保持不变" : "", result: { phase: subscriptionJobStatus === "FAILED" ? "source_revalidation_failed" : "retry_queued" },
+		createdAt: observedAt, updatedAt: "2026-07-27T00:00:01Z",
+	});
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    const method = request.method();
     if (request.method() === "GET") calls.resourceReads[path] = (calls.resourceReads[path] ?? 0) + 1;
     if (path === "/api/v1/site") {
       await json(route, {
@@ -64,6 +113,43 @@ async function mockApi(page: Page, options: MockOptions = {}) {
         },
         https: { enabled: true, caSha256: "a".repeat(64), caDownloadPath: "/api/v1/site/ca", trustRequired: true },
       });
+      return;
+    }
+    if (path === "/api/v1/session" && method === "GET") {
+      if (!(request.headers().cookie ?? "").includes(`foxos_session=${e2eSession}`)) {
+        await json(route, { error: "unauthorized", message: "未认证" }, 401);
+        return;
+      }
+      await json(route, { csrfToken: e2eCSRF, expiresAt: "2099-01-01T00:00:00Z" });
+      return;
+    }
+    if (path === "/api/v1/session" && method === "POST") {
+      const input = request.postDataJSON() as { token?: string };
+      if (input.token !== e2eToken || request.headers().origin !== "http://127.0.0.1:4173") {
+        await json(route, { error: "unauthorized", message: "未认证" }, 401);
+        return;
+      }
+      calls.sessionCreates += 1;
+      await json(route, { csrfToken: e2eCSRF, expiresAt: "2099-01-01T00:00:00Z" }, 201, {
+        "set-cookie": `foxos_session=${e2eSession}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800`,
+      });
+      return;
+    }
+    if (path === "/api/v1/session" && method === "DELETE") {
+      if (!(request.headers().cookie ?? "").includes(`foxos_session=${e2eSession}`) || request.headers()["x-foxos-csrf"] !== e2eCSRF) {
+        await json(route, { error: "unauthorized", message: "未认证" }, 401);
+        return;
+      }
+      calls.sessionDeletes += 1;
+      await route.fulfill({ status: 204, headers: { "set-cookie": "foxos_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" } });
+      return;
+    }
+    if (!(request.headers().cookie ?? "").includes(`foxos_session=${e2eSession}`)) {
+      await json(route, { error: "unauthorized", message: "未认证" }, 401);
+      return;
+    }
+    if (!["GET", "HEAD", "OPTIONS"].includes(method) && request.headers()["x-foxos-csrf"] !== e2eCSRF) {
+      await json(route, { error: "csrf_rejected", message: "CSRF 校验失败" }, 403);
       return;
     }
 
@@ -103,7 +189,23 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       return;
     }
     if (path === "/api/v1/nodes" && request.method() === "GET") {
+			nodeReadCount += 1;
+				if (options.holdSecondNodeRead && nodeReadCount === 2) {
+				calls.delayedNodeReads += 1;
+				await nodeReadGate;
+				if (options.staleNodeRead401) {
+					calls.completedNodeReads += 1;
+					await json(route, { error: "unauthorized", message: "旧会话请求已失效" }, 401);
+					return;
+					}
+				}
+				if (currentSessionExpired) {
+					calls.completedNodeReads += 1;
+					await json(route, { error: "unauthorized", message: "当前浏览器会话已失效" }, 401);
+					return;
+				}
       await json(route, [node]);
+			calls.completedNodeReads += 1;
       return;
     }
     if (path === "/api/v1/nodes" && request.method() === "POST") {
@@ -186,10 +288,28 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       return;
     }
     if (path === "/api/v1/jobs" && request.method() === "GET") {
-      await json(route, []);
+				if (calls.subscriptionRetries > 0 && options.jobRetryReadback === "503") {
+					await json(route, { error: "jobs_unavailable", message: "任务列表回读失败" }, 503);
+					return;
+				}
+					if (calls.subscriptionRetries > 0 && options.jobRetryReadback === "stale") {
+						await json(route, [{ ...subscriptionJob(), status: "FAILED", progress: 100, attempts: 1, errorClass: "subscription_source_changed", errorMessage: "旧状态", result: { phase: "source_revalidation_failed" } }]);
+						return;
+					}
+					if (calls.subscriptionRetries > 0 && options.jobRetryReadback === "running") {
+						await json(route, [{ ...subscriptionJob(), status: "RUNNING", progress: 25, attempts: 2, errorClass: "", errorMessage: "", result: { phase: "retry_running" }, updatedAt: "2026-07-27T00:00:02Z" }]);
+						return;
+					}
+				if (subscriptionJobStatus === "QUEUED" && options.jobReadbackDelayMs) await new Promise((resolve) => setTimeout(resolve, options.jobReadbackDelayMs));
+			await json(route, options.subscriptionLifecycle && subscriptionJobCreated ? [subscriptionJob()] : []);
       return;
     }
     if (path === "/api/v1/mihomo/draft" && request.method() === "GET") {
+			mihomoDraftReads += 1;
+			if (options.mihomoDraftUnavailableOnce && mihomoDraftReads === 1) {
+				await json(route, { error: "mihomo_unavailable", message: "Mihomo Controller 未配置" }, 503);
+				return;
+			}
       await json(route, { id: "active", mode: "rule", mixedPort: 7890, allowLan: false, rules: ["MATCH,DIRECT"], revision: 1 });
       return;
     }
@@ -244,8 +364,9 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       await json(route, {
         id: "job-mihomo",
         kind: "mihomo.apply",
-        status: options.mihomoRollback && jobReads > 0 ? "ROLLED_BACK" : "SUCCEEDED",
+        status: options.mihomoFailure ? "FAILED" : options.mihomoRollback && jobReads > 0 ? "ROLLED_BACK" : "SUCCEEDED",
         progress: 100,
+        errorMessage: options.mihomoFailure ? "Mihomo 健康检查失败" : "",
         result: { rolledBack: Boolean(options.mihomoRollback) },
         attempts: 1,
         createdAt: new Date().toISOString(),
@@ -257,6 +378,16 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       await json(route, { id: "job-restore", kind: "mihomo.restore", status: "SUCCEEDED", progress: 100, attempts: 1, createdAt: observedAt, updatedAt: "2026-07-27T00:00:01Z" });
       return;
     }
+		if (path === "/api/v1/jobs/job-subscription" && method === "GET") {
+			await json(route, subscriptionJob());
+			return;
+		}
+		if (path === "/api/v1/jobs/job-subscription/retry" && method === "POST") {
+			calls.subscriptionRetries += 1;
+			subscriptionJobStatus = "QUEUED";
+			await json(route, subscriptionJob());
+			return;
+		}
     if (path.startsWith("/api/v1/routeros/plans/egress/") && path.endsWith("/execute")) {
       const body = request.postDataJSON() as { plan?: { policy?: Record<string, unknown> } };
       calls.egressExecutions.push(body);
@@ -288,8 +419,76 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       await json(route, { id: "job-egress", kind: "routeros.egress", status: "SUCCEEDED", progress: 100, attempts: 1, createdAt: observedAt, updatedAt: "2026-07-27T00:00:01Z" });
       return;
     }
-    if (path === "/api/v1/subscriptions") {
-      await json(route, []);
+			if (path === "/api/v1/subscriptions") {
+			if (!options.subscriptionLifecycle) {
+				await json(route, []);
+				return;
+			}
+				if (method === "GET") {
+					if (options.subscriptionCreateReadbackFailure && calls.subscriptionCreates.length > 0 && !subscriptionCreateReadbackFailed) {
+						subscriptionCreateReadbackFailed = true;
+						await json(route, { error: "subscriptions_unavailable", message: "订阅列表回读失败" }, 503);
+						return;
+					}
+					if (options.subscriptionCreateReadbackMissing && calls.subscriptionCreates.length > 0) {
+						await json(route, subscriptions.filter((item) => !item.id.startsWith("source-created-")));
+						return;
+					}
+					await json(route, subscriptions);
+				return;
+			}
+			if (method === "POST") {
+				const input = request.postDataJSON() as { name: string; url: string; enabled: boolean; interval: number };
+				calls.subscriptionCreates.push(input);
+				const created = { id: `source-created-${calls.subscriptionCreates.length}`, ...input };
+				subscriptions.push(created);
+				calls.subscriptionNodeCounts[created.id] = 0;
+				await json(route, created, 201);
+				return;
+			}
+		}
+		if (options.subscriptionLifecycle && path.startsWith("/api/v1/subscriptions/") && path.endsWith("/preview") && method === "POST") {
+			const id = path.split("/")[4];
+			const existingCount = calls.subscriptionNodeCounts[id] ?? 0;
+			const nodeCount = existingCount + 1;
+			const digest = "b".repeat(64);
+			await json(route, {
+				digest,
+				nodeCount,
+				nodes: Array.from({ length: nodeCount }, (_, index) => ({ id: `${id}-node-${index + 1}`, name: `${id} / Node ${index + 1}`, type: "vless", server: "node.example.invalid", port: 443, hasCredential: true })),
+				plan: { action: "subscription.update", subscriptionId: id, digest, nodeIds: Array.from({ length: nodeCount }, (_, index) => `${id}-node-${index + 1}`), removedNodeIds: [], existingCount, nodeCount, addCount: 1, updateCount: existingCount, removeCount: 0, parseValidCount: nodeCount, parseSkippedCount: 1, parseErrors: [{ index: nodeCount + 1, reason: "unsupported fixture" }], suspiciousReduction: false },
+				confirmationToken: `preview-${id}`, expiresInSeconds: 300,
+			});
+			return;
+		}
+		if (options.subscriptionLifecycle && path.startsWith("/api/v1/subscriptions/") && path.endsWith("/update") && method === "POST") {
+			calls.subscriptionUpdates.push(request.postDataJSON());
+			subscriptionJobCreated = true;
+			subscriptionJobStatus = "FAILED";
+			await json(route, { status: "QUEUED", job: { ...subscriptionJob(), status: "QUEUED", progress: 0, errorClass: "", errorMessage: "" } }, 202);
+			return;
+		}
+		if (options.subscriptionLifecycle && path.startsWith("/api/v1/subscriptions/") && path.endsWith("/delete/plan") && method === "POST") {
+			const id = path.split("/")[4];
+			const input = request.postDataJSON() as { strategy: string };
+			const nodeCount = calls.subscriptionNodeCounts[id] ?? 0;
+			await json(route, { plan: { action: "subscription.delete", strategy: input.strategy, subscriptionId: id, nodeIds: Array.from({ length: nodeCount }, (_, index) => `${id}-node-${index + 1}`), nodeCount }, confirmationToken: `delete-${id}-${input.strategy}`, expiresInSeconds: 300, warnings: ["计划只允许执行一次"] });
+			return;
+		}
+		if (options.subscriptionLifecycle && path.startsWith("/api/v1/subscriptions/") && path.endsWith("/delete") && method === "POST") {
+			const id = path.split("/")[4];
+			const input = request.postDataJSON() as { strategy: string };
+			if (id === "source-cascade" && input.strategy === "cascade") {
+				calls.subscriptionDeletes.push({ id, strategy: input.strategy, outcome: "conflict" });
+				await json(route, { error: "subscription_nodes_referenced", message: "来源节点仍被代理组引用，删除已回滚" }, 409);
+				return;
+			}
+			const nodeCount = calls.subscriptionNodeCounts[id] ?? 0;
+			const index = subscriptions.findIndex((item) => item.id === id);
+			if (index >= 0) subscriptions.splice(index, 1);
+			if (input.strategy === "cascade") calls.subscriptionNodeCounts[id] = 0;
+			calls.subscriptionDeletes.push({ id, strategy: input.strategy, outcome: "succeeded" });
+			await json(route, { status: "SUCCEEDED", strategy: input.strategy, subscriptionId: id, nodeCount });
       return;
     }
     if (path === "/api/v1/alerts") {
@@ -336,14 +535,14 @@ async function expectNoA11yViolations(page: Page) {
 async function expectLayoutIntegrity(page: Page, view: string, mobile: boolean) {
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   const violations = await page.evaluate(({ isMobile }) => {
-    const selector = "main, .topbar, .page-content, h1, h2, .panel, .summary-card, .button, .container-command, .data-mode, input, select, textarea";
+    const selector = "main, .topbar, .page-content, h1, h2, .panel, .summary-card, .data-mode, button, summary, a[href], input, select, textarea, [tabindex], [data-grid-row]";
     const elements = Array.from(document.querySelectorAll<HTMLElement>(selector));
     const messages: string[] = [];
     for (const element of elements) {
       const style = getComputedStyle(element);
       if (style.display === "none" || style.visibility === "hidden" || !element.getClientRects().length || element.closest('[aria-hidden="true"]')) continue;
       const rect = element.getBoundingClientRect();
-      const label = element.getAttribute("aria-label") || element.textContent?.trim().slice(0, 48) || element.tagName.toLowerCase();
+      const label = element.getAttribute("aria-label") || element.closest("label")?.textContent?.trim().slice(0, 48) || element.textContent?.trim().slice(0, 48) || element.tagName.toLowerCase();
       const intentionallyScrollable = Boolean(element.closest(".table-wrap, .chain-builder-row"));
       if (!intentionallyScrollable && (rect.left < -1 || rect.right > window.innerWidth + 1)) {
         messages.push(`${label}: horizontal bounds ${rect.left.toFixed(1)}..${rect.right.toFixed(1)} / ${window.innerWidth}`);
@@ -351,10 +550,10 @@ async function expectLayoutIntegrity(page: Page, view: string, mobile: boolean) 
       if (element.matches("h1, h2, .button, .container-command, .data-mode") && (element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1)) {
         messages.push(`${label}: clipped ${element.clientWidth}x${element.clientHeight} < ${element.scrollWidth}x${element.scrollHeight}`);
       }
-      if (isMobile && element.matches("button:not(.sidebar-scrim):not(.skip-link), input, select")) {
-        const target = element.matches("input, select") ? element.closest("label") ?? element : element;
-        const targetHeight = target.getBoundingClientRect().height;
-        if (targetHeight < 43.5) messages.push(`${label}: touch target height ${targetHeight.toFixed(1)}`);
+      if (isMobile && element.matches("button:not(.sidebar-scrim):not(.skip-link), summary, a[href], input, select, textarea, [tabindex]:not([tabindex='-1']), [data-grid-row]")) {
+        const target = element.matches("input[type='checkbox'], input[type='radio']") ? element.closest("label") ?? element : element;
+        const targetRect = target.getBoundingClientRect();
+        if (targetRect.width < 43.5 || targetRect.height < 43.5) messages.push(`${label}: touch target ${targetRect.width.toFixed(1)}x${targetRect.height.toFixed(1)}`);
       }
     }
     return messages;
@@ -363,9 +562,95 @@ async function expectLayoutIntegrity(page: Page, view: string, mobile: boolean) 
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    window.sessionStorage.setItem("foxos.apiToken", "e2e-token-".padEnd(40, "x"));
-  });
+	await page.addInitScript((token) => {
+		if (window.localStorage.getItem("foxos.e2eTokenSeeded") === "true") return;
+		window.localStorage.setItem("foxos.e2eTokenSeeded", "true");
+		window.sessionStorage.setItem("foxos.apiToken", token);
+	}, e2eToken);
+});
+
+test("exchanges a legacy token once and restores the cookie session after reload", async ({ page }) => {
+  const calls = await mockApi(page);
+  await page.goto("/#overview");
+  await expect(page.getByRole("heading", { name: "总览" })).toBeVisible();
+  await expect.poll(() => calls.sessionCreates).toBe(1);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "总览" })).toBeVisible();
+  expect(calls.sessionCreates).toBe(1);
+});
+
+test("clears protected state and ignores an old request after signing out", async ({ page }, testInfo) => {
+  const calls = await mockApi(page, { holdSecondNodeRead: true });
+  await page.goto("/#proxies");
+	await expect(page.getByRole("row", { name: /测试节点/ })).toBeVisible();
+	await page.getByRole("button", { name: "刷新节点" }).click();
+	await expect.poll(() => calls.delayedNodeReads).toBe(1);
+  if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "打开导航" }).click();
+  await page.getByRole("button", { name: "设置" }).click();
+  await expect(page.getByText("HttpOnly 浏览器会话有效")).toBeVisible();
+  await page.getByRole("button", { name: "注销会话" }).click();
+  await expect.poll(() => calls.sessionDeletes).toBe(1);
+  await expect(page).toHaveURL(/#settings$/);
+  await expect(page.getByText("尚未建立浏览器会话", { exact: true }).first()).toBeVisible();
+	calls.releaseNodeRead();
+	await expect.poll(() => calls.completedNodeReads).toBe(2);
+
+  await page.evaluate(() => { window.location.hash = "proxies"; });
+  await expect(page.getByRole("heading", { level: 1, name: "代理与订阅" })).toBeVisible();
+	await expect(page.getByRole("row", { name: /测试节点/ })).toHaveCount(0);
+	await expect(page.locator("#mihomo-publish").getByRole("alert")).toContainText("Mihomo 配置服务不可用");
+});
+
+test("does not let an old 401 clear a re-authenticated session", async ({ page }, testInfo) => {
+	const calls = await mockApi(page, { holdSecondNodeRead: true, staleNodeRead401: true });
+	await page.goto("/#proxies");
+	await expect(page.getByRole("row", { name: /测试节点/ })).toBeVisible();
+	await page.getByRole("button", { name: "刷新节点" }).click();
+	await expect.poll(() => calls.delayedNodeReads).toBe(1);
+	if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "打开导航" }).click();
+	await page.getByRole("button", { name: "设置" }).click();
+	await page.getByRole("button", { name: "注销会话" }).click();
+	await expect.poll(() => calls.sessionDeletes).toBe(1);
+	await page.getByRole("textbox", { name: "API Token" }).fill(e2eToken);
+	await page.getByRole("button", { name: "建立安全会话" }).click();
+	await expect(page.getByText("HttpOnly 浏览器会话有效")).toBeVisible();
+	await expect.poll(() => calls.sessionCreates).toBe(2);
+	await expect.poll(() => calls.completedNodeReads).toBe(2);
+	calls.releaseNodeRead();
+	await expect.poll(() => calls.completedNodeReads).toBe(3);
+	await expect(page.getByText("HttpOnly 浏览器会话有效")).toBeVisible();
+	await page.getByRole("button", { name: "注销会话" }).click();
+	await expect.poll(() => calls.sessionDeletes).toBe(2);
+	await page.reload();
+	await expect(page.getByText("尚未建立浏览器会话", { exact: true }).first()).toBeVisible();
+});
+
+test("clears protected UI state when the current session receives a 401", async ({ page }) => {
+	const calls = await mockApi(page);
+	await page.goto("/#proxies");
+	await expect(page.getByRole("row", { name: /测试节点/ })).toBeVisible();
+	const completedBeforeExpiry = calls.completedNodeReads;
+	calls.expireCurrentSession();
+	await page.getByRole("button", { name: "刷新节点" }).click();
+	await expect.poll(() => calls.completedNodeReads).toBeGreaterThan(completedBeforeExpiry);
+	await expect(page).toHaveURL(/#settings$/);
+	await expect(page.getByText("尚未建立浏览器会话", { exact: true }).first()).toBeVisible();
+
+	await page.evaluate(() => { window.location.hash = "proxies"; });
+	await expect(page.getByRole("heading", { level: 1, name: "代理与订阅" })).toBeVisible();
+	await expect(page.getByRole("row", { name: /测试节点/ })).toHaveCount(0);
+});
+
+test("allows keyboard users to focus and scroll the proxy chain", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "the chain overflows horizontally at the mobile viewport");
+  await mockApi(page);
+  await page.goto("/#proxies");
+  const chain = page.getByRole("region", { name: "链式代理路径，可横向滚动" });
+  await chain.focus();
+  await expect(chain).toBeFocused();
+  const before = await chain.evaluate((element) => element.scrollLeft);
+  await chain.press("ArrowRight");
+  await expect.poll(() => chain.evaluate((element) => element.scrollLeft)).toBeGreaterThan(before);
 });
 
 test("renders independently verifiable service state without horizontal overflow", async ({ page }) => {
@@ -395,7 +680,7 @@ test("keeps all core views inside the viewport", async ({ page }, testInfo) => {
     const dimensions = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
     if (testInfo.project.name === "mobile") expect(dimensions.width).toBe(390);
     expect(dimensions.scrollWidth, `${view} root overflow`).toBeLessThanOrEqual(dimensions.width + 1);
-    await expectLayoutIntegrity(page, view, testInfo.project.name === "mobile");
+    await expectLayoutIntegrity(page, view, Boolean(testInfo.project.use.hasTouch));
   }
 });
 
@@ -427,8 +712,9 @@ test("pauses resource polling while hidden and refreshes on visibility and comma
   await expect.poll(() => calls.resourceReads["/api/v1/routeros/overview"] ?? 0).toBe(initialReads + 2);
 });
 
-test("backs off page polling after a resource failure", async ({ page }, testInfo) => {
+test("backs off page polling after a resource failure", async ({ page, consoleErrorAllowlist }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "one browser project is sufficient for timer semantics");
+	consoleErrorAllowlist.allowStatus(503);
   await page.clock.install({ time: new Date("2026-07-27T00:00:00Z") });
   const calls = await mockApi(page, { routerosFailure: true });
   await page.goto("/#overview");
@@ -458,7 +744,8 @@ test("backs off page polling after a resource failure", async ({ page }, testInf
   await expect.poll(() => calls.resourceReads["/api/v1/routeros/overview"] ?? 0).toBe(initialReads + 2);
 });
 
-test("keeps a failed RouterOS resource unavailable while other data remains visible", async ({ page }) => {
+test("keeps a failed RouterOS resource unavailable while other data remains visible", async ({ page, consoleErrorAllowlist }) => {
+	consoleErrorAllowlist.allowStatus(503);
   await mockApi(page, { routerosFailure: true });
   await page.goto("/#overview");
   const service = page.locator(".service-summary").filter({ hasText: "RouterOS" });
@@ -467,7 +754,8 @@ test("keeps a failed RouterOS resource unavailable while other data remains visi
   await expect(page.getByText("全部已验证")).toHaveCount(0);
 });
 
-test("degrades a failed route resource without hiding DHCP and container state", async ({ page }) => {
+test("degrades a failed route resource without hiding DHCP and container state", async ({ page, consoleErrorAllowlist }) => {
+	consoleErrorAllowlist.allowStatus(503);
   await mockApi(page, { routesFailure: true });
   await page.goto("/#network");
   await expect(page.getByText("路由数据不可用")).toBeVisible();
@@ -550,7 +838,8 @@ test("keeps node HTTP and current-policy exit checks separate from TCP", async (
   await expect(verified).toContainText("代理握手未单独检测");
 });
 
-test("shows a probe failure without converting TCP or exit state to success", async ({ page }) => {
+test("shows a probe failure without converting TCP or exit state to success", async ({ page, consoleErrorAllowlist }) => {
+	consoleErrorAllowlist.allowStatus(503);
   await mockApi(page, { mihomoProbeFailure: true });
   await page.goto("/#proxies");
   await page.getByRole("button", { name: "代理 HTTP / 出口" }).click();
@@ -597,7 +886,7 @@ test("mobile navigation traps focus and closes with Escape", async ({ page }, te
   await expect(navigation).toHaveCount(0);
 });
 
-test("traps focus in a dangerous-operation dialog and restores it on Escape", async ({ page }) => {
+test("traps focus in a dangerous-operation dialog and restores it on Escape", async ({ page }, testInfo) => {
   await mockApi(page);
   await page.goto("/#proxies");
   const deleteButton = page.getByRole("button", { name: "删除", exact: true });
@@ -608,6 +897,7 @@ test("traps focus in a dangerous-operation dialog and restores it on Escape", as
   await expect(confirmButton).toBeDisabled();
   await dialog.getByRole("checkbox").check();
   await expect(confirmButton).toBeEnabled();
+  if (testInfo.project.name === "mobile") await expectLayoutIntegrity(page, "danger dialog", true);
   await confirmButton.focus();
   await page.keyboard.press("Tab");
   await expect(dialog.getByRole("button", { name: "关闭弹窗" })).toBeFocused();
@@ -629,10 +919,203 @@ test("shows the persisted rollback result after Mihomo publish", async ({ page }
   await expect(page.getByText("Mihomo 发布失败，已自动回滚到上一份快照")).toBeVisible({ timeout: 10_000 });
 });
 
-test("reports Mihomo publish success only after the persisted job succeeds", async ({ page }) => {
+test("requires a fresh Mihomo preview after a failed publish job", async ({ page }) => {
+  const calls = await mockApi(page, { mihomoFailure: true });
+  await page.goto("/#proxies");
+  const panel = page.locator("#mihomo-publish");
+  await panel.getByRole("button", { name: "生成预览" }).click();
+  await panel.getByRole("button", { name: "确认发布" }).click();
+  const dialog = page.getByRole("dialog", { name: "确认发布 Mihomo 配置" });
+  await dialog.getByRole("checkbox").check();
+  await dialog.getByRole("button", { name: "确认执行" }).click();
+  await expect(page.locator(".toast.warning")).toContainText("Mihomo 健康检查失败");
+  await expect(dialog).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "确认发布" })).toBeDisabled();
+  expect(calls.mihomoApply).toBe(1);
+  await panel.getByRole("button", { name: "生成预览" }).click();
+	await expect(panel.getByRole("button", { name: "确认发布" })).toBeEnabled();
+});
+
+test("invalidates a Mihomo preview when the draft changes", async ({ page }) => {
+	await mockApi(page);
+	await page.goto("/#proxies");
+	const panel = page.locator("#mihomo-publish");
+	await panel.getByRole("button", { name: "生成预览" }).click();
+	await expect(panel.getByText("预览摘要")).toBeVisible();
+	await expect(panel.getByRole("button", { name: "确认发布" })).toBeEnabled();
+
+	await panel.getByRole("spinbutton", { name: "Mixed Port" }).fill("7891");
+	await expect(panel.getByText("预览摘要")).toHaveCount(0);
+	await expect(panel.getByRole("button", { name: "确认发布" })).toBeDisabled();
+});
+
+test("keeps Mihomo editing unavailable after 503 until retry readback succeeds", async ({ page, consoleErrorAllowlist }) => {
+	consoleErrorAllowlist.allowStatus(503);
+	await mockApi(page, { mihomoDraftUnavailableOnce: true });
+	await page.goto("/#proxies");
+	const panel = page.locator("#mihomo-publish");
+	await expect(panel.getByRole("alert")).toContainText("Mihomo 配置服务不可用");
+	await expect(panel.locator(".operation-badge")).toHaveText("不可用");
+	await expect(panel.getByRole("checkbox", { name: "允许局域网访问" })).toBeDisabled();
+	await expect(panel.getByRole("button", { name: "保存草稿" })).toBeDisabled();
+	await expect(panel.getByRole("button", { name: "生成预览" })).toBeDisabled();
+
+	await panel.getByRole("button", { name: "重试加载" }).click();
+	await expect(panel.getByRole("alert")).toHaveCount(0);
+	await expect(panel.locator(".operation-badge")).toHaveText("SQLite 草稿");
+	await expect(panel.getByRole("checkbox", { name: "允许局域网访问" })).toBeEnabled();
+	await expect(panel.getByRole("button", { name: "生成预览" })).toBeEnabled();
+});
+
+test("covers subscription create, preview, failed replacement and task retry", async ({ page }, testInfo) => {
+	test.skip(testInfo.project.name !== "desktop", "stateful subscription workflow is covered once; responsive layout is covered separately");
+	const calls = await mockApi(page, { subscriptionLifecycle: true, jobReadbackDelayMs: 250 });
+	await page.goto("/#proxies");
+	const panel = page.locator("section.operations-panel").filter({ has: page.getByRole("heading", { name: "订阅源" }) });
+	await panel.getByRole("textbox", { name: "名称" }).fill("New source");
+	await panel.getByRole("textbox", { name: "HTTPS URL" }).fill("https://subscriptions.example.invalid/new");
+	await panel.getByRole("button", { name: "添加" }).click();
+	await expect(panel.getByText("New source", { exact: true })).toBeVisible();
+	expect(calls.subscriptionCreates).toEqual([{ name: "New source", url: "https://subscriptions.example.invalid/new", enabled: true, interval: 21600 }]);
+
+	const primary = panel.locator(".subscription-row").filter({ hasText: "Primary" });
+	await primary.getByRole("button", { name: "预览", exact: true }).click();
+	await expect(panel.locator(".operation-callout")).toContainText("3 个去重节点");
+	await expect(panel.locator(".operation-callout")).toContainText("跳过 1");
+	await primary.getByRole("button", { name: "更新", exact: true }).click();
+	const dialog = page.getByRole("dialog", { name: "确认更新订阅" });
+	await expect(dialog).toContainText("新增 1，更新 2，移除 0");
+	await expect(dialog).toContainText("有 1 个无效条目被跳过");
+	await dialog.getByRole("checkbox").check();
+	await dialog.getByRole("button", { name: "确认更新订阅" }).click();
+	await expect(page.locator(".toast.warning")).toContainText("远端内容变化，旧节点保持不变");
+	await expect(dialog).toHaveCount(0);
+	await expect(primary).toBeVisible();
+	expect(calls.subscriptionNodeCounts["source-primary"]).toBe(2);
+	expect(calls.subscriptionUpdates).toHaveLength(1);
+	await primary.getByRole("button", { name: "更新", exact: true }).click();
+	await expect(page.getByRole("dialog", { name: "确认更新订阅" })).toBeVisible();
+	await page.getByRole("dialog", { name: "确认更新订阅" }).getByRole("button", { name: "关闭弹窗" }).click();
+
+	await page.goto("/#operations");
+	await page.reload();
+	await expect(page.getByRole("heading", { level: 1, name: "任务告警与审计" })).toBeVisible();
+	const job = page.getByRole("row").filter({ hasText: "subscription.update" });
+	await expect(job).toContainText("FAILED");
+	await job.getByRole("button", { name: "重试" }).click();
+	await expect.poll(() => calls.subscriptionRetries).toBe(1);
+	await expect(page.locator(".toast.success")).toContainText("subscription.update 重试已接受，任务列表回读为 QUEUED");
+	await expect(job).toContainText("QUEUED");
+	await expect(job.getByRole("button", { name: "重试" })).toHaveCount(0);
+});
+
+test("accepts a retried task that is RUNNING by list readback", async ({ page }, testInfo) => {
+	test.skip(testInfo.project.name !== "desktop", "failure-state workflow is covered once");
+	const calls = await mockApi(page, { subscriptionLifecycle: true, failedJobInitially: true, jobRetryReadback: "running" });
+	await page.goto("/#operations");
+	const job = page.getByRole("row").filter({ hasText: "subscription.update" });
+	await expect(job).toContainText("FAILED");
+	await job.getByRole("button", { name: "重试" }).click();
+	await expect.poll(() => calls.subscriptionRetries).toBe(1);
+	await expect(page.locator(".toast.success")).toContainText("任务列表回读为 RUNNING");
+	await expect(job).toContainText("RUNNING");
+	await expect(job.getByRole("button", { name: "等待回读" })).toHaveCount(0);
+});
+
+for (const readback of ["503", "stale"] as const) {
+	test(`keeps a retried task locked when ${readback} does not confirm a new state`, async ({ page, consoleErrorAllowlist }, testInfo) => {
+		test.skip(testInfo.project.name !== "desktop", "failure-state workflow is covered once");
+		if (readback === "503") consoleErrorAllowlist.allowStatus(503);
+		const calls = await mockApi(page, { subscriptionLifecycle: true, failedJobInitially: true, jobRetryReadback: readback });
+		await page.goto("/#operations");
+		const job = page.getByRole("row").filter({ hasText: "subscription.update" });
+		await expect(job).toContainText("FAILED");
+		await job.getByRole("button", { name: "重试" }).click();
+		await expect.poll(() => calls.subscriptionRetries).toBe(1);
+		await expect(job).toContainText("QUEUED（待回读）");
+		await expect(job.getByRole("button", { name: "等待回读" })).toBeDisabled();
+		await expect(page.locator(".toast.warning")).toContainText(readback === "503" ? "任务列表回读失败" : "任务列表尚未确认新的任务状态");
+		expect(calls.subscriptionRetries).toBe(1);
+	});
+}
+
+test("marks a created subscription pending when its list readback fails", async ({ page, consoleErrorAllowlist }, testInfo) => {
+	test.skip(testInfo.project.name !== "desktop", "failure-state workflow is covered once");
+	consoleErrorAllowlist.allowStatus(503);
+	const calls = await mockApi(page, { subscriptionLifecycle: true, subscriptionCreateReadbackFailure: true });
+	await page.goto("/#proxies");
+	const panel = page.locator("section.operations-panel").filter({ has: page.getByRole("heading", { name: "订阅源" }) });
+	await panel.getByRole("textbox", { name: "名称" }).fill("Pending source");
+	await panel.getByRole("textbox", { name: "HTTPS URL" }).fill("https://subscriptions.example.invalid/pending");
+	await panel.getByRole("button", { name: "添加" }).click();
+	await expect(panel.getByText("Pending source", { exact: true })).toBeVisible();
+	await expect(panel.getByText("等待列表回读确认")).toBeVisible();
+	await expect(page.locator(".toast.warning")).toContainText("订阅列表回读失败");
+	await expect(page.locator(".toast.success")).toHaveCount(0);
+	expect(calls.subscriptionCreates).toHaveLength(1);
+});
+
+test("marks a created subscription pending when a successful list omits it", async ({ page }, testInfo) => {
+	test.skip(testInfo.project.name !== "desktop", "failure-state workflow is covered once");
+	const calls = await mockApi(page, { subscriptionLifecycle: true, subscriptionCreateReadbackMissing: true });
+	await page.goto("/#proxies");
+	const panel = page.locator("section.operations-panel").filter({ has: page.getByRole("heading", { name: "订阅源" }) });
+	await panel.getByRole("textbox", { name: "名称" }).fill("Missing source");
+	await panel.getByRole("textbox", { name: "HTTPS URL" }).fill("https://subscriptions.example.invalid/missing");
+	await panel.getByRole("button", { name: "添加" }).click();
+	await expect(panel.getByText("Missing source", { exact: true })).toBeVisible();
+	await expect(panel.getByText("等待列表回读确认")).toBeVisible();
+	await expect(page.locator(".toast.warning")).toContainText("列表回读未包含新订阅");
+	await expect(page.locator(".toast.success")).toHaveCount(0);
+	expect(calls.subscriptionCreates).toHaveLength(1);
+});
+
+
+test.describe("subscription conflict response", () => {
+	test.use({ expectedConsoleErrorStatuses: [409] });
+	test("keeps detach and cascade-conflict subscription deletion atomic", async ({ page }, testInfo) => {
+		test.skip(testInfo.project.name !== "desktop", "stateful subscription workflow is covered once; responsive layout is covered separately");
+		const calls = await mockApi(page, { subscriptionLifecycle: true });
+		await page.goto("/#proxies");
+		const panel = page.locator("section.operations-panel").filter({ has: page.getByRole("heading", { name: "订阅源" }) });
+
+		await panel.getByRole("button", { name: "删除订阅 Detach source" }).click();
+		let strategy = page.getByRole("dialog", { name: "选择节点处理方式" });
+		await strategy.getByRole("button", { name: "生成删除计划" }).click();
+		let confirm = page.getByRole("dialog", { name: "确认删除订阅" });
+		await expect(confirm).toContainText("保留 2 个来源节点");
+		await confirm.getByRole("checkbox").check();
+		await confirm.getByRole("button", { name: "确认删除订阅" }).click();
+		await expect(panel.getByText("Detach source", { exact: true })).toHaveCount(0);
+		expect(calls.subscriptionNodeCounts["source-detach"]).toBe(2);
+		expect(calls.subscriptionDeletes).toContainEqual({ id: "source-detach", strategy: "detach", outcome: "succeeded" });
+
+		await panel.getByRole("button", { name: "删除订阅 Cascade source" }).click();
+		strategy = page.getByRole("dialog", { name: "选择节点处理方式" });
+		await strategy.getByRole("radio", { name: /级联删除来源节点/ }).check();
+		await strategy.getByRole("button", { name: "生成删除计划" }).click();
+		confirm = page.getByRole("dialog", { name: "确认删除订阅" });
+		await expect(confirm).toContainText("删除 2 个来源节点");
+		await confirm.getByRole("checkbox").check();
+		await confirm.getByRole("button", { name: "确认删除订阅" }).click();
+		await expect(page.locator(".toast.warning")).toContainText("来源节点仍被代理组引用，删除已回滚");
+		await expect(confirm).toHaveCount(0);
+		await expect(panel.getByText("Cascade source", { exact: true })).toBeVisible();
+		expect(calls.subscriptionNodeCounts["source-cascade"]).toBe(2);
+		expect(calls.subscriptionDeletes).toContainEqual({ id: "source-cascade", strategy: "cascade", outcome: "conflict" });
+		await panel.getByRole("button", { name: "删除订阅 Cascade source" }).click();
+		strategy = page.getByRole("dialog", { name: "选择节点处理方式" });
+		await strategy.getByRole("radio", { name: /级联删除来源节点/ }).check();
+		await strategy.getByRole("button", { name: "生成删除计划" }).click();
+		await expect(page.getByRole("dialog", { name: "确认删除订阅" })).toBeVisible();
+	});
+});
+
+test("reports Mihomo publish success only after the persisted job succeeds", async ({ page }, testInfo) => {
   const calls = await mockApi(page);
   await page.goto("/#proxies");
   await page.getByRole("button", { name: "生成预览" }).click();
+  if (testInfo.project.name === "mobile") await expectLayoutIntegrity(page, "Mihomo preview", true);
   await page.getByRole("button", { name: "确认发布" }).click();
   const dialog = page.getByRole("dialog", { name: "确认发布 Mihomo 配置" });
   await dialog.getByRole("checkbox").check();

@@ -8,6 +8,7 @@
     "test": "vitest",
     "test:unit": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit",
+    "typecheck:e2e": "tsc --noEmit -p tsconfig.e2e.json",
     "build": "vite build",
     "test:e2e": "playwright test --config playwright.config.ts",
     "test:e2e:ui": "playwright test --config playwright.config.ts --ui"

@@ -1,6 +1,6 @@
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, applyMihomoConfig, commandRouterContainer, deleteProxyGroup, getApiToken, getSiteManifest, loadLiveSnapshot, planDeviceEgress, previewMihomoConfig, saveApiToken, type DevicePolicy, type EgressPlan, type MihomoDraft } from "../api";
+import { ApiError, applyMihomoConfig, authenticateApiToken, commandRouterContainer, deleteBrowserSession, deleteProxyGroup, getApiToken, getSiteManifest, loadLiveResources, loadLiveSnapshot, planDeviceEgress, previewMihomoConfig, restoreBrowserSession, saveApiToken, subscribeSessionInvalidation, type DevicePolicy, type EgressPlan, type MihomoDraft } from "../api";
 import { server } from "./setup";
 
 const token = "a".repeat(40);
@@ -63,13 +63,135 @@ describe("FoxOS browser API", () => {
 		expect(window.sessionStorage.getItem("foxos.apiToken")).toBeNull();
 	});
 
+	it("exchanges the API token once and uses cookie plus CSRF afterwards", async () => {
+		let sessionBody: unknown;
+		let commandAuthorization = "not-observed";
+		let commandCSRF = "";
+		server.use(
+			http.post("/api/v1/session", async ({ request }) => {
+				sessionBody = await request.json();
+				expect(request.headers.get("Authorization")).toBeNull();
+				return HttpResponse.json({ csrfToken: "c".repeat(64), expiresAt: "2099-01-01T00:00:00Z" }, { status: 201 });
+			}),
+			http.post("/api/v1/routeros/containers/:id/commands/:command", ({ request }) => {
+				commandAuthorization = request.headers.get("Authorization") ?? "";
+				commandCSRF = request.headers.get("X-FoxOS-CSRF") ?? "";
+				return HttpResponse.json({ status: "QUEUED", job: { id: "job-session", kind: "routeros.container-command", status: "QUEUED", progress: 0, attempts: 0, createdAt: "2026-07-27T00:00:00Z", updatedAt: "2026-07-27T00:00:00Z" } }, { status: 202 });
+			}),
+		);
+
+		await authenticateApiToken(token);
+		await commandRouterContainer("*c1", "foxos:active", "restart", "session-test-0123456789");
+
+		expect(sessionBody).toEqual({ token });
+		expect(getApiToken()).toBe("");
+		expect(commandAuthorization).toBe("");
+		expect(commandCSRF).toBe("c".repeat(64));
+	});
+
+	it("keeps stale 401 responses and probes from clearing a newer browser session", async () => {
+		let sessionCreates = 0;
+		let sessionDeletes = 0;
+		let releaseNodeRead: (() => void) | undefined;
+		let nodeReadStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => { nodeReadStarted = resolve; });
+		const gate = new Promise<void>((resolve) => { releaseNodeRead = resolve; });
+		server.use(
+			http.post("/api/v1/session", () => {
+				sessionCreates += 1;
+				return HttpResponse.json({ csrfToken: String(sessionCreates).repeat(64), expiresAt: "2099-01-01T00:00:00Z" }, { status: 201 });
+			}),
+			http.delete("/api/v1/session", () => {
+				sessionDeletes += 1;
+				return new HttpResponse(null, { status: 204 });
+			}),
+			http.get("/api/v1/session", () => HttpResponse.json({ error: "unauthorized" }, { status: 401 })),
+			http.get("/api/v1/nodes", async () => {
+				nodeReadStarted?.();
+				await gate;
+				return HttpResponse.json({ error: "unauthorized" }, { status: 401 });
+			}),
+		);
+
+		await authenticateApiToken("1".repeat(40));
+		const staleRead = loadLiveResources(["nodes"]);
+		await started;
+		await deleteBrowserSession();
+		await authenticateApiToken("2".repeat(40));
+		releaseNodeRead?.();
+		await staleRead;
+		await deleteBrowserSession();
+
+		expect(sessionCreates).toBe(2);
+		expect(sessionDeletes).toBe(2);
+		await expect(restoreBrowserSession()).resolves.toBe(false);
+	});
+
+	it("invalidates an authenticated session when its expiry probe returns 401", async () => {
+		let nodeReads = 0;
+		const invalidated = vi.fn();
+		server.use(
+			http.post("/api/v1/session", () => HttpResponse.json({ csrfToken: "e".repeat(64), expiresAt: "2000-01-01T00:00:00Z" }, { status: 201 })),
+			http.get("/api/v1/session", () => HttpResponse.json({ error: "unauthorized", message: "浏览器会话已过期" }, { status: 401 })),
+			http.get("/api/v1/nodes", () => {
+				nodeReads += 1;
+				return HttpResponse.json([]);
+			}),
+		);
+		await authenticateApiToken("e".repeat(40));
+		const unsubscribe = subscribeSessionInvalidation(invalidated);
+
+		const result = await loadLiveResources(["nodes"]);
+
+		unsubscribe();
+		expect(result.nodes).toMatchObject({ ok: false });
+		expect(nodeReads).toBe(0);
+		expect(invalidated).toHaveBeenCalledTimes(1);
+		await expect(restoreBrowserSession()).resolves.toBe(false);
+	});
+
+	it("keeps or restores the existing browser session after a replacement token is rejected", async () => {
+		let sessionCreates = 0;
+		let commandCSRF = "";
+		server.use(
+			http.post("/api/v1/session", () => {
+				sessionCreates += 1;
+				if (sessionCreates === 2) return HttpResponse.json({ error: "unauthorized", message: "Token 无效" }, { status: 401 });
+				return HttpResponse.json({ csrfToken: "f".repeat(64), expiresAt: "2099-01-01T00:00:00Z" }, { status: 201 });
+			}),
+			http.get("/api/v1/session", () => HttpResponse.json({ csrfToken: "f".repeat(64), expiresAt: "2099-01-01T00:00:00Z" })),
+			http.post("/api/v1/routeros/containers/:id/commands/:command", ({ request }) => {
+				commandCSRF = request.headers.get("X-FoxOS-CSRF") ?? "";
+				return HttpResponse.json({ status: "QUEUED", job: { id: "job-replacement", kind: "routeros.container-command", status: "QUEUED", progress: 0, attempts: 0, createdAt: "2026-07-27T00:00:00Z", updatedAt: "2026-07-27T00:00:00Z" } }, { status: 202 });
+			}),
+		);
+		await authenticateApiToken("f".repeat(40));
+
+		await expect(authenticateApiToken("x".repeat(40))).rejects.toMatchObject({ status: 401 });
+		await expect(restoreBrowserSession()).resolves.toBe(true);
+		await commandRouterContainer("*c1", "foxos:active", "restart", "replacement-session-test-01");
+
+		expect(commandCSRF).toBe("f".repeat(64));
+	});
+
 	it("migrates and clears a legacy session token only once", async () => {
 		const legacyToken = "l".repeat(40);
 		window.sessionStorage.setItem("foxos.apiToken", legacyToken);
+		let exchanged = "";
+		server.use(
+			http.get("/api/v1/session", () => HttpResponse.json({ error: "unauthorized" }, { status: 401 })),
+			http.post("/api/v1/session", async ({ request }) => {
+				exchanged = String((await request.json() as { token?: string }).token ?? "");
+				return HttpResponse.json({ csrfToken: "d".repeat(64), expiresAt: "2099-01-01T00:00:00Z" }, { status: 201 });
+			}),
+			http.get("/api/v1/nodes", () => HttpResponse.json([])),
+		);
 		vi.resetModules();
 		const migrated = await import("../api");
-		expect(migrated.getApiToken()).toBe(legacyToken);
+		expect(migrated.getApiToken()).toBe("");
 		expect(window.sessionStorage.getItem("foxos.apiToken")).toBeNull();
+		await migrated.loadLiveResources(["nodes"]);
+		expect(exchanged).toBe(legacyToken);
 
 		vi.resetModules();
 		const refreshed = await import("../api");

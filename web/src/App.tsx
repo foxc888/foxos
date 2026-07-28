@@ -66,6 +66,7 @@ import {
   getRouterContainers,
   getSiteManifest,
   importNodeLinks,
+	listJobs,
   type Job,
   type L2TPClient,
   loadLiveSnapshot,
@@ -86,7 +87,10 @@ import {
   type RouterOverview,
   type RouterRoute,
   type SiteManifest,
-  saveApiToken,
+  authenticateApiToken,
+  deleteBrowserSession,
+  restoreBrowserSession,
+  subscribeSessionInvalidation,
   updateProxyGroup,
   updateDeviceMetadata,
   waitForJob,
@@ -501,7 +505,10 @@ function App() {
   const mainRef = useRef<HTMLElement>(null);
   const mobileMenuRef = useRef<HTMLButtonElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
-  const refreshInFlight = useRef<Promise<number> | null>(null);
+  const refreshInFlight = useRef<{ generation: number; promise: Promise<number> } | null>(null);
+  const refreshGeneration = useRef(0);
+  const siteRefreshGeneration = useRef(0);
+  const protectedReadsEnabled = useRef(true);
   const isMobile = useMediaQuery("(max-width: 760px)");
 
   const notify = useCallback((message: string, tone: Toast["tone"] = "success") => {
@@ -517,10 +524,30 @@ function App() {
     if (toastTimer.current !== undefined) window.clearTimeout(toastTimer.current);
   }, []);
 
+  const handleSignedOut = useCallback(() => {
+    refreshGeneration.current += 1;
+    protectedReadsEnabled.current = false;
+    setScanning(false);
+    setDevices([]);
+    setNodes([]);
+    setSelectedDeviceId(0);
+    setSelectedNodeId(0);
+    setLiveLogs([]);
+    setResources(initialResources());
+    setPage("settings");
+    setMobileNavOpen(false);
+    if (window.location.hash !== "#settings") window.location.hash = "settings";
+  }, []);
+
+  useEffect(() => subscribeSessionInvalidation(handleSignedOut), [handleSignedOut]);
+
   const refreshLiveData = useCallback(async (showToast = false, names: LiveResourceName[] = allLiveResourceNames, background = false): Promise<number> => {
-    while (refreshInFlight.current) {
+    if (!protectedReadsEnabled.current) return 0;
+		const generation = refreshGeneration.current;
+		while (refreshInFlight.current?.generation === generation) {
       if (background) return 0;
-      await refreshInFlight.current;
+			await refreshInFlight.current.promise;
+			if (!protectedReadsEnabled.current || generation !== refreshGeneration.current) return 0;
     }
     const refresh = (async (): Promise<number> => {
       if (!background) {
@@ -529,6 +556,7 @@ function App() {
       }
       try {
         const snapshot = names.length === allLiveResourceNames.length ? await loadLiveSnapshot() : await loadLiveResources(names);
+        if (!protectedReadsEnabled.current || generation !== refreshGeneration.current) return 0;
         setResources((current) => mergeLiveResources(current, snapshot));
 
         if (snapshot.nodes?.ok) {
@@ -555,17 +583,19 @@ function App() {
         }
         return failures;
       } catch (error) {
+        if (!protectedReadsEnabled.current || generation !== refreshGeneration.current) return 0;
         if (showToast) notify(error instanceof Error ? error.message : "刷新过程异常", "warning");
         return 1;
       } finally {
-        if (!background) setScanning(false);
+        if (!background && protectedReadsEnabled.current && generation === refreshGeneration.current) setScanning(false);
       }
     })();
-    refreshInFlight.current = refresh;
+		const activeRefresh = { generation, promise: refresh };
+		refreshInFlight.current = activeRefresh;
     try {
       return await refresh;
     } finally {
-      refreshInFlight.current = null;
+			if (refreshInFlight.current === activeRefresh) refreshInFlight.current = null;
     }
   }, [notify]);
 
@@ -573,19 +603,24 @@ function App() {
     void refreshLiveData(false);
   }, [refreshLiveData]);
 
-  useEffect(() => {
-    let active = true;
-    void getSiteManifest().then((manifest) => {
-      if (!active) return;
+  const refreshSite = useCallback(async () => {
+    const generation = ++siteRefreshGeneration.current;
+    try {
+      const manifest = await getSiteManifest();
+      if (generation !== siteRefreshGeneration.current) return;
       setSite(manifest);
       setSiteError("");
-    }).catch((error) => {
-      if (!active) return;
+    } catch (error) {
+      if (generation !== siteRefreshGeneration.current) return;
       setSite(null);
       setSiteError(error instanceof Error ? error.message : "站点清单不可用");
-    });
-    return () => { active = false; };
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshSite();
+    return () => { siteRefreshGeneration.current += 1; };
+  }, [refreshSite]);
 
   useEffect(() => {
     const syncFromLocation = () => {
@@ -686,6 +721,13 @@ function App() {
     window.location.hash = key;
   };
 
+  const handleAuthenticated = () => {
+    refreshGeneration.current += 1;
+    protectedReadsEnabled.current = true;
+    void refreshSite();
+    void refreshLiveData(true);
+  };
+
   const criticalServices = [resources.routeros, resources.mihomo, resources.mosdns];
   const healthy = criticalServices.every((resource) => resource.phase === "live" && resource.data?.online);
   const availableCount = Object.values(resources).filter((resource) => resource.phase === "live").length;
@@ -744,8 +786,8 @@ function App() {
           {page === "network" ? <div className="stack"><RouterOSPage containers={resources.containers} dhcpServers={resources.dhcpServers} navigate={navigate} notify={notify} onRefresh={(showToast = true) => refreshLiveData(showToast, pollingProfiles.network.resources)} resource={resources.routeros} routes={resources.routes} scanning={scanning} /><MosDNSPage address={siteServiceAddress(site, "mosdns")} resource={resources.mosdns} /></div> : null}
           {page === "proxies" ? <div className="stack"><ProxyPage groupResource={resources.groups} l2tpResource={resources.l2tp} mihomoResource={resources.mihomo} navigate={navigate} nodeResource={resources.nodes} nodes={nodes} notify={notify} onRefresh={(showToast = true) => void refreshLiveData(showToast, pollingProfiles.proxies.resources)} selectedNodeId={selectedNodeId} setNodes={setNodes} setSelectedNodeId={setSelectedNodeId} /><MihomoOperations notify={notify} /><SubscriptionOperations notify={notify} /></div> : null}
           {page === "devices" ? <DevicesPage capabilitiesResource={resources.capabilities} devices={devices} groupResource={resources.groups} inventoryResource={resources.deviceInventory} l2tpResource={resources.l2tp} nodeResource={resources.nodes} notify={notify} onRefresh={(showToast = true) => void refreshLiveData(showToast, pollingProfiles.devices.resources)} policyResource={resources.policies} protectedAddresses={site?.protectedAddresses ?? []} resource={resources.routeros} selectedDeviceId={selectedDeviceId} setDevices={setDevices} setSelectedDeviceId={setSelectedDeviceId} siteReady={Boolean(site)} /> : null}
-          {page === "operations" ? <OperationsPage items={liveLogs} jobs={resources.jobs} notify={notify} onRefresh={() => void refreshLiveData(true, pollingProfiles.operations.resources)} resource={resources.audit} /> : null}
-          {page === "settings" ? <SettingsPage notify={notify} site={site} siteError={siteError} /> : null}
+          {page === "operations" ? <OperationsPage items={liveLogs} jobs={resources.jobs} notify={notify} onRefresh={(showToast = true) => refreshLiveData(showToast, pollingProfiles.operations.resources)} resource={resources.audit} /> : null}
+          {page === "settings" ? <SettingsPage notify={notify} onAuthenticated={handleAuthenticated} onSignedOut={handleSignedOut} site={site} siteError={siteError} /> : null}
         </div>
       </main>
 
@@ -758,26 +800,57 @@ function App() {
   );
 }
 
-function OperationsPage({ notify, jobs, items, resource, onRefresh }: { notify: (message: string, tone?: Toast["tone"]) => void; jobs: ResourceState<Job[]>; items: LogItem[]; resource: ResourceState<AuditEvent[]>; onRefresh: () => void }) {
-  return <div className="stack"><TaskPanel notify={notify} resource={jobs} /><AlertBackupOperations notify={notify} /><LogsPage items={items} onRefresh={onRefresh} resource={resource} /></div>;
+function OperationsPage({ notify, jobs, items, resource, onRefresh }: { notify: (message: string, tone?: Toast["tone"]) => void; jobs: ResourceState<Job[]>; items: LogItem[]; resource: ResourceState<AuditEvent[]>; onRefresh: (showToast?: boolean) => Promise<number> }) {
+  return <div className="stack"><TaskPanel notify={notify} onRefresh={onRefresh} resource={jobs} /><AlertBackupOperations notify={notify} /><LogsPage items={items} onRefresh={() => void onRefresh(true)} resource={resource} /></div>;
 }
 
-function TaskPanel({ resource, notify }: { resource: ResourceState<Job[]>; notify: (message: string, tone?: Toast["tone"]) => void }) {
-  const [retrying, setRetrying] = useState("");
+function TaskPanel({ resource, notify, onRefresh }: { resource: ResourceState<Job[]>; notify: (message: string, tone?: Toast["tone"]) => void; onRefresh: (showToast?: boolean) => Promise<number> }) {
+  const [retryStates, setRetryStates] = useState<Record<string, { phase: "checking" | "unconfirmed" | "confirmed"; job: Job; originalUpdatedAt: string }>>({});
   const items = resource.data ?? [];
+  useEffect(() => {
+    setRetryStates((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [id, state] of Object.entries(current)) {
+        const readback = items.find((job) => job.id === id);
+        if (readback && readback.updatedAt !== state.originalUpdatedAt) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [items]);
   const retry = async (job: Job) => {
-    if (retrying) return;
-    setRetrying(job.id);
+    if (retryStates[job.id]) return;
+    setRetryStates((current) => ({ ...current, [job.id]: { phase: "checking", job, originalUpdatedAt: job.updatedAt } }));
+    let acceptedByServer = false;
     try {
-      await retryJob(job.id);
-      notify(`${job.kind} 已重新排队；任务会沿用该类型的恢复协议`);
+      const accepted = await retryJob(job.id);
+      acceptedByServer = true;
+      if (accepted.status !== "QUEUED") throw new Error(`重试请求返回 ${accepted.status}，未确认重新排队`);
+      setRetryStates((current) => ({ ...current, [job.id]: { phase: "unconfirmed", job: accepted, originalUpdatedAt: job.updatedAt } }));
+      const readback = (await listJobs(50)).find((candidate) => candidate.id === job.id);
+			const progressed = readback && (readback.attempts > job.attempts || readback.updatedAt !== job.updatedAt);
+			if (!readback || !progressed || !["QUEUED", "RUNNING", "VERIFYING", "SUCCEEDED", "FAILED", "ROLLED_BACK"].includes(readback.status)) {
+				throw new Error("重试已被接受，但任务列表尚未确认新的任务状态；为避免重复提交，重试保持锁定");
+			}
+      setRetryStates((current) => ({ ...current, [job.id]: { phase: "confirmed", job: readback, originalUpdatedAt: job.updatedAt } }));
+      notify(`${job.kind} 重试已接受，任务列表回读为 ${readback.status}`, readback.status === "FAILED" || readback.status === "ROLLED_BACK" ? "warning" : "success");
+      void onRefresh(false);
     } catch (error) {
+      if (!acceptedByServer && error instanceof ApiError) {
+        setRetryStates((current) => {
+          if (!current[job.id]) return current;
+          const next = { ...current };
+          delete next[job.id];
+          return next;
+        });
+      }
       notify(apiFailureMessage(error, "任务不能重试"), "warning");
-    } finally {
-      setRetrying("");
     }
   };
-  return <section className="panel"><div className="panel-heading"><div><h2>持久化任务</h2><p>阶段、最终状态和恢复结果来自 SQLite</p></div><ResourceMeta resource={resource} /></div>{items.length ? <div aria-label="可横向滚动的数据表" className="table-wrap" role="region" tabIndex={0}><table aria-label="持久化任务"><thead><tr><th>任务</th><th>状态</th><th>阶段</th><th>进度</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{items.map((job) => { const phase = typeof job.result?.phase === "string" ? job.result.phase : "—"; const retryable = job.status === "FAILED" || job.status === "ROLLED_BACK"; return <tr key={job.id}><td><strong>{job.kind}</strong><small className="table-subline">{job.id}</small></td><td><span className={`job-status ${job.status.toLowerCase()}`}>{job.status}</span></td><td>{phase}</td><td>{job.progress}%</td><td>{formatUpdated(job.updatedAt)}</td><td>{retryable ? <button className="button secondary compact" disabled={Boolean(retrying)} onClick={() => void retry(job)} type="button"><RefreshCw aria-hidden="true" size={14} />{retrying === job.id ? "重试中…" : "重试"}</button> : "—"}</td></tr>; })}</tbody></table></div> : <EmptyState detail={resource.error || "任务创建后会在此显示。"} title="暂无任务记录" />}</section>;
+  return <section className="panel"><div className="panel-heading"><div><h2>持久化任务</h2><p>阶段、最终状态和恢复结果来自 SQLite</p></div><ResourceMeta resource={resource} /></div>{items.length ? <div aria-label="可横向滚动的数据表" className="table-wrap" role="region" tabIndex={0}><table aria-label="持久化任务"><thead><tr><th>任务</th><th>状态</th><th>阶段</th><th>进度</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{items.map((job) => { const retryState = retryStates[job.id]; const displayed = retryState?.job ?? job; const phase = typeof displayed.result?.phase === "string" ? displayed.result.phase : "—"; const retryable = job.status === "FAILED" || job.status === "ROLLED_BACK"; const waiting = retryState?.phase === "checking" ? "重试中…" : retryState?.phase === "unconfirmed" ? "等待回读" : ""; return <tr key={job.id}><td><strong>{displayed.kind}</strong><small className="table-subline">{displayed.id}</small></td><td><span className={`job-status ${displayed.status.toLowerCase()}`}>{displayed.status}{retryState?.phase === "unconfirmed" ? "（待回读）" : ""}</span></td><td>{phase}</td><td>{displayed.progress}%</td><td>{formatUpdated(displayed.updatedAt)}</td><td>{retryState ? waiting ? <button className="button secondary compact" disabled type="button"><RefreshCw aria-hidden="true" size={14} />{waiting}</button> : "—" : retryable ? <button className="button secondary compact" onClick={() => void retry(job)} type="button"><RefreshCw aria-hidden="true" size={14} />重试</button> : "—"}</td></tr>; })}</tbody></table></div> : <EmptyState detail={resource.error || "任务创建后会在此显示。"} title="暂无任务记录" />}</section>;
 }
 
 function ServiceSummary<T extends { configured: boolean; online: boolean }>({ name, address, tone, resource }: { name: string; address: string; tone: string; resource: ResourceState<T> }) {
@@ -1061,12 +1134,13 @@ function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceI
 
   const executeBinding = async () => {
     if (!pending) return;
+		const execution = pending;
+		setPending(null);
     setExecuting(true);
     try {
-      await executeDeviceBinding(pending.plan, pending.token);
-      setDevices((items) => items.map((item) => item.id === pending.device.id ? { ...item, fixed: true } : item));
-      notify(`${pending.device.name} 已执行并完成回读校验`);
-      setPending(null);
+			await executeDeviceBinding(execution.plan, execution.token);
+			setDevices((items) => items.map((item) => item.id === execution.device.id ? { ...item, fixed: true } : item));
+			notify(`${execution.device.name} 已执行并完成回读校验`);
       onRefresh(false);
     } catch (error) {
       notify(error instanceof Error ? error.message : "RouterOS 写入失败", "warning");
@@ -1097,21 +1171,21 @@ function DevicesPage({ devices, setDevices, selectedDeviceId, setSelectedDeviceI
 
   const executeEgress = async () => {
     if (!pendingEgress) return;
+		const execution = pendingEgress;
+		setPendingEgress(null);
     setExecutingEgress(true);
     try {
-      const result = await executeDeviceEgress(pendingEgress.plan.policyId, pendingEgress.plan, pendingEgress.token);
+			const result = await executeDeviceEgress(execution.plan.policyId, execution.plan, execution.token);
       const job = result.job ? await waitForJob(result.job.id) : undefined;
       if (job?.status === "ROLLED_BACK") {
-        notify(job.errorMessage || `${pendingEgress.device.name} 出口策略应用失败，已回滚 RouterOS 变更`, "warning");
-        setPendingEgress(null);
+				notify(job.errorMessage || `${execution.device.name} 出口策略应用失败，已回滚 RouterOS 变更`, "warning");
         onRefresh(false);
         return;
       }
       if (job?.status === "FAILED") throw new Error(job.errorMessage || "设备出口策略任务失败");
       if (job && job.status !== "SUCCEEDED") throw new Error(`设备出口策略任务结束于 ${job.status}`);
       if (!job && result.status !== "SUCCEEDED") throw new Error(`设备出口策略执行结束于 ${result.status}`);
-      notify(`${pendingEgress.device.name} 的出口策略已执行、回读并持久化`);
-      setPendingEgress(null);
+			notify(`${execution.device.name} 的出口策略已执行、回读并持久化`);
       onRefresh(false);
     } catch (error) {
       notify(error instanceof Error ? error.message : "设备出口策略执行失败", "warning");
@@ -1415,7 +1489,7 @@ function ProxyPage({ nodes, setNodes, selectedNodeId, setSelectedNodeId, notify,
           <Button disabled={groupResource.phase !== "live" || chainBusy || chainNodeIds.length < 2 || !chainName.trim()} icon={Save} onClick={() => void saveChain()} variant="primary">保存组</Button>
           <Button disabled={!chainId || chainBusy} icon={Trash2} onClick={() => setChainDelete(chains.find((group) => group.id === chainId) ?? null)} variant="danger">删除组</Button>
         </div>
-        <div className="chain-builder-row"><ChainNode detail="设备出口" icon={Router} locked name="RouterOS" />{chainNodeIds.map((id, index) => { const node = foxosNodes.find((item) => item.apiId === id); return <ChainNode detail={node ? `${node.protocol} · 第 ${index + 1} 跳` : `缺失引用 · 第 ${index + 1} 跳`} icon={node ? Server : AlertTriangle} key={`${id}-${index}`} name={node?.name ?? id} onMoveLeft={index > 0 ? () => moveChainNode(index, -1) : undefined} onMoveRight={index < chainNodeIds.length - 1 ? () => moveChainNode(index, 1) : undefined} onRemove={() => setChainNodeIds((items) => items.filter((_, itemIndex) => itemIndex !== index))} />; })}<div className="add-stage"><select aria-label="添加链路节点" disabled={groupResource.phase !== "live" || chainBusy} defaultValue="" onChange={(event) => { const id = event.target.value; if (id && !chainNodeIds.includes(id)) setChainNodeIds((items) => [...items, id]); event.currentTarget.value = ""; }}><option value="">添加链路节点</option>{foxosNodes.filter((node) => !chainNodeIds.includes(node.apiId)).map((node) => <option key={node.apiId} value={node.apiId}>{node.name}</option>)}</select></div><ChainNode detail="目标网络" icon={Globe2} locked name="Internet" /></div>
+        <div aria-label="链式代理路径，可横向滚动" className="chain-builder-row" role="region" tabIndex={0}><ChainNode detail="设备出口" icon={Router} locked name="RouterOS" />{chainNodeIds.map((id, index) => { const node = foxosNodes.find((item) => item.apiId === id); return <ChainNode detail={node ? `${node.protocol} · 第 ${index + 1} 跳` : `缺失引用 · 第 ${index + 1} 跳`} icon={node ? Server : AlertTriangle} key={`${id}-${index}`} name={node?.name ?? id} onMoveLeft={index > 0 ? () => moveChainNode(index, -1) : undefined} onMoveRight={index < chainNodeIds.length - 1 ? () => moveChainNode(index, 1) : undefined} onRemove={() => setChainNodeIds((items) => items.filter((_, itemIndex) => itemIndex !== index))} />; })}<div className="add-stage"><select aria-label="添加链路节点" disabled={groupResource.phase !== "live" || chainBusy} defaultValue="" onChange={(event) => { const id = event.target.value; if (id && !chainNodeIds.includes(id)) setChainNodeIds((items) => [...items, id]); event.currentTarget.value = ""; }}><option value="">添加链路节点</option>{foxosNodes.filter((node) => !chainNodeIds.includes(node.apiId)).map((node) => <option key={node.apiId} value={node.apiId}>{node.name}</option>)}</select></div><ChainNode detail="目标网络" icon={Globe2} locked name="Internet" /></div>
         <div className="chain-publish-note"><span><FileText aria-hidden="true" size={16} />保存组不会热重载 Mihomo。发布前必须检查生成配置与脱敏 Diff。</span><Button icon={ArrowRight} onClick={() => document.getElementById("mihomo-publish")?.scrollIntoView({ block: "start" })} variant="secondary">预览并发布</Button></div>
       </section>
       <div className="split-view">
@@ -1487,7 +1561,7 @@ function ProxyModal({ mode, onClose, onCreate, onImported, notify }: { mode: "ad
     try {
       if (mode === "import") {
         const result = await importNodeLinks(String(data.get("links") || ""));
-        notify(`已原子导入 ${result.imported} 个节点；尚未发布至 Mihomo`);
+			notify(result.skipped ? `已原子导入 ${result.imported} 个节点，跳过 ${result.skipped} 个无效条目；尚未发布至 Mihomo` : `已原子导入 ${result.imported} 个节点；尚未发布至 Mihomo`, result.skipped ? "warning" : "success");
         onClose();
         onImported();
         return;
@@ -1508,7 +1582,7 @@ function ProxyModal({ mode, onClose, onCreate, onImported, notify }: { mode: "ad
   return (
     <Dialog eyebrow={mode === "add" ? "手动配置" : "本地分享链接"} onClose={() => !submitting && onClose()} title={mode === "add" ? "添加代理节点" : "导入代理节点"}>
       <form className="modal-form" onSubmit={submit}>
-        {mode === "add" ? <div className="form-grid"><label className="field"><span>节点名称</span><input autoFocus data-autofocus name="name" required /></label><label className="field"><span>协议</span><select name="protocol"><option>VLESS</option><option>Trojan</option><option>Shadowsocks</option><option>Hysteria2</option><option>SOCKS5</option></select></label><label className="field full"><span>服务器地址</span><input name="server" placeholder="server.example.com:443" required /></label><label className="field"><span>UUID / 用户名</span><input name="identity" /></label><label className="field"><span>密码</span><input autoComplete="new-password" name="password" type="password" /></label></div> : <div className="form-grid"><label className="field full"><span>分享链接（每行一个）</span><textarea autoFocus data-autofocus name="links" required rows={8} /></label><div className="warning-note full"><ShieldCheck aria-hidden="true" size={16} />链接由 FoxOS 本地解析并整批校验；此入口不会抓取订阅 URL。</div></div>}
+        {mode === "add" ? <div className="form-grid"><label className="field"><span>节点名称</span><input autoFocus data-autofocus name="name" required /></label><label className="field"><span>协议</span><select name="protocol"><option>VLESS</option><option>Trojan</option><option>Shadowsocks</option><option>Hysteria2</option><option>SOCKS5</option></select></label><label className="field full"><span>服务器地址</span><input name="server" placeholder="server.example.com:443" required /></label><label className="field"><span>UUID / 用户名</span><input name="identity" /></label><label className="field"><span>密码</span><input autoComplete="new-password" name="password" type="password" /></label></div> : <div className="form-grid"><label className="field full"><span>分享链接（每行一个）</span><textarea autoFocus data-autofocus name="links" required rows={8} /></label><div className="warning-note full"><ShieldCheck aria-hidden="true" size={16} />链接由 FoxOS 本地逐项解析；有效项原子导入，无效项返回脱敏错误。</div></div>}
         <div className="modal-actions"><Button disabled={submitting} onClick={onClose}>取消</Button><Button disabled={submitting} icon={mode === "add" ? Plus : Upload} type="submit" variant="primary">{submitting ? "正在保存…" : mode === "add" ? "保存节点" : "校验并导入"}</Button></div>
       </form>
     </Dialog>
@@ -1526,27 +1600,59 @@ function LogsPage({ items, resource, onRefresh }: { items: LogItem[]; resource: 
   return <div className="stack"><section className="panel status-band"><ResourceMeta resource={resource} /><Button icon={RefreshCw} onClick={onRefresh}>刷新审计</Button></section><section className="panel table-panel"><div className="toolbar"><label className="search-box"><Search aria-hidden="true" size={17} /><span className="sr-only">搜索审计事件</span><input onChange={(event) => setSearch(event.target.value)} placeholder="搜索事件、来源或详情" value={search} /></label><select aria-label="筛选日志级别" onChange={(event) => setLevel(event.target.value)} value={level}><option value="all">全部级别</option><option>成功</option><option>信息</option><option>错误</option></select></div>{filtered.length ? <div aria-label="可横向滚动的数据表" className="table-wrap" role="region" tabIndex={0}><table><thead><tr><th>时间</th><th>级别</th><th>来源</th><th>事件</th><th>目标</th></tr></thead><tbody>{filtered.map((item) => <tr key={`${item.time}-${item.event}-${item.detail}`}><td>{item.time}</td><td><span className={`log-level ${item.level}`}>{item.level}</span></td><td>{item.source}</td><td><strong>{item.event}</strong></td><td>{item.detail}</td></tr>)}</tbody></table></div> : <EmptyState detail="审计接口失败时不会显示样例日志。" title="没有审计记录" />}</section></div>;
 }
 
-function SettingsPage({ notify, site, siteError }: { notify: (message: string, tone?: Toast["tone"]) => void; site: SiteManifest | null; siteError: string }) {
-  const [saved, setSaved] = useState(false);
-  const save = (event: FormEvent<HTMLFormElement>) => {
+function SettingsPage({ notify, onAuthenticated, onSignedOut, site, siteError }: { notify: (message: string, tone?: Toast["tone"]) => void; onAuthenticated: () => void; onSignedOut: () => void; site: SiteManifest | null; siteError: string }) {
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void restoreBrowserSession().then((value) => {
+      if (active) setAuthenticated(value);
+    }).catch(() => {
+      if (active) setAuthenticated(false);
+    });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => subscribeSessionInvalidation(() => setAuthenticated(false)), []);
+  const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (busy) return;
     const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    setBusy(true);
     try {
-      saveApiToken(String(data.get("apiToken") || ""));
-      setSaved(true);
-			notify("API Token 仅保存在页面内存；刷新总览后生效");
-      window.setTimeout(() => setSaved(false), 1800);
-      event.currentTarget.reset();
+			await authenticateApiToken(String(data.get("apiToken") || ""));
+			setAuthenticated(true);
+			notify("浏览器安全会话已建立");
+			form.reset();
+				onAuthenticated();
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Token 保存失败", "warning");
+      const restored = await restoreBrowserSession().catch(() => false);
+				setAuthenticated(restored);
+      notify(error instanceof Error ? error.message : "会话建立失败", "warning");
+		} finally {
+			setBusy(false);
     }
   };
+	const signOut = async () => {
+		if (busy) return;
+		setBusy(true);
+		try {
+				await deleteBrowserSession();
+				setAuthenticated(false);
+				onSignedOut();
+				notify("浏览器会话已注销");
+		} catch (error) {
+			notify(error instanceof Error ? error.message : "注销失败", "warning");
+		} finally {
+			setBusy(false);
+		}
+	};
   return (
     <div className="page-grid two-thirds">
       <form className="panel" onSubmit={save}>
-				<div className="panel-heading"><div><h2>FoxOS API 凭据</h2><p>仅保存在页面内存，刷新或关闭标签页后清除</p></div><ShieldCheck aria-hidden="true" className="green-text" size={22} /></div>
+				<div className="panel-heading"><div><h2>FoxOS API 凭据</h2><p>{authenticated === null ? "正在检查浏览器会话" : authenticated ? "HttpOnly 浏览器会话有效" : "尚未建立浏览器会话"}</p></div><ShieldCheck aria-hidden="true" className={authenticated ? "green-text" : undefined} size={22} /></div>
         <div className="settings-section"><div className="form-grid"><label className="field full"><span>API Token</span><input autoComplete="off" minLength={32} name="apiToken" required type="password" /></label></div></div>
-        <div className="form-actions"><Button icon={saved ? Check : Save} type="submit" variant="primary">{saved ? "已保存" : "保存当前会话凭据"}</Button></div>
+				<div className="form-actions"><Button disabled={busy} icon={authenticated ? Check : Save} type="submit" variant="primary">{busy ? "处理中…" : authenticated ? "重新建立会话" : "建立安全会话"}</Button>{authenticated ? <Button disabled={busy} icon={LockKeyhole} onClick={() => void signOut()}>注销会话</Button> : null}</div>
       </form>
       <aside className="stack">
         <section className="panel">
