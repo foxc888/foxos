@@ -157,23 +157,24 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 
 - FoxOS、Mihomo、MosDNS 三个单层、未压缩 Docker v1 tar，供 RouterOS 本地 `file=` 导入。
 - `mihomo-config/`、`mosdns-config/`、安装/启动/版本化升级/回滚/卸载脚本。
-- 不可变 `site-config.example.rsc`、清单封存工具、只读 inspector/preflight/plan、`QUICK-INSTALL.md`、`RELEASE-MANIFEST.txt`、组件 `provenance/` 和 `SHA256SUMS`。
+- 不可变 `site-config.example.rsc`、清单封存工具、只读 doctor/inspector/preflight/plan、可丢弃 CHR `envlists` smoke、`QUICK-INSTALL.md`、`RELEASE-MANIFEST.txt`、组件 `provenance/` 和 `SHA256SUMS`。
 - 首次安装随机凭据；仓库和包内不预置真实 Token、密码或节点链接。
 
 三张 amd64 镜像都由同一次 CI 从固定来源构建并分别扫描，再把这些精确输入交给组包器；仓库不跟踪或隐式回退到预制 Mihomo/MosDNS tar。包内 provenance lock 记录上游版本、提交、源码归档 SHA-256、构建器和安全依赖提升。
 
-目标要求 RouterOS 7.21+、同版本 x86 `container` package、`container=yes`、`scheduler=yes`、站点清单指定的现有管理桥和存储，上传完成后仍至少有 512 MiB 可用空间。启用 device-mode 的 container 或 scheduler 可能要求设备操作者按 MikroTik 官方流程进行物理确认；安装器只读检查，不会自行开启。安装器也不会创建管理桥、磁盘、RouterOS 管理地址或 REST 服务。
+脚本语法下限是 RouterOS 7.21，目标完整版本还必须先通过同版本 CHR 的 `envlists` add/get/delete 兼容门禁；仓库当前没有可替代该门禁的 CHR 或实体版本验收记录。设备还需要同版本 x86 `container` package、`container=yes`、`scheduler=yes`、站点清单指定的现有管理桥和存储，上传完成后仍至少有 512 MiB 可用空间。启用 device-mode 的 container 或 scheduler 可能要求设备操作者按 MikroTik 官方流程进行物理确认；安装器只读检查，不会自行开启。安装器也不会创建管理桥、磁盘、RouterOS 管理地址或 REST 服务。
 
 安全顺序：
 
 1. 在工作站验证外层 `.sha256` 和包内 `SHA256SUMS`。
-2. 复制 `site-config.example.rsc` 为唯一的 `site-config.rsc`，编辑审核后运行 `seal-site-config.sh`；该清单及其 `.sha512` 独立于发布包 checksum。
-3. 把完整目录、`site-config.rsc` 和 `.sha512` 上传到清单指定的存储根，保存加密 RouterOS binary backup 与脱敏 export。
-4. import 不可变 `load-site-config.rsc` 后运行 `foxos-plan.rsc`；loader 先验证封存清单，plan 再自动执行只读 preflight 和逐资源 `CREATE/REUSE/FAIL` inspector。
-5. 把计划输出的 SHA-512 原样设置为确认值，再运行唯一正式安装入口 `foxos-full-install.rsc`；执行器会在首次写入前重跑全部检查并拒绝过期计划。
-6. 等三个容器均为 `status=stopped`，运行可重入的 `foxos-start-all.rsc`；失败时只停止本次启动的前序容器，开机自启仍保持关闭。
-7. 从站点存储导入生成的 `foxos-local-ca.pem`，核对指纹并设为 trusted；`foxos-verify.rsc` 只有在 live、ready、页面、站点和只读 API 全通过后才启用 FoxOS 所有的顺序启动 scheduler。三个容器的 `start-on-boot` 始终保持 `no`，冷启动由 scheduler 按 Mihomo、MosDNS、FoxOS 顺序协调。
-8. 只有客户端原本使用 RouterOS DNS 时，才可单独运行只读 DNS plan、精确确认和 apply，为 public hostname 添加一条 FoxOS 所有的 A 记录。
+2. 在目标精确版本的可丢弃 x86 CHR 上运行 `chr-envlists-smoke.rsc`；只接受命令元数据、复数 `envlists` 精确回读、零残留和最终 PASS 同时成立的证据。
+3. 复制 `site-config.example.rsc` 为唯一的 `site-config.rsc`，编辑审核后运行 `seal-site-config.sh`；该清单及其 `.sha512` 独立于发布包 checksum。
+4. 在任何上传前保存脱敏 export 和 AES 加密 RouterOS binary backup，下载并验证两个副本；逐项确认所有顶层上传目标零碰撞后，才把完整目录、`site-config.rsc` 和 `.sha512` 上传到清单指定的存储根，并通过固定 loader 运行严格只读的 `foxos-doctor.rsc`。
+5. 运行 `foxos-plan.rsc`；loader 验证封存清单，plan 再自动执行只读 preflight 和逐资源 `CREATE/REUSE/FAIL` inspector。
+6. 把计划输出的 SHA-512 原样设置为确认值，再运行唯一正式安装入口 `foxos-full-install.rsc`；执行器会在首次写入前重跑全部检查并拒绝过期计划。
+7. 等三个容器均为 `status=stopped`，运行可重入的 `foxos-start-all.rsc`；失败时只停止本次启动的前序容器，开机自启仍保持关闭。
+8. 从站点存储导入生成的 `foxos-local-ca.pem`，核对指纹并设为 trusted；`foxos-verify.rsc` 只有在 live、ready、页面、站点和只读 API 全通过后才启用 FoxOS 所有的顺序启动 scheduler。三个容器的 `start-on-boot` 始终保持 `no`，冷启动由 scheduler 按 Mihomo、MosDNS、FoxOS 顺序协调。
+9. 只有客户端原本使用 RouterOS DNS 时，才可单独运行只读 DNS plan、精确确认和 apply，为 public hostname 添加一条 FoxOS 所有的 A 记录。
 
 安装器幂等复用匹配所有权的资源，遇到同名用户资源会失败关闭。服务容器名称是 `foxos-mihomo`、`foxos-mosdns`；首次 FoxOS 管理槽为 `foxos-initial`，后续升级槽为构建时绑定的 `foxos-<release-id>`。活动所有权始终由唯一 `foxos:active` comment 表示，不能从容器名称推断。
 
@@ -207,7 +208,7 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 
 ## 备份、恢复与升级
 
-FoxOS 备份包含 SQLite 和已配置的 Mihomo 配置，记录 SHA-256 清单，默认保留最近 20 份。恢复必须先获取预览与一次性确认令牌；恢复后校验 SQLite 与 Mihomo，失败时补偿，并保留任务和审计结果。
+FoxOS 备份包含 SQLite 和已配置的 Mihomo 配置，记录 SHA-256 清单，默认保留最近 20 份。恢复必须先获取预览与一次性确认令牌；恢复后校验 SQLite 与 Mihomo，失败时补偿，并保留任务和审计结果。Mihomo v2 apply journal 不只认证配置身份，还用独立领域 HMAC 覆盖操作身份、目标 digest、期望快照 label、备份路径、阶段和时间等完整恢复 envelope；重启只有在 envelope、SQLite 快照和当前运行配置全部一致时才清理 journal。
 
 RouterOS 升级使用 release ID 绑定的版本化 pending/active/rollback 槽位。promote 前由旧版本创建 SQLite 兼容回滚点；pending 在保留 pending 所有权时启动，只有自动通过 running、live、ready、页面和带认证只读 API 后才切换所有权。每次写入 promoted 前（包括 switched 重试）都会再次执行同等联合验收并回读槽位身份。pending 启动或首次验收失败会请求恢复旧容器；所有权已切换后若最终验收失败或 promoted 响应仍不确定，则保留新 active 和 stopped rollback，禁止自动 abort 或回滚，重新运行版本化 promote plan 收敛。旧二进制启动前按升级检查点恢复兼容数据库。实体流量验收和回滚演练后，必须通过摘要确认的 cleanup 把旧 rollback 归档为 retained，才能开始下一次升级；确认式卸载默认保留所有数据、镜像、配置、root-dir、备份和本地 CA。恢复与升级细节见 [备份恢复](docs/backup-restore.md) 和 [发布文档](docs/release-and-routeros.md)。
 

@@ -134,7 +134,7 @@ DHCP 范围首尾计入容量；扩容请求提交目标容量和完整拟议范
 | POST | `/api/v1/mihomo/snapshots/{id}/restore/plan` | 生成恢复计划 |
 | POST | `/api/v1/mihomo/snapshots/{id}/restore` | 提交恢复任务 |
 
-preview 以可信 base YAML 为基线，结构化合并 FoxOS 管理字段并保留 Controller、secret、bind、UI、TUN、DNS 和日志；首次 mixed port 默认 7890。配置 digest 使用确认密钥保护的领域化 HMAC-SHA256，与草稿共同绑定确认令牌，不暴露密码或 UUID 的裸摘要。apply 再次生成并比较 digest，调用真实 Mihomo 二进制校验，持久化操作 journal 后原子替换、热重载、健康检查，再保存 SQLite 快照并按 ID、HMAC digest 和完整 body 回读。只有回读一致才清 journal；保存结果未知时失败关闭并由下次启动对账，不会立即覆盖运行态。明确未提交时才恢复旧文件，且旧文件原子恢复、reload、health 和 digest 回读全部成功后才报告 `ROLLED_BACK`。
+preview 以可信 base YAML 为基线，结构化合并 FoxOS 管理字段并保留 Controller、secret、bind、UI、TUN、DNS 和日志；首次 mixed port 默认 7890。配置 digest 使用确认密钥保护的领域化 HMAC-SHA256，与草稿共同绑定确认令牌，不暴露密码或 UUID 的裸摘要。apply 再次生成并比较 digest，调用真实 Mihomo 二进制校验，再持久化 v2 操作 journal。v2 使用派生专用密钥分别认证 target/previous 配置身份和完整 canonical 恢复 envelope；envelope 覆盖操作身份/类型、目标 digest、期望 snapshot label、快照要求、备份路径、阶段、错误和创建时间。随后才原子替换、热重载、健康检查，并保存 SQLite 快照；正常请求按 ID、label、HMAC digest 和完整 body 回读，重启恢复还会认证 envelope 并把 label、digest、body 与当前运行配置一起精确对账。只有全部一致才清 journal；保存结果未知或任一恢复字段不匹配时失败关闭，不会立即覆盖运行态。明确未提交时才恢复旧文件，且旧文件原子恢复、reload、health 和 digest 回读全部成功后才报告 `ROLLED_BACK`。
 
 草稿规则会与 SQLite 中的节点、代理组和设备策略一起生成。保存节点或组本身不会改变运行配置，必须单独 preview/apply。
 

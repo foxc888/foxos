@@ -9,7 +9,7 @@ FoxOS 只从进程环境读取凭据、站点和依赖端点。真实 Token、�
 | `FOXOS_API_TOKEN` | 至少 32 字符，无首尾空白 |
 | `FOXOS_CONFIRMATION_KEY` | 至少 32 字符，无首尾空白，必须与 API Token 不同 |
 
-API Token 用于非浏览器 Bearer 认证，并由 Web UI 在同源登录时一次性换取浏览器会话；确认密钥用于签署高风险计划，并通过带领域前缀的 HMAC-SHA256 保护对外可见的 Mihomo 配置/快照 digest，避免节点密码或 UUID 被裸摘要用于离线猜测。任一缺失或不合格时服务拒绝启动。不要在 Mihomo 任务运行中轮换确认密钥；轮换会使旧确认令牌、运行中任务 digest 和旧发布快照无法验证，必须在维护窗口重新预览并发布配置生成新快照。
+API Token 用于非浏览器 Bearer 认证，并由 Web UI 在同源登录时一次性换取浏览器会话；确认密钥用于签署高风险计划，并通过带领域前缀的 HMAC-SHA256 保护对外可见的 Mihomo 配置/快照 digest，避免节点密码或 UUID 被裸摘要用于离线猜测。服务还从确认密钥派生独立的 Mihomo apply 完整性密钥：配置内容 HMAC 与 journal envelope HMAC 使用不同领域，后者覆盖所有恢复决策字段，包括操作身份、目标 digest、期望 snapshot label、备份路径、阶段和创建时间。任一必填密钥缺失或不合格时服务拒绝启动。不要在 Mihomo 任务运行中或 pending journal 存在时轮换确认密钥；轮换会使旧确认令牌、运行中任务 digest、旧发布快照和未完成恢复 envelope 无法验证，必须先完成/回滚 pending 操作，再在维护窗口重新预览并发布配置生成新快照。
 
 `FOXOS_ENV` 只接受 `development` 或 `production`。未设置时仅允许 HTTP 绑定 loopback；正式包固定为 `production`，并强制启用 HTTPS、使用持久绝对 backup/TLS 路径和非临时 SQLite 文件；不满足时启动失败。
 

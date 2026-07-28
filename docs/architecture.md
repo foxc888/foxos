@@ -54,7 +54,7 @@ FoxOS 不自动创建影响全网的 anchor、默认路由、NAT、DNS 或 FastT
 
 ## 持久任务
 
-Mihomo apply/restore、出口策略、订阅更新、备份创建/恢复使用 SQLite 任务。任务以幂等键去重，进度和终态可查询。进程启动时先扫描每个 kind 的全部 `QUEUED/RUNNING/VERIFYING`，完成专用恢复后才整体启动 worker；坏任务 JSON、恢复状态写失败或缺少能力都会阻止监听。Mihomo 另用本地 journal 关闭“运行配置已生效但 SQLite 快照未确认”的窗口：精确快照回读成功只收尾，提交未知保留 journal 并失败关闭，确认未提交才验证性回滚。其他任务同样读取持久阶段和外部/数据库状态，已完成则收敛为成功，确认仍是精确前态才重排，部分状态要求人工对账。公开错误消息固定脱敏，详细分类进入 `errorClass`。
+Mihomo apply/restore、出口策略、订阅更新、备份创建/恢复使用 SQLite 任务。任务以幂等键去重，进度和终态可查询。进程启动时先扫描每个 kind 的全部 `QUEUED/RUNNING/VERIFYING`，完成专用恢复后才整体启动 worker；坏任务 JSON、恢复状态写失败或缺少能力都会阻止监听。Mihomo 另用本地 v2 journal 关闭“运行配置已生效但 SQLite 快照未确认”的窗口：派生专用密钥用不同领域分别 HMAC 配置内容和完整 canonical 恢复 envelope，后者覆盖 version、operation、target digest、期望 snapshot label、backup、phase、error 与时间等全部决策字段。重启先认证 envelope，再同时对账 SQLite 快照 label/digest/body 和当前运行配置；精确提交只收尾，提交未知保留 journal 并失败关闭，确认未提交才验证性回滚。其他任务同样读取持久阶段和外部/数据库状态，已完成则收敛为成功，确认仍是精确前态才重排，部分状态要求人工对账。公开错误消息固定脱敏，详细分类进入 `errorClass`。
 
 ## 数据与密钥边界
 

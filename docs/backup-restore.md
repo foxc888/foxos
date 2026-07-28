@@ -48,10 +48,10 @@ FoxOS 管理备份覆盖 SQLite 数据和可选 Mihomo 配置。RouterOS binary 
 运行安装或升级脚本前至少保存：
 
 ```routeros
-/export hide-sensitive file=before-foxos
-/system/backup/save name=before-foxos password="<unique-offline-password>" encryption=aes-sha256
+/export hide-sensitive file=before-foxos-YYYYMMDD-HHMM
+/system/backup/save name=before-foxos-YYYYMMDD-HHMM password="<unique-offline-password>" encryption=aes-sha256
 ```
 
-把占位符替换为唯一离线密码；RouterOS 官方语义中未提供密码的 v7 binary backup 不会加密。确认 `.rsc` 与 `.backup` 都存在，下载到离线位置并验证可读性。binary restore 会重启并覆盖设备配置，只能在同版本 RouterOS、同一设备的维护窗口再次确认后执行。
+把时间戳与密码占位符替换为本次维护窗口的唯一值；RouterOS 官方语义中未提供密码的 v7 binary backup 不会加密。确认 `.rsc` 与 `.backup` 都存在，下载到离线位置并验证可读性。首次安装时这两步必须发生在任何 FoxOS 文件上传之前；binary restore 会重启并覆盖设备配置，只能在同版本 RouterOS、同一设备的维护窗口再次确认后执行。
 
 同时保留旧 FoxOS 镜像/root-dir、站点存储中的 `foxos-data`、本地 CA 和最近可用 FoxOS 备份。升级 promote 前旧版本会先排空写入再创建 SQLite schema 兼容检查点；旧二进制回滚启动时在打开数据库前校验并按需恢复。旧槽的 ready 只证明依赖可用，必须再取得同一 operation 的 `aborted` 或 `restored` 响应，才能确认升级写冻结已解除。不要归档 rollback 槽位或处理检查点，直到新版本完成 live/ready、页面、只读依赖、一台测试设备验收和回滚演练。

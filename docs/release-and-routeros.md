@@ -25,7 +25,7 @@ foxos-full-amd64-<commit>.tar.gz
 foxos-full-amd64-<commit>.tar.gz.sha256
 ```
 
-`Release artifacts` 只在手动触发或 `v*` tag 运行，GitHub Release 中的全量包改用清理后的 ref/tag 作为 `<release-id>`：
+`Release artifacts` 只在受保护的正式版本 tag 运行；候选包统一由 Core CI 的分支 push 生成，不再维护第二个手动构建入口。只有 `vMAJOR.MINOR.PATCH` 或 `vMAJOR.MINOR.PATCH-rc.NUMBER` 的 tag push 才允许发布。GitHub Release 中的全量包使用 tag 作为 `<release-id>`：
 
 ```text
 foxos-full-amd64-<release-id>.tar.gz
@@ -34,7 +34,20 @@ foxos-full-amd64-<release-id>.tar.gz.sha256
 
 不要把 `<commit>` 与 `<release-id>` 混用。arm64 当前只有 FoxOS 单容器资产；包含 Mihomo/MosDNS 的完整包只支持 amd64。
 
+正式发布采用首次写入、不可覆盖规则：
+
+- tag 必须受仓库 ruleset 保护，且解引用后的 SHA 必须同时等于 `agent/foxos-core` 当前远端 tip 和 workflow 的 `GITHUB_SHA`。正式 tag 前还必须先让该提交的 `.github/workflows/**` 与 GitHub 仓库元数据实时返回的默认分支（当前为 `main`）完全一致；门禁校验默认分支名是有效 Git ref，fetch 该分支并比较 workflow tree，期间名称或 tip 移动都失败关闭。这是 draft 上传后用短期 `GITHUB_TOKEN` 执行 Update Release 的权限前提：tag 相对默认分支仍含 workflow 变化时，GitHub 要求该 token 无法获得的 `Workflows: write`。先通过审核把 workflow 原样落到当时的默认分支，再创建 tag；不要用长期写 PAT 绕过。tag 创建后禁止移动或复用；失败重发必须使用新版本号。门禁通过 API 回读固定名称 `FoxOS immutable release tags`，要求 `target=tag`、`enforcement=active`、唯一 include `refs/tags/v*`、无 exclude，并同时含 `creation`/`update`/`deletion`/`non_fast_forward` 四类限制。ruleset 只允许 GitHub User `foxc888` (ID `137797974`) 作为唯一 `always` bypass actor 创建新 tag，拒绝泛化的 RepositoryRole；仓库级 immutable releases 也必须开启并由门禁回读 `enabled=true`，禁止发布后替换资产。
+- 同一 SHA 的 `FoxOS Core CI` 与 `FoxOS CodeQL` push run 必须已经成功；发布分支不能存在 open High/Critical code-scanning alert。CodeQL workflow 自身成功但 `Code scanning results` 有高危告警时，发布仍会失败。
+- 同名 draft 或已发布 GitHub Release 都必须不存在。workflow 以 ref 为粒度串行且不取消运行，在构建前和本地资产校验后、创建 draft 前各执行一次远端分支、tag、checks、alerts 与 Release absence 联合检查，期间任一对象移动都失败关闭。
+- 仓库自有 publisher 只使用 GitHub create API 新建本次 draft，不查找或更新既有 Release；逐个上传后按精确名称、大小和服务端 SHA-256 digest 回读完整 allowlist，再 finalize 并有界重试复查公开 Release。它还会不带认证从 `browser_download_url` 重新下载 RouterOS 全量包与外层 checksum，按 size、SHA-256 和 checksum 再验一次。失败清理只允许删除本次 ID、仍为 draft 且 tag/SHA 完全匹配的对象；finalize 后的终态异常会输出 Release ID 并要求隔离处置，不自动删除或覆盖。
+- `-rc.N` 显式发布为 prerelease 且 `make_latest=false`；稳定 SemVer 显式 `prerelease=false` 并在发布后回读为 latest。RC 不会覆盖稳定版 latest。
+- 所有外部 GitHub Actions 固定到 40 位 commit SHA，所有非 scratch Docker 基础镜像固定到 registry digest；仓库静态门禁会拒绝仅使用可变 tag 的引用。版本注释保留给依赖更新工具和人工审查。
+- 仓库必须预先建立 `release` environment，配置且仅配置一个独立 User required reviewer；该 reviewer 必须有有效 ID 且不能是发布账号 `137797974`。开启 `Prevent self-review`，在 UI 中取消 `Allow administrators to bypass configured protection rules`，选择 `Selected branches and tags` 并且只保留 `type=tag`、名称 `v*` 的唯一 deployment pattern。门禁会回读 reviewer 身份、禁止自审和 deployment policy；GitHub 公开 REST API 当前不返回管理员 bypass UI 开关，该项必须在正式 tag 前人工复核。仅由 workflow 自动创建的无保护 environment 不满足发布门禁。
+- 新建 environment/ruleset/immutable-releases 的 API 回读需要仓库管理读权限。将一个仅限本仓库、只读 Actions/Contents/Environments/Code-scanning 并具有 Administration read 的 fine-grained token 保存为 `RELEASE_GOVERNANCE_TOKEN`；publisher 不使用该长期 token，仍只使用本次 workflow 的短期 `github.token`。
+
 该 workflow 为每个裸 Go 二进制和镜像 tar 分别生成 CycloneDX SBOM 与独立 `SHA256SUMS`，发布前重新校验全部摘要。全量 RouterOS bundle 仍使用自身包内 `SHA256SUMS` 和外层 `.sha256`；这些材料证明构建产物身份，不替代同一提交的 Core CI、CodeQL 或 RouterOS 验收。
+
+从使用 v1 Mihomo apply journal 的早期版本升级前，必须先让旧版本完成或回滚所有 pending Mihomo 操作并确认 journal 已清除。v2 从确认密钥派生独立完整性密钥：target/previous 配置内容各使用领域化 HMAC 身份，另一个领域化 HMAC 覆盖 canonical 恢复 envelope 中的 version、intent/operation 身份与类型、目标 digest、期望 snapshot label、是否要求快照、backup path、phase、last error 和创建时间。恢复先认证整个 envelope，再将 SQLite 快照的 label、digest、body 与当前运行配置精确对账；任一字段变化都失败关闭。遇到 v1 或未知版本也会明确拒绝，不会猜测迁移正在进行的配置操作。
 
 自动化级别只证明代码、镜像和资产契约：
 
@@ -67,10 +80,10 @@ foxos-full-amd64-<release-id>.tar.gz.sha256
 
 完整命令见 [QUICK-INSTALL](../deploy/routeros/QUICK-INSTALL.md)。不可跳过：
 
-1. RouterOS 7.21+、`architecture-name=x86`、同版本 container package、`container=yes` 与 `scheduler=yes`；两项 device-mode 更新都可能要求设备操作者按官方流程物理确认。
+1. RouterOS 7.21 是脚本语法下限，目标完整版本已通过同版本 CHR `envlists` add/get/delete 门禁；设备为 `architecture-name=x86`，使用同版本 container package、`container=yes` 与 `scheduler=yes`。两项 device-mode 更新都可能要求设备操作者按官方流程物理确认。
 2. 清单指定的管理桥、存储、RouterOS 地址和受限 REST 已存在。
-3. 工作站验证外层与包内 checksum，从模板生成并独立封存站点清单后上传。
-4. 保存脱敏 RouterOS export 与带唯一离线密码、`aes-sha256` 的 binary backup。
+3. 工作站验证外层与包内 checksum，从模板生成并独立封存站点清单，但尚不上传。
+4. 在任何上传前保存脱敏 RouterOS export 与带唯一离线密码、`aes-sha256` 的 binary backup，下载两个副本；确认所有顶层上传目标零碰撞后才上传，并通过固定 loader 运行只读 doctor。
 5. import 不可变 `load-site-config.rsc` 后运行 `foxos-plan.rsc`；loader 验证可编辑清单，plan 再自动执行 preflight 和共享 inspector，逐项输出 `CREATE/REUSE/FAIL` 并绑定 SHA-512 前态摘要。
 6. 操作者把该摘要原样设为确认值后才运行 `foxos-full-install.rsc`；执行器在第一次资源写入前重跑全部检查，前态变化即拒绝。
 7. 等异步镜像导入完成，再运行可重入 start 脚本；后序启动失败会停止本次已启动的前序容器，`running` 仍不是 ready，autostart 保持关闭。
@@ -84,7 +97,7 @@ FoxOS 完整 env allowlist 基线是 27 键：安装 marker、`FOXOS_ENV=product
 
 MikroTik 当前 Container 官方页面在 2026-07-28 回读时仍把容器环境列表属性记录为单数 `envlist`，页面示例也使用单数；但是官方 `container-7.21.npk`、`container-7.21.3.npk`、`container-7.21.5.npk` 的 console/WebFig 命令元数据均暴露复数 `envlists`。三份审计输入的 SHA-256 分别为 `f51c93fe9331f2460171cbdc359339704ef1f763cb295190155dab4353961d16`、`c427ffd3a5a757116b4b5ed8ec6a5533f3a6eaa8afa6ad5adc2f22a124901f66`、`823c2386f6bd4657f7eae1b50f1f0ce167b9a945e0f95953e1182a9d73340e9b`。FoxOS 以目标版本包内的命令元数据为静态实现依据，但这仍不等于真实 RouterOS 已验收。
 
-因此 CHR 发布门禁仍必须在目标 7.21.x 上保存 `/console/inspect request=completion input="/container/add "` 的原始输出，并在隔离、可丢弃的测试配置中完成最小 `/container/add` 与 `/container get` 回读，确认实际接受 `envlists`。该门禁未通过前，不能把 RouterOS 首装、升级、回滚或卸载标记为已验收，也不能在实体设备上尝试其他拼写。
+因此 CHR 发布门禁仍必须在目标完整版本上保存 `/console/inspect request=completion input="/container/add "` 的原始输出，并在隔离、可丢弃的测试配置中完成最小 `/container/add`、`/container get` 和删除回读，确认实际接受 `envlists`。现有静态元数据证据只覆盖若干 7.21.x package，不代表这些版本已完成 CHR 验收，也不能外推到后续 minor；该门禁未通过前，不能把 RouterOS 首装、升级、回滚或卸载标记为已验收。
 
 ## HTTPS 与 CA
 
@@ -175,7 +188,7 @@ plan 只读绑定当前 release 的 active、唯一 rollback、对象 ID、root-
 /import file-name=disk1/uninstall-apply.rsc
 ```
 
-plan 只读核对所有 FoxOS container comment、env marker、mount、veth/bridge port、服务用户/组和可选 owned DNS 记录。apply 会重新生成同一摘要，只有前态和确认都一致时才停止并删除这些精确 RouterOS 资源。它默认保留站点存储中的 `foxos-data`、`foxos-backups`、Mihomo/MosDNS 配置、三张镜像、所有版本化 root-dir、站点清单、RouterOS backups 和本地 CA；后续永久清除必须另行审核路径，不能把存储根或未知文件交给递归删除。
+plan 只读核对所有 FoxOS container comment、env marker、mount、veth/bridge port、服务用户/组和可选 owned DNS 记录，并在 Mihomo pending apply journal 存在时失败关闭。apply 会重新生成同一摘要，只有前态和确认都一致时才停止这些资源；所有容器停止后还会再次确认 journal 不存在，才删除 scheduler、容器、env 和确认密钥。它默认保留站点存储中的 `foxos-data`、`foxos-backups`、Mihomo/MosDNS 配置、三张镜像、所有版本化 root-dir、站点清单、RouterOS backups 和本地 CA。保留状态仍绑定原 `FOXOS_CONFIRMATION_KEY`，因此卸载后直接按全新安装覆盖会被拒绝；复用状态必须恢复原密钥，全新安装则先验证备份并把旧数据/备份归档到非活动路径。后续永久清除必须另行审核路径，不能把存储根或未知文件交给递归删除。
 
 ## 故障排查
 

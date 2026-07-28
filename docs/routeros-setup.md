@@ -1,6 +1,6 @@
 # RouterOS REST 连接
 
-FoxOS 使用 RouterOS v7 REST API，不通过 SSH 拼接命令。目标地址来自 `site-config.rsc`，全量包要求 RouterOS 7.21+。
+FoxOS 使用 RouterOS v7 REST API，不通过 SSH 拼接命令。目标地址来自 `site-config.rsc`；全量包的脚本语法下限是 RouterOS 7.21，精确目标版本仍须通过同版本 CHR 兼容门禁。
 
 ## 专用账号
 
