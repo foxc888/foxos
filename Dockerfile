@@ -41,8 +41,9 @@ FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149a
 ARG MOSDNS_VERSION=v0.6.4
 ARG MOSDNS_REVISION=2ac30e867a7b40ee0ef70ef85b7dcf7ce56d48d0
 ARG MOSDNS_SOURCE_SHA256=a2f63da93ae917e7c5d319cb99cc88a68b437c8eb2e40447a61b935767e3e37c
-ARG MOSDNS_X_CRYPTO_VERSION=v0.52.0
-ARG MOSDNS_X_NET_VERSION=v0.55.0
+ARG MOSDNS_X_CRYPTO_VERSION=v0.53.0
+ARG MOSDNS_X_NET_VERSION=v0.56.0
+ARG MOSDNS_X_TEXT_VERSION=v0.39.0
 RUN apk add --no-cache ca-certificates tzdata \
     && mkdir -p /runtime/tmp \
     && chmod 1777 /runtime/tmp
@@ -54,10 +55,11 @@ RUN wget -q -O /tmp/mosdns.tar.gz "https://github.com/jasonxtt/mosdns/archive/${
 RUN GOTOOLCHAIN=local go get \
       "golang.org/x/crypto@${MOSDNS_X_CRYPTO_VERSION}" \
       "golang.org/x/net@${MOSDNS_X_NET_VERSION}" \
+      "golang.org/x/text@${MOSDNS_X_TEXT_VERSION}" \
     && GOTOOLCHAIN=local go mod tidy \
     && GOTOOLCHAIN=local go mod verify
 RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -mod=readonly -trimpath \
-    -ldflags="-s -w -buildid= -X main.version=${MOSDNS_VERSION}-foxos1" \
+    -ldflags="-s -w -buildid= -X main.version=${MOSDNS_VERSION}-foxos2" \
     -o /mosdns .
 
 FROM scratch AS mosdns-runtime
@@ -65,7 +67,7 @@ ARG MOSDNS_VERSION=v0.6.4
 ARG MOSDNS_REVISION=2ac30e867a7b40ee0ef70ef85b7dcf7ce56d48d0
 LABEL org.opencontainers.image.source="https://github.com/jasonxtt/mosdns" \
       org.opencontainers.image.title="mosdns" \
-      org.opencontainers.image.version="${MOSDNS_VERSION}-foxos1" \
+      org.opencontainers.image.version="${MOSDNS_VERSION}-foxos2" \
       org.opencontainers.image.revision="${MOSDNS_REVISION}" \
       io.foxos.component="mosdns"
 ENV MOSDNS_CONTAINER_MODE=1 \

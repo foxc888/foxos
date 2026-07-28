@@ -254,7 +254,7 @@ jobs:
             "foxos-mihomo-ci:${GITHUB_SHA}" -t -d /tmp/mihomo -f /config/config.yaml
           docker run --rm "foxos-mihomo-ci:${GITHUB_SHA}" -v | grep -F 'v1.19.29-foxos2'
 
-          docker run --rm --entrypoint /usr/bin/mosdns "foxos-mosdns-ci:${GITHUB_SHA}" version | grep -Fx 'v0.6.4-foxos1'
+          docker run --rm --entrypoint /usr/bin/mosdns "foxos-mosdns-ci:${GITHUB_SHA}" version | grep -Fx 'v0.6.4-foxos2'
           docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "foxos-mosdns-ci:${GITHUB_SHA}" | grep -Fx 'MOSDNS_AUTO_INIT=0'
           if docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "foxos-mosdns-ci:${GITHUB_SHA}" | grep -q '^MOSDNS_CONFIG_INIT_URL='; then
             printf 'MosDNS runtime still contains an external auto-initialization URL\n' >&2

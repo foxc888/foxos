@@ -17,7 +17,7 @@ runtime base: scratch (static binary, CA bundle, timezone data, and empty /tmp)
 
 MosDNS
 ------
-version: v0.6.4-foxos1
+version: v0.6.4-foxos2
 source: https://github.com/jasonxtt/mosdns/tree/2ac30e867a7b40ee0ef70ef85b7dcf7ce56d48d0
 source archive sha256: a2f63da93ae917e7c5d319cb99cc88a68b437c8eb2e40447a61b935767e3e37c
 builder: Go 1.26.5
