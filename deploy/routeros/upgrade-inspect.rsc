@@ -9,13 +9,16 @@
 :global FoxOSSiteLoadedDigest
 :global FoxOSSiteLoadedConfigPath
 :global FoxOSSiteLoaderVersion
+:global FoxOSContainerCompatVersion
+:global FoxOSContainerState
+:global FoxOSContainerRoot
 :global FoxOSUpgradeInspectVerbose
 :global FoxOSUpgradeCurrentDigest
 :global FoxOSUpgradeActiveID
 :global FoxOSUpgradeImageID
 :local releaseID "__FOXOS_RELEASE_ID__"
-:if ($releaseID ~ "^__.*__$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || $releaseID !~ "^[A-Za-z0-9._-]+$") do={ :error "upgrade-inspect.rsc 未绑定有效 release ID" }
-:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
+:if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "upgrade-inspect.rsc 未绑定有效 release ID" }
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || $FoxOSContainerCompatVersion != 1 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
   :error "必须先使用根目录不可变 loader 验证 manifest v2"
 }
 
@@ -28,7 +31,11 @@
 :set FoxOSUpgradeActiveID ""
 :set FoxOSUpgradeImageID ""
 
-:if ([/system/resource get architecture-name] != "x86") do={ :error "此升级包只支持 RouterOS architecture-name=x86" }
+:local architecture [/system/resource get architecture-name]
+:local imageArchitecture ""
+:if ($architecture = "x86" || $architecture = "x86_64") do={ :set imageArchitecture "amd64" }
+:if ($imageArchitecture != "amd64") do={ :error ("此升级包只支持 RouterOS x86 或 x86_64，当前为 " . $architecture) }
+:if ($architecture = "x86_64") do={ :put "WARNING architecture-name=x86_64 是非标准 RouterOS 环境；升级兼容仍需目标机验收" }
 :local routerVersion [/system/resource get version]
 :local routerVersionBase $routerVersion
 :local routerVersionSpace [:find $routerVersionBase " "]
@@ -54,7 +61,7 @@
 :if ([:len $imageFile] != 1 || [/file get $imageFile size] < 1048576) do={ :error ("版本化 FoxOS 镜像缺失、不唯一或过小: " . $imagePath) }
 
 :local activeName [/container get $active name]
-:if ($activeName !~ "^foxos-[A-Za-z0-9._-]+$" || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [/container get $active mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [/container get $active root-dir] != ($storageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != true && [/container get $active logging] != "yes") || [/container get $active status] != "running") do={
+:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [/container get $active mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $active] != ($storageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no") || [$FoxOSContainerState $active] != "running") do={
   :error "active 容器完整身份契约不匹配或未运行"
 }
 :local installMarkers [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER"]
@@ -80,7 +87,7 @@
   :error "冷启动 scheduler 的名称、owner、事件、时序、policy 或启用状态不匹配"
 }
 
-:local material ("foxos-upgrade-create-v2|release=" . $releaseID . "|site=" . $FoxOSSiteLoadedDigest . "|active=" . [/container get $active .id] . ":" . $activeName . ":" . [/container get $active root-dir] . ":" . [/container get $active status] . ":" . [/container get $active start-on-boot] . "|image=" . [/file get $imageFile .id] . ":" . $imagePath . ":" . [/file get $imageFile size] . "|pending=" . $pendingName . ":" . $pendingRoot . "|marker=" . [/container/envs get $installMarkers .id] . ":" . [/container/envs get $installMarkers value] . "|veth=" . [/interface/veth get $foxosVeth .id] . ":" . [/interface/veth get $foxosVeth address] . ":" . [/interface/veth get $foxosVeth gateway] . "|start-script=" . [/system/script get $startScriptByName .id] . ":" . [/system/script get $startScriptByName comment] . ":" . [/system/script get $startScriptByName source] . ":" . [/system/script get $startScriptByName policy] . "|start-scheduler=" . [/system/scheduler get $startSchedulerByName .id] . ":" . [/system/scheduler get $startSchedulerByName comment] . ":" . [/system/scheduler get $startSchedulerByName on-event] . ":" . [/system/scheduler get $startSchedulerByName start-time] . ":" . [/system/scheduler get $startSchedulerByName interval] . ":" . [/system/scheduler get $startSchedulerByName policy] . ":" . $startSchedulerDisabled)
+:local material ("foxos-upgrade-create-v2|release=" . $releaseID . "|site=" . $FoxOSSiteLoadedDigest . "|active=" . [:pick $active 0] . ":" . $activeName . ":" . [$FoxOSContainerRoot $active] . ":" . [$FoxOSContainerState $active] . ":" . [/container get $active start-on-boot] . "|image=" . [/file get $imageFile .id] . ":" . $imagePath . ":" . [/file get $imageFile size] . "|pending=" . $pendingName . ":" . $pendingRoot . "|marker=" . [/container/envs get $installMarkers .id] . ":" . [/container/envs get $installMarkers value] . "|veth=" . [/interface/veth get $foxosVeth .id] . ":" . [/interface/veth get $foxosVeth address] . ":" . [/interface/veth get $foxosVeth gateway] . "|start-script=" . [/system/script get $startScriptByName .id] . ":" . [/system/script get $startScriptByName comment] . ":" . [/system/script get $startScriptByName source] . ":" . [/system/script get $startScriptByName policy] . "|start-scheduler=" . [/system/scheduler get $startSchedulerByName .id] . ":" . [/system/scheduler get $startSchedulerByName comment] . ":" . [/system/scheduler get $startSchedulerByName on-event] . ":" . [/system/scheduler get $startSchedulerByName start-time] . ":" . [/system/scheduler get $startSchedulerByName interval] . ":" . [/system/scheduler get $startSchedulerByName policy] . ":" . $startSchedulerDisabled)
 :local upgradeMountDefinitions {"foxos-mihomo-config|mihomo-config|/data/mihomo";"foxos-data|foxos-data|/data";"foxos-backups|foxos-backups|/backups"}
 :local verifiedMounts 0
 :foreach definition in=$upgradeMountDefinitions do={
@@ -103,7 +110,7 @@
 :set FoxOSUpgradeImageID $imageFile
 :set FoxOSUpgradeCurrentDigest $digest
 :if ($FoxOSUpgradeInspectVerbose) do={
-  :put ("KEEP active=" . $activeName . " id=" . [/container get $active .id] . " status=running root-dir=" . [/container get $active root-dir])
+  :put ("KEEP active=" . $activeName . " id=" . [:pick $active 0] . " status=running root-dir=" . [$FoxOSContainerRoot $active])
   :put ("CREATE pending=" . $pendingName . " root-dir=" . $pendingRoot . " from=" . $imagePath)
   :put "PRESERVE site manifest, Mihomo/MosDNS config, data, backups, existing image files, containers, and root-dirs."
 }

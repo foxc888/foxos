@@ -10,7 +10,7 @@
 :global FoxOSUpgradePromoteConfirmation
 :global FoxOSUpgradePromoteState
 :local releaseID "__FOXOS_RELEASE_ID__"
-:if ($releaseID ~ "^__.*__$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || $releaseID !~ "^[A-Za-z0-9._-]+$") do={ :error "upgrade-promote-plan.rsc 未绑定有效 release ID" }
+:if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "upgrade-promote-plan.rsc 未绑定有效 release ID" }
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入根目录不可变 load-site-config.rsc" }
 :local payloadRoot ($FoxOSSiteStorageRoot . "/foxos-upgrade-" . $releaseID)
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")

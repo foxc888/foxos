@@ -9,6 +9,9 @@
 :global FoxOSSiteLoadedDigest
 :global FoxOSSiteLoadedConfigPath
 :global FoxOSSiteLoaderVersion
+:global FoxOSContainerCompatVersion
+:global FoxOSContainerState
+:global FoxOSContainerRoot
 :global FoxOSUpgradePromoteInspectVerbose
 :global FoxOSUpgradePromoteCurrentDigest
 :global FoxOSUpgradePromoteState
@@ -16,8 +19,8 @@
 :global FoxOSUpgradePromotePendingID
 :global FoxOSUpgradePromoteRollbackID
 :local releaseID "__FOXOS_RELEASE_ID__"
-:if ($releaseID ~ "^__.*__$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || $releaseID !~ "^[A-Za-z0-9._-]+$") do={ :error "upgrade-promote-inspect.rsc 未绑定有效 release ID" }
-:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
+:if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "upgrade-promote-inspect.rsc 未绑定有效 release ID" }
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || $FoxOSContainerCompatVersion != 1 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
   :error "必须先使用本升级包的不可变 loader 验证根目录 manifest v2"
 }
 
@@ -41,7 +44,7 @@
   :set oldSlot $activeOwner
   :set newSlot $pendingOwner
 }
-:if ([:len $activeOwner] = 1 && [:len $pendingOwner] = 0 && [:len $rollbackOwner] = 1 && [/container get $activeOwner name] = $pendingName && [/container get $activeOwner root-dir] = $pendingRoot) do={
+:if ([:len $activeOwner] = 1 && [:len $pendingOwner] = 0 && [:len $rollbackOwner] = 1 && [/container get $activeOwner name] = $pendingName && [$FoxOSContainerRoot $activeOwner] = $pendingRoot) do={
   :set state "switched"
   :set oldSlot $rollbackOwner
   :set newSlot $activeOwner
@@ -49,14 +52,14 @@
 :if ($state = "") do={ :error "需要唯一 active+pending，或已切换的唯一 active+rollback 状态" }
 :if ($oldSlot = $newSlot) do={ :error "旧槽位与新槽位 ID 冲突" }
 :local oldName [/container get $oldSlot name]
-:if ($oldName !~ "^foxos-[A-Za-z0-9._-]+$" || [/container get $oldSlot root-dir] != ($FoxOSSiteStorageRoot . "/containers/" . $oldName) || [/container get $oldSlot interface] != "veth-foxos" || [/container get $oldSlot envlists] != "foxos-env" || [/container get $oldSlot mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $oldSlot start-on-boot] != false && [/container get $oldSlot start-on-boot] != "no") || ([/container get $oldSlot logging] != true && [/container get $oldSlot logging] != "yes")) do={
+:if (!($oldName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $oldSlot] != ($FoxOSSiteStorageRoot . "/containers/" . $oldName) || [/container get $oldSlot interface] != "veth-foxos" || [/container get $oldSlot envlists] != "foxos-env" || [/container get $oldSlot mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $oldSlot start-on-boot] != false && [/container get $oldSlot start-on-boot] != "no") || ([/container get $oldSlot logging] != false && [/container get $oldSlot logging] != "no")) do={
   :error "旧槽位完整身份契约不匹配"
 }
-:if ([/container get $newSlot name] != $pendingName || [/container get $newSlot root-dir] != $pendingRoot || [/container get $newSlot interface] != "veth-foxos" || [/container get $newSlot envlists] != "foxos-env" || [/container get $newSlot mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $newSlot start-on-boot] != false && [/container get $newSlot start-on-boot] != "no") || ([/container get $newSlot logging] != true && [/container get $newSlot logging] != "yes")) do={
+:if ([/container get $newSlot name] != $pendingName || [$FoxOSContainerRoot $newSlot] != $pendingRoot || [/container get $newSlot interface] != "veth-foxos" || [/container get $newSlot envlists] != "foxos-env" || [/container get $newSlot mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $newSlot start-on-boot] != false && [/container get $newSlot start-on-boot] != "no") || ([/container get $newSlot logging] != false && [/container get $newSlot logging] != "no")) do={
   :error "新槽位与当前升级包 release ID 或完整身份契约不匹配"
 }
-:if ($state = "pending" && ([/container get $oldSlot status] != "running" || [/container get $newSlot status] != "stopped")) do={ :error "promote 前必须是旧 active running、新 pending stopped" }
-:if ($state = "switched" && ([/container get $oldSlot status] != "stopped" || [/container get $newSlot status] != "running")) do={ :error "audit resume 必须是旧 rollback stopped、新 active running" }
+:if ($state = "pending" && ([$FoxOSContainerState $oldSlot] != "running" || [$FoxOSContainerState $newSlot] != "stopped")) do={ :error "promote 前必须是旧 active running、新 pending stopped" }
+:if ($state = "switched" && ([$FoxOSContainerState $oldSlot] != "stopped" || [$FoxOSContainerState $newSlot] != "running")) do={ :error "audit resume 必须是旧 rollback stopped、新 active running" }
 
 :local tokenID [/container/envs find where list="foxos-env" key="FOXOS_API_TOKEN"]
 :if ([:len $tokenID] != 1) do={ :error "FOXOS_API_TOKEN 缺失或不唯一" }
@@ -82,7 +85,7 @@
   :error "冷启动 scheduler 的名称、owner、事件、时序、policy 或启用状态不匹配"
 }
 
-:local material ("foxos-upgrade-promote-v2|release=" . $releaseID . "|site=" . $FoxOSSiteLoadedDigest . "|state=" . $state . "|old=" . [/container get $oldSlot .id] . ":" . $oldName . ":" . [/container get $oldSlot root-dir] . ":" . [/container get $oldSlot status] . ":" . [/container get $oldSlot comment] . "|new=" . [/container get $newSlot .id] . ":" . [/container get $newSlot name] . ":" . [/container get $newSlot root-dir] . ":" . [/container get $newSlot status] . ":" . [/container get $newSlot comment] . "|token=" . [/container/envs get $tokenID .id] . ":" . $tokenDigest . "|marker=" . [/container/envs get $installMarkers .id] . ":" . [/container/envs get $installMarkers value] . "|veth=" . [/interface/veth get $foxosVeth .id] . ":" . [/interface/veth get $foxosVeth address] . ":" . [/interface/veth get $foxosVeth gateway] . "|start-script=" . [/system/script get $startScriptByName .id] . ":" . [/system/script get $startScriptByName comment] . ":" . [/system/script get $startScriptByName source] . ":" . [/system/script get $startScriptByName policy] . "|start-scheduler=" . [/system/scheduler get $startSchedulerByName .id] . ":" . [/system/scheduler get $startSchedulerByName comment] . ":" . [/system/scheduler get $startSchedulerByName on-event] . ":" . [/system/scheduler get $startSchedulerByName start-time] . ":" . [/system/scheduler get $startSchedulerByName interval] . ":" . [/system/scheduler get $startSchedulerByName policy] . ":" . $startSchedulerDisabled)
+:local material ("foxos-upgrade-promote-v2|release=" . $releaseID . "|site=" . $FoxOSSiteLoadedDigest . "|state=" . $state . "|old=" . [:pick $oldSlot 0] . ":" . $oldName . ":" . [$FoxOSContainerRoot $oldSlot] . ":" . [$FoxOSContainerState $oldSlot] . ":" . [/container get $oldSlot comment] . "|new=" . [:pick $newSlot 0] . ":" . [/container get $newSlot name] . ":" . [$FoxOSContainerRoot $newSlot] . ":" . [$FoxOSContainerState $newSlot] . ":" . [/container get $newSlot comment] . "|token=" . [/container/envs get $tokenID .id] . ":" . $tokenDigest . "|marker=" . [/container/envs get $installMarkers .id] . ":" . [/container/envs get $installMarkers value] . "|veth=" . [/interface/veth get $foxosVeth .id] . ":" . [/interface/veth get $foxosVeth address] . ":" . [/interface/veth get $foxosVeth gateway] . "|start-script=" . [/system/script get $startScriptByName .id] . ":" . [/system/script get $startScriptByName comment] . ":" . [/system/script get $startScriptByName source] . ":" . [/system/script get $startScriptByName policy] . "|start-scheduler=" . [/system/scheduler get $startSchedulerByName .id] . ":" . [/system/scheduler get $startSchedulerByName comment] . ":" . [/system/scheduler get $startSchedulerByName on-event] . ":" . [/system/scheduler get $startSchedulerByName start-time] . ":" . [/system/scheduler get $startSchedulerByName interval] . ":" . [/system/scheduler get $startSchedulerByName policy] . ":" . $startSchedulerDisabled)
 :local sharedMountDefinitions {"foxos-mihomo-config|mihomo-config|/data/mihomo";"foxos-data|foxos-data|/data";"foxos-backups|foxos-backups|/backups"}
 :local verifiedSharedMounts 0
 :foreach definition in=$sharedMountDefinitions do={
@@ -107,6 +110,6 @@
 :set FoxOSUpgradePromoteRollbackID $rollbackOwner
 :set FoxOSUpgradePromoteCurrentDigest $digest
 :if ($FoxOSUpgradePromoteInspectVerbose) do={
-  :put ("STATE=" . $state . " old=" . $oldName . " id=" . [/container get $oldSlot .id] . " status=" . [/container get $oldSlot status])
-  :put ("NEW release=" . $releaseID . " container=" . $pendingName . " id=" . [/container get $newSlot .id] . " status=" . [/container get $newSlot status])
+  :put ("STATE=" . $state . " old=" . $oldName . " id=" . [:pick $oldSlot 0] . " status=" . [$FoxOSContainerState $oldSlot])
+  :put ("NEW release=" . $releaseID . " container=" . $pendingName . " id=" . [:pick $newSlot 0] . " status=" . [$FoxOSContainerState $newSlot])
 }

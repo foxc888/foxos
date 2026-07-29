@@ -1,8 +1,6 @@
 # FoxOS RouterOS full-bundle read-only preflight
 # 本脚本只读取配置、文件和网络状态；不会创建、修改或删除 RouterOS 资源。
-# RouterOS 的 x86_64 CPU 在 architecture-name 中返回 x86。
-
-:local requiredArchitecture "x86"
+# 官方 RouterOS amd64 通常返回 x86；部分非标准 x86 环境返回 x86_64。
 :global FoxOSSiteManifestVersion
 :global FoxOSSiteManagementBridge
 :global FoxOSSiteStorageRoot
@@ -20,8 +18,10 @@
 :if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1) do={ :error "先导入不可变的 load-site-config.rsc，禁止直接导入可编辑清单" }
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
+:local storageMode "disk"
+:if ($storageRoot = "foxos") do={ :set storageMode "internal" }
 :local releaseID "__FOXOS_RELEASE_ID__"
-:if ($releaseID ~ "^__.*__$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || $releaseID !~ "^[A-Za-z0-9._-]+$") do={ :error "preflight.rsc 未绑定有效 release ID；只能使用发布包内脚本" }
+:if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "preflight.rsc 未绑定有效 release ID；只能使用发布包内脚本" }
 :local upgradeDirectory ("foxos-upgrade-" . $releaseID)
 :local siteNetwork $FoxOSSiteNetwork
 :local prefixLength $FoxOSSitePrefixLength
@@ -57,12 +57,16 @@
 }
 
 :put "=== site manifest validation ==="
-:if ([:len $managementBridge] < 1 || [:len $managementBridge] > 63 || $managementBridge !~ "^[A-Za-z0-9][A-Za-z0-9._-]*$") do={
+:if ([:len $managementBridge] < 1 || [:len $managementBridge] > 63 || !($managementBridge ~ "^[A-Za-z0-9][A-Za-z0-9._-]*\$")) do={
   :put "ERROR management bridge name is invalid"
   :set failed true
 }
-:if ([:len $storageRoot] < 1 || [:len $storageRoot] > 63 || $storageRoot !~ "^[A-Za-z0-9][A-Za-z0-9._-]*$") do={
-  :put "ERROR storage slot name is invalid"
+:if ([:len $storageRoot] < 1 || [:len $storageRoot] > 63 || !($storageRoot ~ "^[A-Za-z0-9][A-Za-z0-9._-]*\$")) do={
+  :put "ERROR storage root name is invalid"
+  :set failed true
+}
+:if ($storageMode = "internal" && $storageRoot != "foxos") do={
+  :put "ERROR internal storage must use the reserved root foxos"
   :set failed true
 }
 :if ($prefixLength < 8 || $prefixLength > 30) do={
@@ -108,7 +112,8 @@
 }
 :local publicHostnameLength [:len $publicHostname]
 :local hostnameLabelsValid true
-:if ($publicHostnameLength < 3 || $publicHostnameLength > 253 || $publicHostname !~ "^[a-z0-9][a-z0-9.-]*[a-z0-9]$" || [:typeof [:find $publicHostname ".."]] != "nil" || [:typeof [:find $publicHostname ".-"]] != "nil" || [:typeof [:find $publicHostname "-."]] != "nil" || $publicHostname !~ "\\.home\\.arpa$") do={
+:local publicHostnameDoubleDot ("." . ".")
+:if ($publicHostnameLength < 3 || $publicHostnameLength > 253 || !($publicHostname ~ "^[a-z0-9][a-z0-9.-]*[a-z0-9]\$") || [:typeof [:find $publicHostname $publicHostnameDoubleDot]] != "nil" || [:typeof [:find $publicHostname ".-"]] != "nil" || [:typeof [:find $publicHostname "-."]] != "nil" || !($publicHostname ~ "\\.home\\.arpa\$")) do={
   :set hostnameLabelsValid false
 }
 :local hostnameLabelCursor 0
@@ -120,7 +125,7 @@
   :if ($hostnameLabelLength < 1 || $hostnameLabelLength > 63) do={
     :set hostnameLabelsValid false
   } else={
-    :if ($hostnameLabel !~ "^[a-z0-9-]+$" || [:pick $hostnameLabel 0 1] = "-" || [:pick $hostnameLabel ($hostnameLabelLength - 1) $hostnameLabelLength] = "-") do={
+    :if (!($hostnameLabel ~ "^[a-z0-9-]+\$") || [:pick $hostnameLabel 0 1] = "-" || [:pick $hostnameLabel ($hostnameLabelLength - 1) $hostnameLabelLength] = "-") do={
       :set hostnameLabelsValid false
     }
   }
@@ -175,15 +180,20 @@
 :put "=== FoxOS read-only preflight ==="
 :local version [/system/resource get version]
 :local architecture [/system/resource get architecture-name]
+:local imageArchitecture ""
+:if ($architecture = "x86" || $architecture = "x86_64") do={ :set imageArchitecture "amd64" }
 :local versionBase $version
 :local versionSpace [:find $versionBase " "]
 :if ([:typeof $versionSpace] != "nil") do={ :set versionBase [:pick $versionBase 0 $versionSpace] }
 :put ("RouterOS version: " . $version)
-:put ("architecture-name: " . $architecture . " (expected x86 for an x86_64 CPU)")
+:put ("architecture-name: " . $architecture . " normalized-image-architecture=" . $imageArchitecture)
 
-:if ($architecture != $requiredArchitecture) do={
-  :put ("ERROR architecture mismatch: expected x86, got " . $architecture)
+:if ($imageArchitecture != "amd64") do={
+  :put ("ERROR this bundle requires RouterOS x86 or x86_64 for Linux amd64 images, got " . $architecture)
   :set failed true
+}
+:if ($architecture = "x86_64") do={
+  :put "WARNING architecture-name=x86_64 is a non-standard RouterOS environment; compatibility is target-specific and still requires acceptance"
 }
 :local firstVersionDot [:find $versionBase "."]
 :if ([:typeof $firstVersionDot] = "nil") do={
@@ -238,17 +248,23 @@
   :set failed true
 }
 
-:local diskID [/disk find where slot=$storageRoot]
-:if ([:len $diskID] != 1) do={
-  :put ("ERROR mounted storage slot is missing or ambiguous: " . $storageRoot)
-  :set failed true
+:local storageFree 0
+:if ($storageMode = "internal") do={
+  :set storageFree [/system/resource get free-hdd-space]
+  :put ("storage mode=internal root=" . $storageRoot . " free bytes: " . $storageFree)
 } else={
-  :local diskFree [/disk get $diskID free]
-  :put ("storage " . $storageRoot . " free bytes: " . $diskFree)
-  :if ($diskFree < $minimumFreeBytes) do={
-	    :put ("ERROR " . $storageRoot . " free space is below 512 MiB after upload")
+  :local diskID [/disk find where slot=$storageRoot]
+  :if ([:len $diskID] != 1) do={
+    :put ("ERROR mounted storage slot is missing or ambiguous: " . $storageRoot)
     :set failed true
+  } else={
+    :set storageFree [/disk get $diskID free]
+    :put ("storage mode=disk slot=" . $storageRoot . " free bytes: " . $storageFree)
   }
+}
+:if ($storageFree < $minimumFreeBytes) do={
+  :put ("ERROR " . $storageRoot . " free space is below 512 MiB after upload")
+  :set failed true
 }
 
 :local routerIP [/ip/address find where address~($routerAddress . "/")]

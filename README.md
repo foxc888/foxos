@@ -17,7 +17,7 @@ FoxOS 是面向 RouterOS Container 的网络运维后台，用一个高密度中
 | MosDNS | `10.0.0.3:53` | DNS，只读 TCP 状态检查 |
 | FoxOS | `https://foxos.home.arpa` / `10.0.0.4:443` | Web、API、SQLite、任务、审计与备份 |
 
-FoxOS 内部 HTTP 仅监听容器 loopback `127.0.0.1:8090`。LAN 上的 TCP 80 只做 308 跳转，Bearer Token API 在启用 HTTPS 时拒绝普通 HTTP。首次启动生成持久本地 CA；客户端必须先核对指纹并导入信任。RouterOS x86_64 CPU 在 `/system/resource` 中报告的 `architecture-name` 是 `x86`；发布包使用 Linux `amd64` 镜像。
+FoxOS 内部 HTTP 仅监听容器 loopback `127.0.0.1:8090`。LAN 上的 TCP 80 只做 308 跳转，Bearer Token API 在启用 HTTPS 时拒绝普通 HTTP。首次启动生成持久本地 CA；客户端必须先核对指纹并导入信任。官方 RouterOS amd64 环境通常报告 `architecture-name=x86`；发布包也兼容非标准目标返回的 `x86_64`，两者都使用 Linux `amd64` 镜像，但后者仍需目标机验收。
 
 ## 能力状态
 
@@ -162,7 +162,7 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 
 三张 amd64 镜像都由同一次 CI 从固定来源构建并分别扫描，再把这些精确输入交给组包器；仓库不跟踪或隐式回退到预制 Mihomo/MosDNS tar。包内 provenance lock 记录上游版本、提交、源码归档 SHA-256、构建器和安全依赖提升。
 
-脚本语法下限是 RouterOS 7.21，目标完整版本还必须先通过同版本 CHR 的 `envlists` add/get/delete 兼容门禁；仓库当前没有可替代该门禁的 CHR 或实体版本验收记录。设备还需要同版本 x86 `container` package、`container=yes`、`scheduler=yes`、站点清单指定的现有管理桥和存储，上传完成后仍至少有 512 MiB 可用空间。启用 device-mode 的 container 或 scheduler 可能要求设备操作者按 MikroTik 官方流程进行物理确认；安装器只读检查，不会自行开启。安装器也不会创建管理桥、磁盘、RouterOS 管理地址或 REST 服务。
+脚本语法下限是 RouterOS 7.21，目标完整版本还必须先通过同版本 CHR 的 `envlists` add/get/delete 兼容门禁；仓库当前没有可替代该门禁的 CHR 或实体版本验收记录。设备还需要同版本 x86 `container` package、`container=yes`、`scheduler=yes`、站点清单指定的现有管理桥和存储，上传完成后仍至少有 512 MiB 可用空间。外置模式要求唯一 `/disk` 槽位；无 `/disk` 对象的 x86 系统盘可显式使用保留根 `foxos`，其他拼写仍按磁盘槽位失败关闭。启用 device-mode 的 container 或 scheduler 可能要求设备操作者按 MikroTik 官方流程进行物理确认；安装器只读检查，不会自行开启。安装器也不会创建管理桥、磁盘、RouterOS 管理地址或 REST 服务。
 
 安全顺序：
 
@@ -200,6 +200,7 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 - 出口执行器要求预置且回读验证 FoxOS anchor/路由表/网关；活动 FastTrack 会导致计划失败。Mihomo 两种设备出口目前无论 marker 是否存在都保持不可用。
 - 订阅仅允许 HTTPS 443 且禁止 URL 凭据；默认只允许公共目标。管理员可用 `FOXOS_SUBSCRIPTION_PRIVATE_CIDRS` 精确开放 RFC1918/ULA 网段，但 loopback、link-local、multicast、unspecified 和 metadata 类地址始终拒绝。每次连接和重定向都会重新解析，最多三次重定向、2 MiB、15 秒。
 - RouterOS/Mihomo/MosDNS 配置端点只允许私网或 loopback IP 字面量，并禁用重定向。
+- 持有 `foxos-env` 凭据的 FoxOS 管理容器固定 `logging=no`；RouterOS 会把启用容器日志时的启动环境写入系统日志。Mihomo 与 MosDNS 不继承 FoxOS 凭据，可保留运行日志。
 - CSP、HSTS、安全响应头和 API `no-store` 已启用；容器以 UID 10001 运行，仅二进制持有绑定 80/443 所需 capability。
 - FoxOS 对 MosDNS 保持只读；MosDNS 自身未认证的 9099 API 仅监听容器 loopback，未使用的第三方管理 UI 不进入发布包。L2TP 密码不会进入 API、日志或数据库输出。
 - 当前是单一管理 Token 模型：非浏览器使用 Bearer，Web 使用短期服务端会话；没有 JWT、多用户或 RBAC。不要把 443、RouterOS REST、Mihomo Controller/mixed port 暴露到 WAN。8090 仅应存在于 FoxOS loopback。

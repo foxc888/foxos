@@ -4,6 +4,9 @@
 
 :global FoxOSSiteManifestVersion
 :global FoxOSSiteStorageRoot
+:global FoxOSContainerCompatVersion
+:global FoxOSContainerState
+:global FoxOSContainerRoot
 :global FoxOSUpgradeCleanupInspectVerbose false
 :global FoxOSUpgradeCleanupCurrentDigest
 :global FoxOSUpgradeCleanupApprovedDigest
@@ -13,8 +16,9 @@
 :global FoxOSUpgradeCleanupRollbackMarker
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
+:if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
 :local releaseID "__FOXOS_RELEASE_ID__"
-:if ($releaseID ~ "^__.*__$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || $releaseID !~ "^[A-Za-z0-9._-]+$") do={ :error "upgrade-cleanup-apply.rsc 未绑定有效 release ID" }
+:if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "upgrade-cleanup-apply.rsc 未绑定有效 release ID" }
 :local payloadRoot ($FoxOSSiteStorageRoot . "/foxos-upgrade-" . $releaseID)
 :local approved $FoxOSUpgradeCleanupApprovedDigest
 :local confirmation $FoxOSUpgradeCleanupConfirmation
@@ -44,8 +48,8 @@
 :local retirement [/container find where comment=$markerSnapshot]
 :if ($active != $activeSnapshot || $retirement != $rollbackSnapshot) do={ :error "cleanup 写入前 active 或 rollback 对象 ID 变化" }
 /container/set $rollbackSnapshot comment="foxos:retained"
-:if ([/container get $rollbackSnapshot comment] != "foxos:retained" || [/container get $rollbackSnapshot status] != "stopped" || ([/container get $rollbackSnapshot start-on-boot] != false && [/container get $rollbackSnapshot start-on-boot] != "no")) do={
+:if ([/container get $rollbackSnapshot comment] != "foxos:retained" || [$FoxOSContainerState $rollbackSnapshot] != "stopped" || ([/container get $rollbackSnapshot start-on-boot] != false && [/container get $rollbackSnapshot start-on-boot] != "no")) do={
   :error "rollback 槽位归档回读失败"
 }
-:if ([/container get $activeSnapshot comment] != "foxos:active" || [/container get $activeSnapshot status] != "running") do={ :error "cleanup 后 active 身份或运行状态异常" }
+:if ([/container get $activeSnapshot comment] != "foxos:active" || [$FoxOSContainerState $activeSnapshot] != "running") do={ :error "cleanup 后 active 身份或运行状态异常" }
 :put "rollback 槽位已归档为 foxos:retained；active、容器、root-dir、镜像、数据、备份和检查点均保留。"

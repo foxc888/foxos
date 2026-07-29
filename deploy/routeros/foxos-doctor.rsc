@@ -8,13 +8,14 @@
 :global FoxOSSiteNetwork
 :global FoxOSSitePrefixLength
 :global FoxOSSiteRouterAddress
+:global FoxOSSiteMihomoAddress
+:global FoxOSSiteMosDNSAddress
 :global FoxOSSiteFoxOSAddress
 :global FoxOSSitePublicHostname
 :global FoxOSSiteLoadedDigest
 :global FoxOSSiteLoadedConfigPath
 :global FoxOSSiteLoaderVersion
 
-:local requiredArchitecture "x86"
 :local minimumFreeBytes 536870912
 :local needsActionCount 0
 :local conflictCount 0
@@ -24,6 +25,8 @@
 # RouterOS identity and version floor.
 :local routerVersion [/system/resource get version]
 :local architecture [/system/resource get architecture-name]
+:local imageArchitecture ""
+:if ($architecture = "x86" || $architecture = "x86_64") do={ :set imageArchitecture "amd64" }
 :local versionBase $routerVersion
 :local versionSpace [:find $versionBase " "]
 :if ([:typeof $versionSpace] != "nil") do={ :set versionBase [:pick $versionBase 0 $versionSpace] }
@@ -44,11 +47,13 @@
   :put ("NEEDS-ACTION|routeros-version|value=" . $routerVersion . "|minimum=7.21")
   :set needsActionCount ($needsActionCount + 1)
 }
-:if ($architecture = $requiredArchitecture) do={
-  :put ("PASS|architecture|value=" . $architecture . "|required=" . $requiredArchitecture)
-} else={
-  :put ("NEEDS-ACTION|architecture|value=" . $architecture . "|required=" . $requiredArchitecture)
+:if ($imageArchitecture != "amd64") do={
+  :put ("NEEDS-ACTION|architecture|value=" . $architecture . "|required=x86-or-x86_64|normalized=unsupported")
   :set needsActionCount ($needsActionCount + 1)
+} else={
+  :local architectureCompatibility "standard"
+  :if ($architecture = "x86_64") do={ :set architectureCompatibility "nonstandard-target-acceptance-required" }
+  :put ("PASS|architecture|value=" . $architecture . "|normalized=amd64|compatibility=" . $architectureCompatibility)
 }
 
 # Use only topology loaded by the immutable loader. The digest itself is never
@@ -56,25 +61,32 @@
 :local manifestReady true
 :local managementBridge ""
 :local storageRoot ""
+:local storageMode "disk"
 :local siteNetwork ""
 :local prefixLength 0
 :local routerAddress ""
+:local mihomoAddress ""
+:local mosdnsAddress ""
 :local foxosAddress ""
 :local publicHostname ""
 :if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1) do={ :set manifestReady false }
 :if ($manifestReady) do={
   :set managementBridge $FoxOSSiteManagementBridge
   :set storageRoot $FoxOSSiteStorageRoot
+  :set storageMode "disk"
+  :if ($storageRoot = "foxos") do={ :set storageMode "internal" }
   :set siteNetwork $FoxOSSiteNetwork
   :set prefixLength $FoxOSSitePrefixLength
   :set routerAddress $FoxOSSiteRouterAddress
+  :set mihomoAddress $FoxOSSiteMihomoAddress
+  :set mosdnsAddress $FoxOSSiteMosDNSAddress
   :set foxosAddress $FoxOSSiteFoxOSAddress
   :set publicHostname $FoxOSSitePublicHostname
-  :if ([:len $managementBridge] < 1 || [:len $storageRoot] < 1 || [:len $siteNetwork] < 1 || [:len $routerAddress] < 1 || [:len $foxosAddress] < 1 || [:len $publicHostname] < 1) do={ :set manifestReady false }
+  :if ([:len $managementBridge] < 1 || [:len $storageRoot] < 1 || [:len $siteNetwork] < 1 || [:len $routerAddress] < 1 || [:len $mihomoAddress] < 1 || [:len $mosdnsAddress] < 1 || [:len $foxosAddress] < 1 || [:len $publicHostname] < 1) do={ :set manifestReady false }
   :if ($FoxOSSiteLoadedConfigPath != ($storageRoot . "/site-config.rsc") || [:len $FoxOSSiteLoadedDigest] != 128) do={ :set manifestReady false }
 }
 :if ($manifestReady) do={
-  :put ("PASS|site-manifest|version=2|loader-version=1|bridge=" . $managementBridge . "|storage=" . $storageRoot . "|network=" . $siteNetwork . "|router-address=" . $routerAddress . "|foxos-address=" . $foxosAddress)
+  :put ("PASS|site-manifest|version=2|loader-version=1|bridge=" . $managementBridge . "|storage-mode=" . $storageMode . "|storage=" . $storageRoot . "|network=" . $siteNetwork . "|router-address=" . $routerAddress . "|foxos-address=" . $foxosAddress)
 } else={
   :put "NEEDS-ACTION|site-manifest|reason=load-sealed-site-config-first"
   :set needsActionCount ($needsActionCount + 1)
@@ -140,17 +152,26 @@
     :set needsActionCount ($needsActionCount + 1)
   }
 
-  :local diskID [/disk find where slot=$storageRoot]
-  :if ([:len $diskID] != 1) do={
-    :put ("NEEDS-ACTION|storage|slot=" . $storageRoot . "|count=" . [:len $diskID] . "|required-count=1")
-    :set needsActionCount ($needsActionCount + 1)
+  :local storageFree 0
+  :local storageReady true
+  :if ($storageMode = "internal") do={
+    :set storageFree [/system/resource get free-hdd-space]
   } else={
-    :local diskFree [/disk get $diskID free]
-    :if ($diskFree < $minimumFreeBytes) do={
-      :put ("NEEDS-ACTION|storage|slot=" . $storageRoot . "|free-bytes=" . $diskFree . "|minimum-free-bytes=" . $minimumFreeBytes)
+    :local diskID [/disk find where slot=$storageRoot]
+    :if ([:len $diskID] != 1) do={
+      :put ("NEEDS-ACTION|storage|mode=disk|slot=" . $storageRoot . "|count=" . [:len $diskID] . "|required-count=1")
+      :set storageReady false
       :set needsActionCount ($needsActionCount + 1)
     } else={
-      :put ("PASS|storage|slot=" . $storageRoot . "|free-bytes=" . $diskFree . "|minimum-free-bytes=" . $minimumFreeBytes)
+      :set storageFree [/disk get $diskID free]
+    }
+  }
+  :if ($storageReady) do={
+    :if ($storageFree < $minimumFreeBytes) do={
+      :put ("NEEDS-ACTION|storage|mode=" . $storageMode . "|root=" . $storageRoot . "|free-bytes=" . $storageFree . "|minimum-free-bytes=" . $minimumFreeBytes)
+      :set needsActionCount ($needsActionCount + 1)
+    } else={
+      :put ("PASS|storage|mode=" . $storageMode . "|root=" . $storageRoot . "|free-bytes=" . $storageFree . "|minimum-free-bytes=" . $minimumFreeBytes)
     }
   }
 
@@ -233,7 +254,7 @@
   }
 }
 
-# Reserved VETH and bridge-port names plus FoxOS ownership comments.
+# Exact owned VETHs and bridge ports are safe resumable first-install state.
 :local vethMetadataReadable false
 :local namedVethCount 0
 :local ownedVethCount 0
@@ -250,11 +271,50 @@
   :put "NEEDS-ACTION|footprint-veth-ports|inspection=unavailable"
   :set needsActionCount ($needsActionCount + 1)
 } else={
-  :if ($namedVethCount > 0 || $ownedVethCount > 0 || $namedPortCount > 0 || $ownedPortCount > 0) do={
-    :put ("CONFLICT|footprint-veth-ports|reserved-veth-count=" . $namedVethCount . "|owned-veth-count=" . $ownedVethCount . "|reserved-port-count=" . $namedPortCount . "|owned-port-count=" . $ownedPortCount)
-    :set conflictCount ($conflictCount + 1)
+  :if ($manifestReady = false) do={
+    :put "NEEDS-ACTION|footprint-veth-ports|inspection=skipped|reason=manifest-not-loaded"
+    :set needsActionCount ($needsActionCount + 1)
   } else={
-    :put "PASS|footprint-veth-ports|reserved-veth-count=0|owned-veth-count=0|reserved-port-count=0|owned-port-count=0"
+    :local reusableVethCount 0
+    :local reusablePortCount 0
+    :local vethConflict false
+    :local vethDefinitions {("veth-mihomo|" . $mihomoAddress . "/" . $prefixLength . "|foxos:mihomo");("veth-mosdns|" . $mosdnsAddress . "/" . $prefixLength . "|foxos:mosdns");("veth-foxos|" . $foxosAddress . "/" . $prefixLength . "|foxos:admin")}
+    :foreach definition in=$vethDefinitions do={
+      :local first [:find $definition "|"]
+      :local second [:find $definition "|" ($first + 1)]
+      :local vethName [:pick $definition 0 $first]
+      :local expectedCIDR [:pick $definition ($first + 1) $second]
+      :local expectedOwner [:pick $definition ($second + 1) [:len $definition]]
+      :local expectedVeth [/interface/veth find where name=$vethName]
+      :local addressVeth [/interface/veth find where address=$expectedCIDR]
+      :local portID [/interface/bridge/port find where interface=$vethName]
+      :if ([:len $expectedVeth] = 0) do={
+        :if ([:len $addressVeth] > 0 || [:len $portID] > 0) do={ :set vethConflict true }
+      } else={
+        :if ([:len $expectedVeth] != 1 || [/interface/veth get $expectedVeth comment] != $expectedOwner || [/interface/veth get $expectedVeth address] != $expectedCIDR || [/interface/veth get $expectedVeth gateway] != $routerAddress || [:len $addressVeth] != 1 || [/interface/veth get $addressVeth name] != $vethName) do={
+          :set vethConflict true
+        } else={
+          :set reusableVethCount ($reusableVethCount + 1)
+        }
+      }
+      :if ([:len $portID] > 1) do={ :set vethConflict true }
+      :if ([:len $portID] = 1) do={
+        :if ([:len $expectedVeth] != 1 || [/interface/bridge/port get $portID bridge] != $managementBridge || [/interface/bridge/port get $portID comment] != $expectedOwner) do={
+          :set vethConflict true
+        } else={
+          :set reusablePortCount ($reusablePortCount + 1)
+        }
+      }
+    }
+    :if ($namedVethCount != $reusableVethCount || $ownedVethCount != $reusableVethCount || $namedPortCount != $reusablePortCount || $ownedPortCount != $reusablePortCount) do={ :set vethConflict true }
+    :if ($vethConflict) do={
+      :put ("CONFLICT|footprint-veth-ports|reserved-veth-count=" . $namedVethCount . "|owned-veth-count=" . $ownedVethCount . "|reusable-veth-count=" . $reusableVethCount . "|reserved-port-count=" . $namedPortCount . "|owned-port-count=" . $ownedPortCount . "|reusable-port-count=" . $reusablePortCount)
+      :set conflictCount ($conflictCount + 1)
+    } else={
+      :local vethState "clean"
+      :if ($reusableVethCount > 0 || $reusablePortCount > 0) do={ :set vethState "reusable" }
+      :put ("PASS|footprint-veth-ports|state=" . $vethState . "|reusable-veth-count=" . $reusableVethCount . "|reusable-port-count=" . $reusablePortCount)
+    }
   }
 }
 

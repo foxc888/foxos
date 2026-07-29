@@ -29,6 +29,7 @@ die() {
 [[ -n "$mihomo_image" ]] || die "MIHOMO_IMAGE must name the scanned Mihomo Docker archive"
 [[ -n "$mosdns_image" ]] || die "MOSDNS_IMAGE must name the scanned MosDNS Docker archive"
 command -v rg >/dev/null 2>&1 || die "ripgrep (rg) is required"
+command -v perl >/dev/null 2>&1 || die "perl is required to encode RouterOS scripts as ASCII"
 
 required_files=(
   "$foxos_image"
@@ -118,6 +119,15 @@ printf '%s\n' \
   "cleanup: upgrade-cleanup-plan.rsc -> upgrade-cleanup-apply.rsc" \
   "integrity: verify this directory's SHA256SUMS before upload" \
   > "$upgrade_stage/UPGRADE-MANIFEST.txt"
+
+while IFS= read -r -d '' routeros_script; do
+  encoded_script="${routeros_script}.ascii"
+  "$repo_root/scripts/encode-routeros-rsc-ascii.sh" "$routeros_script" "$encoded_script"
+  mv -- "$encoded_script" "$routeros_script"
+done < <(find "$stage_root" -type f -name '*.rsc' -print0)
+if LC_ALL=C rg -n -g '*.rsc' '[^\x00-\x7F]' "$stage_root"; then
+  die "RouterOS release scripts must be ASCII-only"
+fi
 find "$stage_root" -name '.DS_Store' -delete
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -151,9 +161,9 @@ printf '%s\n' \
   "FoxOS full RouterOS bundle" \
   "bundle: $bundle_name" \
   "release-id: $release_id" \
-  "architecture-name: x86 (x86_64 CPU / linux-amd64 image)" \
+  "architecture-name: x86 standard or x86_64 target-compatible (linux-amd64 image)" \
   "site-config: copy the immutable example, edit and seal it, then import only load-site-config.rsc" \
-  "upload-root: configured by the sealed site-config.rsc (example default disk1/)" \
+  "upload-root: configured by the sealed site-config.rsc (disk slot, or reserved internal root foxos/)" \
   "credentials: generated on first RouterOS install" \
   "image-format: single-layer uncompressed Docker archive for RouterOS file import" \
   "upgrade-payload: $upgrade_dir_name (upload only this directory for upgrades)" \
@@ -163,6 +173,7 @@ printf '%s\n' \
   "release-gate: Core CI and Release workflows scan all three input images with Trivy" \
   "chr-compatibility-gate: chr-envlists-smoke.rsc on a disposable exact-version CHR" \
   "host-doctor: load-site-config.rsc then foxos-doctor.rsc (strictly read-only)" \
+  "routeros-script-encoding: ASCII-only with non-ASCII message bytes encoded as RouterOS hex escapes" \
   "integrity: verify SHA256SUMS before upload" \
   "routeros-validation: static checks only; physical-device acceptance is pending" \
   > "$stage_root/RELEASE-MANIFEST.txt"

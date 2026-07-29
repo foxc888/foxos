@@ -24,8 +24,10 @@
 
 :set FoxOSInstallApprovedDigest $FoxOSInstallCurrentDigest
 :set FoxOSInstallConfirmation ""
+:local storageMode "disk"
+:if ($FoxOSSiteStorageRoot = "foxos") do={ :set storageMode "internal" }
 :put "=== FoxOS exact install plan ==="
-:put ("Prerequisites: RouterOS 7.21+, architecture-name=x86, matching container package, container=yes, scheduler=yes, bridge=" . $FoxOSSiteManagementBridge . ", storage=" . $FoxOSSiteStorageRoot . ".")
+:put ("Prerequisites: RouterOS 7.21+, architecture-name=x86 or x86_64 normalized to amd64, matching container package, container=yes, scheduler=yes, bridge=" . $FoxOSSiteManagementBridge . ", storage-mode=" . $storageMode . ", storage=" . $FoxOSSiteStorageRoot . ".")
 :put ("Site " . $FoxOSSiteNetwork . ": RouterOS=" . $FoxOSSiteRouterAddress . ", Mihomo=" . $FoxOSSiteMihomoAddress . ", MosDNS=" . $FoxOSSiteMosDNSAddress . ", FoxOS=https://" . $FoxOSSitePublicHostname . " (" . $FoxOSSiteFoxOSAddress . ").")
 :put "CREATE and REUSE decisions above are the complete RouterOS resource pre-state for this plan. Any FAIL stops here."
 :put "The write phase manages only foxos-rest, foxos-service, FoxOS env/mount/veth/bridge-port owners, containers foxos-mihomo, foxos-mosdns, initial admin slot foxos-initial, the owned sequential-start scheduler/script, and Mihomo secret lines."

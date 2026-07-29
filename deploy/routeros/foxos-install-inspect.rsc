@@ -12,14 +12,17 @@
 :global FoxOSSiteFoxOSAddress
 :global FoxOSSitePublicHostname
 :global FoxOSSiteSubscriptionPrivateCIDRs
+:global FoxOSContainerCompatVersion
+:global FoxOSContainerState
+:global FoxOSContainerRoot
 :global FoxOSInstallInspectVerbose
 :global FoxOSInstallCurrentDigest
-:if ($FoxOSSiteManifestVersion != 2) do={ :error "site-config.rsc manifest version 2 is required" }
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSContainerCompatVersion != 1) do={ :error "site-config.rsc manifest version 2 and container compatibility contract are required" }
 
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
 :local releaseID "__FOXOS_RELEASE_ID__"
-:if ($releaseID ~ "^__.*__$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || $releaseID !~ "^[A-Za-z0-9._-]+$") do={ :error "foxos-install-inspect.rsc 未绑定有效 release ID；只能使用发布包内脚本" }
+:if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "foxos-install-inspect.rsc 未绑定有效 release ID；只能使用发布包内脚本" }
 :local foxosImagePath ($storageRoot . "/foxos-upgrade-" . $releaseID . "/foxos-amd64.tar")
 :local prefixLength $FoxOSSitePrefixLength
 :local routerAddress $FoxOSSiteRouterAddress
@@ -284,8 +287,8 @@
   :local namedContainer [/container find where name=$containerName]
   :local containerState "CREATE"
   :if ([:len $ownedContainer] > 0 || [:len $namedContainer] > 0) do={
-    :if ([:len $ownedContainer] = 1 && [:len $namedContainer] = 1 && [/container get $ownedContainer .id] = [/container get $namedContainer .id] && [/container get $ownedContainer interface] = $interfaceName && [/container get $ownedContainer envlists] = $envListName && [/container get $ownedContainer mountlists] = $mountListName && [/container get $ownedContainer root-dir] = $rootDirectory && ([/container get $ownedContainer logging] = true || [/container get $ownedContainer logging] = "yes")) do={
-      :local currentStatus [/container get $ownedContainer status]
+    :if ([:len $ownedContainer] = 1 && [:len $namedContainer] = 1 && $ownedContainer = $namedContainer && [/container get $ownedContainer interface] = $interfaceName && [/container get $ownedContainer envlists] = $envListName && [/container get $ownedContainer mountlists] = $mountListName && [$FoxOSContainerRoot $ownedContainer] = $rootDirectory && ([/container get $ownedContainer logging] = true || [/container get $ownedContainer logging] = "yes")) do={
+      :local currentStatus [$FoxOSContainerState $ownedContainer]
       :if (($currentStatus = "running" || $currentStatus = "stopped") && [/container get $ownedContainer start-on-boot] = false) do={
         :set containerState "REUSE"
         :set material ($material . "|container-status:" . $containerName . "=" . $currentStatus . ":" . [/container get $ownedContainer start-on-boot])
@@ -308,11 +311,11 @@
 :if ([:len $activeContainer] > 0 || [:len $initialByName] > 0) do={
   :local activeName ""
   :if ([:len $activeContainer] = 1) do={ :set activeName [/container get $activeContainer name] }
-  :if ([:len $activeContainer] = 1 && $activeName ~ "^foxos-[A-Za-z0-9._-]+$" && [/container get $activeContainer interface] = "veth-foxos" && [/container get $activeContainer envlists] = "foxos-env" && [/container get $activeContainer mountlists] = "foxos-mihomo-config,foxos-data,foxos-backups" && [/container get $activeContainer root-dir] = ($storageRoot . "/containers/" . $activeName) && ([/container get $activeContainer logging] = true || [/container get $activeContainer logging] = "yes")) do={
-    :local activeStatus [/container get $activeContainer status]
+  :if ([:len $activeContainer] = 1 && $activeName ~ "^foxos-[A-Za-z0-9._-]+\$" && [/container get $activeContainer interface] = "veth-foxos" && [/container get $activeContainer envlists] = "foxos-env" && [/container get $activeContainer mountlists] = "foxos-mihomo-config,foxos-data,foxos-backups" && [$FoxOSContainerRoot $activeContainer] = ($storageRoot . "/containers/" . $activeName) && ([/container get $activeContainer logging] = false || [/container get $activeContainer logging] = "no")) do={
+    :local activeStatus [$FoxOSContainerState $activeContainer]
     :if (($activeStatus = "running" || $activeStatus = "stopped") && [/container get $activeContainer start-on-boot] = false) do={
       :set activeState "REUSE"
-      :set material ($material . "|active-id=" . [/container get $activeContainer .id] . ":" . [/container get $activeContainer name] . ":" . [/container get $activeContainer root-dir] . ":" . $activeStatus . ":" . [/container get $activeContainer start-on-boot])
+      :set material ($material . "|active-id=" . [:pick $activeContainer 0] . ":" . [/container get $activeContainer name] . ":" . [$FoxOSContainerRoot $activeContainer] . ":" . $activeStatus . ":" . [/container get $activeContainer start-on-boot])
     } else={
       :set activeState "FAIL"
       :set failed true
@@ -321,7 +324,7 @@
     :set activeState "FAIL"
     :set failed true
   }
-  :if ([:len $initialByName] > 0 && ([:len $activeContainer] != 1 || [/container get $initialByName .id] != [/container get $activeContainer .id])) do={ :set activeState "FAIL"; :set failed true }
+  :if ([:len $initialByName] > 0 && ([:len $activeContainer] != 1 || $initialByName != $activeContainer)) do={ :set activeState "FAIL"; :set failed true }
 }
 :local inactiveAdminSlots ([:len [/container find where comment="foxos:pending"]] + [:len [/container find where comment="foxos:rollback"]] + [:len [/container find where comment="foxos:retained"]] + [:len [/container find where comment="foxos:failed"]])
 :if ($activeState = "CREATE" && $inactiveAdminSlots > 0) do={

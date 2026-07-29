@@ -9,7 +9,7 @@
 :set FoxOSSiteLoadedConfigPath ""
 :set FoxOSSiteLoaderVersion 0
 
-:local configFiles [/file find where name~"(^|/)site-config.rsc$"]
+:local configFiles [/file find where name~"(^|/)site-config.rsc\$"]
 :if ([:len $configFiles] != 1) do={ :error "必须且只能上传一份 site-config.rsc" }
 :local configFile $configFiles
 :local configPath [/file get $configFile name]
@@ -23,7 +23,7 @@
 :local digestContents [/file get $digestFiles contents]
 :if ([:len $digestContents] != 129 || [:pick $digestContents 128 129] != "\n") do={ :error "站点清单摘要必须是 128 位小写 SHA-512 加换行" }
 :local expectedDigest [:pick $digestContents 0 128]
-:if ($expectedDigest !~ "^[0-9a-f]+$") do={ :error "站点清单摘要包含非十六进制字符" }
+:if (!($expectedDigest ~ "^[0-9a-f]+\$")) do={ :error "站点清单摘要包含非十六进制字符" }
 :local actualDigest [:convert $configContents transform=sha512 to=hex]
 :if ($actualDigest != $expectedDigest) do={ :error "site-config.rsc 与独立 SHA-512 不一致" }
 :if ([:typeof [:find $configContents "\r"]] != "nil" || [:typeof [:find $configContents ";"]] != "nil" || [:typeof [:find $configContents "\\"]] != "nil") do={
@@ -56,6 +56,12 @@
 :local contentLength [:len $configContents]
 
 :while ($cursor < $contentLength) do={
+  # RouterOS :find excludes the byte at its start offset. Skip an LF at the
+  # cursor so a blank line cannot become a prefix of the following line.
+  :if ([:pick $configContents $cursor ($cursor + 1)] = "\n") do={
+    :set cursor ($cursor + 1)
+    :continue
+  }
   :local lineEnd [:find $configContents "\n" $cursor]
   :if ([:typeof $lineEnd] = "nil") do={ :set lineEnd $contentLength }
   :local line [:pick $configContents $cursor $lineEnd]
@@ -68,52 +74,52 @@
     :set manifestVersion 2
     :set matched true
   }
-  :if ($line ~ "^:global FoxOSSiteManagementBridge \"[A-Za-z0-9][A-Za-z0-9._-]*\"$") do={
+  :if ($line ~ "^:global FoxOSSiteManagementBridge \"[A-Za-z0-9][A-Za-z0-9._-]*\"\$") do={
     :set managementBridgeCount ($managementBridgeCount + 1)
     :set managementBridge [:pick $line [:len ":global FoxOSSiteManagementBridge \""] ([:len $line] - 1)]
     :set matched true
   }
-  :if ($line ~ "^:global FoxOSSiteStorageRoot \"[A-Za-z0-9][A-Za-z0-9._-]*\"$") do={
+  :if ($line ~ "^:global FoxOSSiteStorageRoot \"[A-Za-z0-9][A-Za-z0-9._-]*\"\$") do={
     :set storageRootCount ($storageRootCount + 1)
     :set storageRoot [:pick $line [:len ":global FoxOSSiteStorageRoot \""] ([:len $line] - 1)]
     :set matched true
   }
-  :if ($line ~ "^:global FoxOSSiteNetwork \"[0-9.]+/[0-9]+\"$") do={
+  :if ($line ~ "^:global FoxOSSiteNetwork \"[0-9.]+/[0-9]+\"\$") do={
     :set networkCount ($networkCount + 1)
     :set siteNetwork [:pick $line [:len ":global FoxOSSiteNetwork \""] ([:len $line] - 1)]
     :set matched true
   }
-  :if ($line ~ "^:global FoxOSSitePrefixLength [0-9]+$") do={
+  :if ($line ~ "^:global FoxOSSitePrefixLength [0-9]+\$") do={
     :set prefixLengthCount ($prefixLengthCount + 1)
     :set prefixLength [:tonum [:pick $line [:len ":global FoxOSSitePrefixLength "] [:len $line]]]
     :set matched true
   }
-  :if ($line ~ "^:global FoxOSSiteRouterAddress \"[0-9.]+\"$") do={
+  :if ($line ~ "^:global FoxOSSiteRouterAddress \"[0-9.]+\"\$") do={
     :set routerAddressCount ($routerAddressCount + 1)
     :set routerAddress [:pick $line [:len ":global FoxOSSiteRouterAddress \""] ([:len $line] - 1)]
     :set matched true
   }
-  :if ($line ~ "^:global FoxOSSiteMihomoAddress \"[0-9.]+\"$") do={
+  :if ($line ~ "^:global FoxOSSiteMihomoAddress \"[0-9.]+\"\$") do={
     :set mihomoAddressCount ($mihomoAddressCount + 1)
     :set mihomoAddress [:pick $line [:len ":global FoxOSSiteMihomoAddress \""] ([:len $line] - 1)]
     :set matched true
   }
-  :if ($line ~ "^:global FoxOSSiteMosDNSAddress \"[0-9.]+\"$") do={
+  :if ($line ~ "^:global FoxOSSiteMosDNSAddress \"[0-9.]+\"\$") do={
     :set mosdnsAddressCount ($mosdnsAddressCount + 1)
     :set mosdnsAddress [:pick $line [:len ":global FoxOSSiteMosDNSAddress \""] ([:len $line] - 1)]
     :set matched true
   }
-  :if ($line ~ "^:global FoxOSSiteFoxOSAddress \"[0-9.]+\"$") do={
+  :if ($line ~ "^:global FoxOSSiteFoxOSAddress \"[0-9.]+\"\$") do={
     :set foxosAddressCount ($foxosAddressCount + 1)
     :set foxosAddress [:pick $line [:len ":global FoxOSSiteFoxOSAddress \""] ([:len $line] - 1)]
     :set matched true
   }
-  :if ($line ~ "^:global FoxOSSitePublicHostname \"[a-z0-9][a-z0-9.-]*[a-z0-9]\"$") do={
+  :if ($line ~ "^:global FoxOSSitePublicHostname \"[a-z0-9][a-z0-9.-]*[a-z0-9]\"\$") do={
     :set publicHostnameCount ($publicHostnameCount + 1)
     :set publicHostname [:pick $line [:len ":global FoxOSSitePublicHostname \""] ([:len $line] - 1)]
     :set matched true
   }
-  :if ($line ~ "^:global FoxOSSiteSubscriptionPrivateCIDRs \"[0-9A-Fa-f:.,/]*\"$") do={
+  :if ($line ~ "^:global FoxOSSiteSubscriptionPrivateCIDRs \"[0-9A-Fa-f:.,/]*\"\$") do={
     :set privateCIDRsCount ($privateCIDRsCount + 1)
     :set privateCIDRs [:pick $line [:len ":global FoxOSSiteSubscriptionPrivateCIDRs \""] ([:len $line] - 1)]
     :set matched true
@@ -125,7 +131,8 @@
   :if ($count != 1) do={ :error "site-config.rsc 必须且只能包含 11 个指定赋值各一次" }
 }
 :local publicHostnameLength [:len $publicHostname]
-:if ($publicHostnameLength < 3 || $publicHostnameLength > 253 || $publicHostname !~ "^[a-z0-9][a-z0-9.-]*[a-z0-9]$" || [:typeof [:find $publicHostname ".."]] != "nil" || [:typeof [:find $publicHostname ".-"]] != "nil" || [:typeof [:find $publicHostname "-."]] != "nil" || $publicHostname !~ "\\.home\\.arpa$") do={
+:local publicHostnameDoubleDot ("." . ".")
+:if ($publicHostnameLength < 3 || $publicHostnameLength > 253 || !($publicHostname ~ "^[a-z0-9][a-z0-9.-]*[a-z0-9]\$") || [:typeof [:find $publicHostname $publicHostnameDoubleDot]] != "nil" || [:typeof [:find $publicHostname ".-"]] != "nil" || [:typeof [:find $publicHostname "-."]] != "nil" || !($publicHostname ~ "\\.home\\.arpa\$")) do={
   :error "管理主机名必须是 home.arpa 下总长不超过 253 字节的小写 ASCII 名称"
 }
 :local hostnameLabelCursor 0
@@ -137,7 +144,7 @@
   :if ($hostnameLabelLength < 1 || $hostnameLabelLength > 63) do={
     :error "管理主机名的每个 label 必须包含 1..63 个 ASCII 字节"
   }
-  :if ($hostnameLabel !~ "^[a-z0-9-]+$" || [:pick $hostnameLabel 0 1] = "-" || [:pick $hostnameLabel ($hostnameLabelLength - 1) $hostnameLabelLength] = "-") do={
+  :if (!($hostnameLabel ~ "^[a-z0-9-]+\$") || [:pick $hostnameLabel 0 1] = "-" || [:pick $hostnameLabel ($hostnameLabelLength - 1) $hostnameLabelLength] = "-") do={
     :error "管理主机名 label 只能包含小写 ASCII 字母、数字和内部连字符"
   }
   :set hostnameLabelCursor ($hostnameLabelEnd + 1)
@@ -219,5 +226,30 @@
 :set FoxOSSiteSubscriptionPrivateCIDRs $privateCIDRs
 :set FoxOSSiteLoadedDigest $actualDigest
 :set FoxOSSiteLoadedConfigPath $configPath
+
+# RouterOS 7.23.2 exposes container identity as the native find handle, state
+# as dynamic boolean flags, and may prefix root-dir readback with one slash.
+# Keep that compatibility contract in one loader-owned runtime primitive.
+:global FoxOSContainerCompatVersion 1
+:global FoxOSContainerState do={
+  :local container $1
+  :local running [/container get $container running]
+  :local stopped [/container get $container stopped]
+  :local isRunning ($running = true || $running = "yes")
+  :local isStopped ($stopped = true || $stopped = "yes")
+  :if ($isRunning && $isStopped) do={ :return "invalid" }
+  :if ($isRunning) do={ :return "running" }
+  :if ($isStopped) do={ :return "stopped" }
+  :return "transitional"
+}
+:global FoxOSContainerRoot do={
+  :local container $1
+  :local rootDirectory [/container get $container root-dir]
+  :if ([:typeof $rootDirectory] != "str") do={ :return "" }
+  :if ([:len $rootDirectory] > 0 && [:pick $rootDirectory 0 1] = "/") do={
+    :return [:pick $rootDirectory 1 [:len $rootDirectory]]
+  }
+  :return $rootDirectory
+}
 :set FoxOSSiteLoaderVersion 1
 :put ("SITE CONFIG LOADED: SHA-512=" . $FoxOSSiteLoadedDigest . " storage=" . $FoxOSSiteStorageRoot)

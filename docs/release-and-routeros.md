@@ -72,16 +72,18 @@ foxos-full-amd64-<release-id>.tar.gz.sha256
 
 组包拒绝填充的 Mihomo Secret、私钥、节点链接、凭据 URL 和常见敏感字段。MosDNS 9099 API 必须绑定容器 loopback，未使用的第三方管理 UI 不允许进入包。外层另生成 `.sha256`。
 
+持有 `foxos-env` 的 FoxOS 管理槽位必须固定 `logging=no`，因为 RouterOS 的容器启动日志会记录启用日志容器的环境。Mihomo 与 MosDNS 不继承 FoxOS 凭据，可保持 `logging=yes`。静态门禁同时约束首次安装、升级、promote、rollback、cleanup 和卸载身份回读，禁止生命周期脚本重新接受管理槽位 `logging=yes`。
+
 组包脚本要求调用方显式提供 `FOXOS_IMAGE`、`MIHOMO_IMAGE`、`MOSDNS_IMAGE`，不会读取仓库中的历史二进制。Core CI 与 Release workflow 只在三张输入镜像完成各自 Trivy 门禁后调用组包器。
 
-操作者必须复制模板生成唯一 `site-config.rsc`，配置管理桥、存储、网段、四个服务地址、`home.arpa` hostname 和可选订阅私网 allowlist，再用封存工具生成独立 SHA-512。该可编辑清单及其摘要故意不进入发布包 `SHA256SUMS`，也不得直接 import；包内固定的 `load-site-config.rsc` 先把它作为数据验证 SHA-512 和 11 项精确赋值白名单。preflight 会重新计算当前内容摘要并核对 loader 证明。安装器把完整 `FOXOS_SITE_*` 环境交给后端，前端从 `GET /api/v1/site` 回读，不维护第二份拓扑。
+操作者必须复制模板生成唯一 `site-config.rsc`，配置管理桥、存储、网段、四个服务地址、`home.arpa` hostname 和可选订阅私网 allowlist，再用封存工具生成独立 SHA-512。外置存储填写唯一 `/disk` 槽位；无 `/disk` 对象的 x86 系统盘只能用保留根 `foxos`，其他值仍按磁盘槽位检查。该可编辑清单及其摘要故意不进入发布包 `SHA256SUMS`，也不得直接 import；包内固定的 `load-site-config.rsc` 先把它作为数据验证 SHA-512 和 11 项精确赋值白名单。preflight 会重新计算当前内容摘要并核对 loader 证明。安装器把完整 `FOXOS_SITE_*` 环境交给后端，前端从 `GET /api/v1/site` 回读，不维护第二份拓扑。
 
 ## 首次安装控制点
 
 完整命令见 [QUICK-INSTALL](../deploy/routeros/QUICK-INSTALL.md)。不可跳过：
 
-1. RouterOS 7.21 是脚本语法下限，目标完整版本已通过同版本 CHR `envlists` add/get/delete 门禁；设备为 `architecture-name=x86`，使用同版本 container package、`container=yes` 与 `scheduler=yes`。两项 device-mode 更新都可能要求设备操作者按官方流程物理确认。
-2. 清单指定的管理桥、存储、RouterOS 地址和受限 REST 已存在。
+1. RouterOS 7.21 是脚本语法下限，目标完整版本已通过同版本 CHR `envlists` add/get/delete 门禁；设备为标准 `architecture-name=x86` 或单独验收的非标准 `x86_64`，使用同版本 container package、`container=yes` 与 `scheduler=yes`。两项 device-mode 更新都可能要求设备操作者按官方流程物理确认。
+2. 清单指定的管理桥、存储、RouterOS 地址和受限 REST 已存在；存储是唯一 `/disk` 槽位或精确内部保留根 `foxos`。
 3. 工作站验证外层与包内 checksum，从模板生成并独立封存站点清单，但尚不上传。
 4. 在任何上传前保存脱敏 RouterOS export 与带唯一离线密码、`aes-sha256` 的 binary backup，下载两个副本；确认所有顶层上传目标零碰撞后才上传，并通过固定 loader 运行只读 doctor。
 5. import 不可变 `load-site-config.rsc` 后运行 `foxos-plan.rsc`；loader 验证可编辑清单，plan 再自动执行 preflight 和共享 inspector，逐项输出 `CREATE/REUSE/FAIL` 并绑定 SHA-512 前态摘要。

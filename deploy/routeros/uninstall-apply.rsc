@@ -11,6 +11,9 @@
 :global FoxOSSiteMosDNSAddress
 :global FoxOSSiteFoxOSAddress
 :global FoxOSSitePublicHostname
+:global FoxOSContainerCompatVersion
+:global FoxOSContainerState
+:global FoxOSContainerRoot
 :global FoxOSUninstallInspectVerbose false
 :global FoxOSUninstallCurrentDigest
 :global FoxOSUninstallApprovedDigest
@@ -19,6 +22,7 @@
 :global FoxOSUninstallRemainingCount
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
+:if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
 :local approved $FoxOSUninstallApprovedDigest
 :local confirmation $FoxOSUninstallConfirmation
 /import file-name=($FoxOSSiteStorageRoot . "/foxos-uninstall-inspect.rsc")
@@ -56,12 +60,19 @@
   :local owner [/container get $containerID comment]
   :local containerName [/container get $containerID name]
   :local accepted false
-  :if ($owner = "foxos:mihomo" && $containerName = "foxos-mihomo" && [/container get $containerID interface] = "veth-mihomo" && [/container get $containerID envlists] = "" && [/container get $containerID mountlists] = "foxos-mihomo-runtime" && [/container get $containerID root-dir] = ($FoxOSSiteStorageRoot . "/containers/mihomo")) do={ :set accepted true }
-  :if ($owner = "foxos:mosdns" && $containerName = "foxos-mosdns" && [/container get $containerID interface] = "veth-mosdns" && [/container get $containerID envlists] = "foxos-mosdns-env" && [/container get $containerID mountlists] = "foxos-mosdns-runtime" && [/container get $containerID root-dir] = ($FoxOSSiteStorageRoot . "/containers/mosdns")) do={ :set accepted true }
-  :if (($owner = "foxos:active" || $owner = "foxos:pending" || $owner = "foxos:rollback" || $owner = "foxos:rollback-complete" || $owner = "foxos:transition:promote" || $owner = "foxos:transition:rollback" || $owner = "foxos:transition:rollback:previous" || $owner = "foxos:retained" || $owner = "foxos:failed") && $containerName ~ "^foxos-[A-Za-z0-9._-]+$" && [/container get $containerID interface] = "veth-foxos" && [/container get $containerID envlists] = "foxos-env" && [/container get $containerID mountlists] = "foxos-mihomo-config,foxos-data,foxos-backups" && [/container get $containerID root-dir] = ($FoxOSSiteStorageRoot . "/containers/" . $containerName)) do={ :set accepted true }
-  :local currentStatus [/container get $containerID status]
+  :if ($owner = "foxos:mihomo" && $containerName = "foxos-mihomo" && [/container get $containerID interface] = "veth-mihomo" && [/container get $containerID envlists] = "" && [/container get $containerID mountlists] = "foxos-mihomo-runtime" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/mihomo")) do={ :set accepted true }
+  :if ($owner = "foxos:mosdns" && $containerName = "foxos-mosdns" && [/container get $containerID interface] = "veth-mosdns" && [/container get $containerID envlists] = "foxos-mosdns-env" && [/container get $containerID mountlists] = "foxos-mosdns-runtime" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/mosdns")) do={ :set accepted true }
+  :if (($owner = "foxos:active" || $owner = "foxos:pending" || $owner = "foxos:rollback" || $owner = "foxos:rollback-complete" || $owner = "foxos:transition:promote" || $owner = "foxos:transition:rollback" || $owner = "foxos:transition:rollback:previous" || $owner = "foxos:retained" || $owner = "foxos:failed") && $containerName ~ "^foxos-[A-Za-z0-9._-]+\$" && [/container get $containerID interface] = "veth-foxos" && [/container get $containerID envlists] = "foxos-env" && [/container get $containerID mountlists] = "foxos-mihomo-config,foxos-data,foxos-backups" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/" . $containerName)) do={ :set accepted true }
+  :local currentStatus [$FoxOSContainerState $containerID]
   :if ($currentStatus != "running" && $currentStatus != "stopped") do={ :set accepted false }
-  :if (([/container get $containerID start-on-boot] != false && [/container get $containerID start-on-boot] != "no") || ([/container get $containerID logging] != true && [/container get $containerID logging] != "yes")) do={ :set accepted false }
+  :local containerLogging [/container get $containerID logging]
+  :local loggingMatches false
+  :if ($owner = "foxos:mihomo" || $owner = "foxos:mosdns") do={
+    :if ($containerLogging = true || $containerLogging = "yes") do={ :set loggingMatches true }
+  } else={
+    :if ($containerLogging = false || $containerLogging = "no") do={ :set loggingMatches true }
+  }
+  :if (([/container get $containerID start-on-boot] != false && [/container get $containerID start-on-boot] != "no") || $loggingMatches = false) do={ :set accepted false }
   :if ($accepted = false) do={ :error "容器完整身份在摘要回读后变化；停止卸载" }
   /container/set $containerID start-on-boot=no
   :if ($currentStatus = "running") do={ /container/stop $containerID }
@@ -71,7 +82,7 @@
   :delay 5s
   :set allStopped true
   :foreach containerID in=$ownedContainers do={
-    :if ([/container get $containerID status] != "stopped") do={ :set allStopped false }
+    :if ([$FoxOSContainerState $containerID] != "stopped") do={ :set allStopped false }
   }
   :if ($allStopped) do={ :break }
 }
@@ -95,10 +106,17 @@
   :local owner [/container get $containerID comment]
   :local containerName [/container get $containerID name]
   :local accepted false
-  :if ($owner = "foxos:mihomo" && $containerName = "foxos-mihomo" && [/container get $containerID interface] = "veth-mihomo" && [/container get $containerID envlists] = "" && [/container get $containerID mountlists] = "foxos-mihomo-runtime" && [/container get $containerID root-dir] = ($FoxOSSiteStorageRoot . "/containers/mihomo")) do={ :set accepted true }
-  :if ($owner = "foxos:mosdns" && $containerName = "foxos-mosdns" && [/container get $containerID interface] = "veth-mosdns" && [/container get $containerID envlists] = "foxos-mosdns-env" && [/container get $containerID mountlists] = "foxos-mosdns-runtime" && [/container get $containerID root-dir] = ($FoxOSSiteStorageRoot . "/containers/mosdns")) do={ :set accepted true }
-  :if (($owner = "foxos:active" || $owner = "foxos:pending" || $owner = "foxos:rollback" || $owner = "foxos:rollback-complete" || $owner = "foxos:transition:promote" || $owner = "foxos:transition:rollback" || $owner = "foxos:transition:rollback:previous" || $owner = "foxos:retained" || $owner = "foxos:failed") && $containerName ~ "^foxos-[A-Za-z0-9._-]+$" && [/container get $containerID interface] = "veth-foxos" && [/container get $containerID envlists] = "foxos-env" && [/container get $containerID mountlists] = "foxos-mihomo-config,foxos-data,foxos-backups" && [/container get $containerID root-dir] = ($FoxOSSiteStorageRoot . "/containers/" . $containerName)) do={ :set accepted true }
-  :if ([/container get $containerID status] != "stopped" || ([/container get $containerID start-on-boot] != false && [/container get $containerID start-on-boot] != "no") || ([/container get $containerID logging] != true && [/container get $containerID logging] != "yes")) do={ :set accepted false }
+  :if ($owner = "foxos:mihomo" && $containerName = "foxos-mihomo" && [/container get $containerID interface] = "veth-mihomo" && [/container get $containerID envlists] = "" && [/container get $containerID mountlists] = "foxos-mihomo-runtime" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/mihomo")) do={ :set accepted true }
+  :if ($owner = "foxos:mosdns" && $containerName = "foxos-mosdns" && [/container get $containerID interface] = "veth-mosdns" && [/container get $containerID envlists] = "foxos-mosdns-env" && [/container get $containerID mountlists] = "foxos-mosdns-runtime" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/mosdns")) do={ :set accepted true }
+  :if (($owner = "foxos:active" || $owner = "foxos:pending" || $owner = "foxos:rollback" || $owner = "foxos:rollback-complete" || $owner = "foxos:transition:promote" || $owner = "foxos:transition:rollback" || $owner = "foxos:transition:rollback:previous" || $owner = "foxos:retained" || $owner = "foxos:failed") && $containerName ~ "^foxos-[A-Za-z0-9._-]+\$" && [/container get $containerID interface] = "veth-foxos" && [/container get $containerID envlists] = "foxos-env" && [/container get $containerID mountlists] = "foxos-mihomo-config,foxos-data,foxos-backups" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/" . $containerName)) do={ :set accepted true }
+  :local containerLogging [/container get $containerID logging]
+  :local loggingMatches false
+  :if ($owner = "foxos:mihomo" || $owner = "foxos:mosdns") do={
+    :if ($containerLogging = true || $containerLogging = "yes") do={ :set loggingMatches true }
+  } else={
+    :if ($containerLogging = false || $containerLogging = "no") do={ :set loggingMatches true }
+  }
+  :if ([$FoxOSContainerState $containerID] != "stopped" || ([/container get $containerID start-on-boot] != false && [/container get $containerID start-on-boot] != "no") || $loggingMatches = false) do={ :set accepted false }
   :if ($accepted = false) do={ :error "容器完整身份在删除前变化；停止卸载" }
   /container/remove $containerID
 }

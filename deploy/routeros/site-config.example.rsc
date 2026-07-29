@@ -4,6 +4,8 @@
 
 :global FoxOSSiteManifestVersion 2
 :global FoxOSSiteManagementBridge "bridge-lan"
+# A mounted disk slot such as disk1 is recommended. The exact reserved value
+# foxos selects internal root storage. Every other value must match one /disk slot.
 :global FoxOSSiteStorageRoot "disk1"
 :global FoxOSSiteNetwork "10.0.0.0/24"
 :global FoxOSSitePrefixLength 24

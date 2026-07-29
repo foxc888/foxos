@@ -5,8 +5,12 @@
 :global FoxOSSiteStorageRoot
 :global FoxOSSitePublicHostname
 :global FoxOSSiteFoxOSAddress
+:global FoxOSContainerCompatVersion
+:global FoxOSContainerState
+:global FoxOSContainerRoot
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
+:if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
 :local storageRoot $FoxOSSiteStorageRoot
 :local promoteTransition [/container find where comment="foxos:transition:promote"]
 :local rollbackTransition [/container find where comment="foxos:transition:rollback"]
@@ -15,13 +19,13 @@
 :if ([:len $promoteTransition] > 1 || [:len $rollbackTransition] > 1 || [:len $rollbackPrevious] > 1 || [:len $rollbackComplete] > 1 || ([:len $promoteTransition] > 0 && ([:len $rollbackTransition] > 0 || [:len $rollbackPrevious] > 0))) do={
   :error "FoxOS 容器切换标记不唯一或互相冲突，拒绝启动"
 }
-:local knownAdminSlots [/container find where comment~"^foxos:(active|pending|rollback|rollback-complete|transition:promote|transition:rollback|transition:rollback:previous|retained|failed)$"]
+:local knownAdminSlots [/container find where comment~"^foxos:(active|pending|rollback|rollback-complete|transition:promote|transition:rollback|transition:rollback:previous|retained|failed)\$"]
 :local interfaceAdminSlots [/container find where interface="veth-foxos"]
 :if ([:len $knownAdminSlots] != [:len $interfaceAdminSlots]) do={ :error "veth-foxos 上存在未绑定或错绑的管理容器，拒绝启动" }
 :foreach adminSlot in=$knownAdminSlots do={
   :local adminName [/container get $adminSlot name]
-  :local adminStatus [/container get $adminSlot status]
-  :if ($adminName !~ "^foxos-[A-Za-z0-9._-]+$" || [/container get $adminSlot interface] != "veth-foxos" || [/container get $adminSlot envlists] != "foxos-env" || [/container get $adminSlot mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [/container get $adminSlot root-dir] != ($storageRoot . "/containers/" . $adminName) || ($adminStatus != "running" && $adminStatus != "stopped") || ([/container get $adminSlot start-on-boot] != false && [/container get $adminSlot start-on-boot] != "no") || ([/container get $adminSlot logging] != true && [/container get $adminSlot logging] != "yes")) do={
+  :local adminStatus [$FoxOSContainerState $adminSlot]
+  :if (!($adminName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $adminSlot interface] != "veth-foxos" || [/container get $adminSlot envlists] != "foxos-env" || [/container get $adminSlot mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $adminSlot] != ($storageRoot . "/containers/" . $adminName) || ($adminStatus != "running" && $adminStatus != "stopped") || ([/container get $adminSlot start-on-boot] != false && [/container get $adminSlot start-on-boot] != "no") || ([/container get $adminSlot logging] != false && [/container get $adminSlot logging] != "no")) do={
     :error ("管理容器完整身份契约不匹配: " . $adminName)
   }
 }
@@ -30,15 +34,15 @@
 :local mihomoByName [/container find where name="foxos-mihomo"]
 :local mosdnsByName [/container find where name="foxos-mosdns"]
 :if ([:len $mihomo] != 1 || [:len $mosdns] != 1) do={ :error "Mihomo 与 MosDNS 容器必须各自唯一" }
-:if ([:len $mihomoByName] != 1 || [/container get $mihomoByName .id] != [/container get $mihomo .id] || [/container get $mihomo interface] != "veth-mihomo" || [/container get $mihomo envlists] != "" || [/container get $mihomo mountlists] != "foxos-mihomo-runtime" || [/container get $mihomo root-dir] != ($storageRoot . "/containers/mihomo") || ([/container get $mihomo start-on-boot] != false && [/container get $mihomo start-on-boot] != "no") || ([/container get $mihomo logging] != true && [/container get $mihomo logging] != "yes")) do={
+:if ([:len $mihomoByName] != 1 || $mihomoByName != $mihomo || [/container get $mihomo interface] != "veth-mihomo" || [/container get $mihomo envlists] != "" || [/container get $mihomo mountlists] != "foxos-mihomo-runtime" || [$FoxOSContainerRoot $mihomo] != ($storageRoot . "/containers/mihomo") || ([/container get $mihomo start-on-boot] != false && [/container get $mihomo start-on-boot] != "no") || ([/container get $mihomo logging] != true && [/container get $mihomo logging] != "yes")) do={
   :error "Mihomo 容器完整身份契约不匹配，拒绝启动"
 }
-:if ([:len $mosdnsByName] != 1 || [/container get $mosdnsByName .id] != [/container get $mosdns .id] || [/container get $mosdns interface] != "veth-mosdns" || [/container get $mosdns envlists] != "foxos-mosdns-env" || [/container get $mosdns mountlists] != "foxos-mosdns-runtime" || [/container get $mosdns root-dir] != ($storageRoot . "/containers/mosdns") || ([/container get $mosdns start-on-boot] != false && [/container get $mosdns start-on-boot] != "no") || ([/container get $mosdns logging] != true && [/container get $mosdns logging] != "yes")) do={
+:if ([:len $mosdnsByName] != 1 || $mosdnsByName != $mosdns || [/container get $mosdns interface] != "veth-mosdns" || [/container get $mosdns envlists] != "foxos-mosdns-env" || [/container get $mosdns mountlists] != "foxos-mosdns-runtime" || [$FoxOSContainerRoot $mosdns] != ($storageRoot . "/containers/mosdns") || ([/container get $mosdns start-on-boot] != false && [/container get $mosdns start-on-boot] != "no") || ([/container get $mosdns logging] != true && [/container get $mosdns logging] != "yes")) do={
   :error "MosDNS 容器完整身份契约不匹配，拒绝启动"
 }
 :local runningAdminSlots 0
 :foreach adminSlot in=[/container find where interface="veth-foxos"] do={
-  :if ([/container get $adminSlot status] = "running") do={ :set runningAdminSlots ($runningAdminSlots + 1) }
+  :if ([$FoxOSContainerState $adminSlot] = "running") do={ :set runningAdminSlots ($runningAdminSlots + 1) }
 }
 :if ($runningAdminSlots > 1) do={ :error "共享 veth/SQLite 的管理容器同时运行，拒绝继续切换或启动" }
 :local sharedMountDefinitions {"foxos-mihomo-config|mihomo-config|/data/mihomo";"foxos-data|foxos-data|/data";"foxos-backups|foxos-backups|/backups"}
@@ -92,7 +96,7 @@
 :local active [/container find where comment="foxos:active"]
 :if ([:len $mihomo] != 1 || [:len $mosdns] != 1 || [:len $active] != 1) do={ :error "三个 FoxOS 容器必须各自唯一" }
 :local activeName [/container get $active name]
-:if ($activeName !~ "^foxos-[A-Za-z0-9._-]+$" || [:len [/container find where name=$activeName]] != 1 || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [/container get $active mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [/container get $active root-dir] != ($storageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != true && [/container get $active logging] != "yes")) do={
+:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [:len [/container find where name=$activeName]] != 1 || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [/container get $active mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $active] != ($storageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={
   :error "FoxOS active 容器完整身份契约不匹配，拒绝启动"
 }
 
@@ -102,7 +106,7 @@
 :local committedRunningAdminCount 0
 :local committedRunningAdminID ""
 :foreach adminSlot in=[/container find where interface="veth-foxos"] do={
-  :if ([/container get $adminSlot status] = "running") do={
+  :if ([$FoxOSContainerState $adminSlot] = "running") do={
     :set committedRunningAdminCount ($committedRunningAdminCount + 1)
     :set committedRunningAdminID $adminSlot
   }
@@ -115,14 +119,14 @@
   } do={ :put ("未提交运行槽位 stop 命令失败，继续回读: " . $staleAdminStopError) }
   :local staleAdminStopped false
   :for attempt from=1 to=12 do={
-    :if ([/container get $committedRunningAdminID status] = "stopped") do={ :set staleAdminStopped true; :break }
+    :if ([$FoxOSContainerState $committedRunningAdminID] = "stopped") do={ :set staleAdminStopped true; :break }
     :delay 5s
   }
   :if ($staleAdminStopped = false) do={ :error "未提交运行槽位在 60 秒内未停稳；为保护共享 veth/SQLite，未启动 committed active" }
 }
 
 :foreach containerID in={$mihomo;$mosdns;$active} do={
-  :local currentStatus [/container get $containerID status]
+  :local currentStatus [$FoxOSContainerState $containerID]
   :if ($currentStatus != "running" && $currentStatus != "stopped") do={
     /container/print
     :error ("镜像仍在解压或容器状态异常: " . [/container get $containerID name] . " status=" . $currentStatus)
@@ -134,7 +138,7 @@
 :local startedMosDNS false
 :local startedFoxOS false
 
-:if ([/container get $mihomo status] = "stopped") do={
+:if ([$FoxOSContainerState $mihomo] = "stopped") do={
   :put "FoxOS: 启动 Mihomo..."
   :set startedMihomo true
   :local mihomoStartOK false
@@ -145,12 +149,12 @@
   :if ($mihomoStartOK = false) do={
     :local compensationFailed false
     :foreach containerID in={$mihomo} do={
-      :if ([/container get $containerID status] != "stopped") do={
+      :if ([$FoxOSContainerState $containerID] != "stopped") do={
         :onerror stopError in={ /container/stop $containerID } do={ :put ("补偿 stop 命令失败，继续回读: " . $stopError) }
       }
       :local stopped false
       :for attempt from=1 to=12 do={
-        :if ([/container get $containerID status] = "stopped") do={ :set stopped true; :break }
+        :if ([$FoxOSContainerState $containerID] = "stopped") do={ :set stopped true; :break }
         :delay 5s
       }
       :if ($stopped = false) do={ :set compensationFailed true }
@@ -161,16 +165,16 @@
   :local mihomoRunning false
   :for attempt from=1 to=12 do={
     :delay 5s
-    :if ([/container get $mihomo status] = "running") do={ :set mihomoRunning true; :break }
+    :if ([$FoxOSContainerState $mihomo] = "running") do={ :set mihomoRunning true; :break }
   }
   :if ($mihomoRunning = false) do={
     :local compensationFailed false
-    :if ([/container get $mihomo status] != "stopped") do={
+    :if ([$FoxOSContainerState $mihomo] != "stopped") do={
       :onerror stopError in={ /container/stop $mihomo } do={ :put ("Mihomo 补偿 stop 命令失败，继续回读: " . $stopError) }
     }
     :local mihomoStopped false
     :for attempt from=1 to=12 do={
-      :if ([/container get $mihomo status] = "stopped") do={ :set mihomoStopped true; :break }
+      :if ([$FoxOSContainerState $mihomo] = "stopped") do={ :set mihomoStopped true; :break }
       :delay 5s
     }
     :if ($mihomoStopped = false) do={ :set compensationFailed true }
@@ -179,7 +183,7 @@
   }
 }
 
-:if ([/container get $mosdns status] = "stopped") do={
+:if ([$FoxOSContainerState $mosdns] = "stopped") do={
   :put "FoxOS: 启动 MosDNS..."
   :set startedMosDNS true
   :local mosdnsStartOK false
@@ -194,12 +198,12 @@
       :if ($containerID = $mosdns && $startedMosDNS) do={ :set shouldStop true }
       :if ($containerID = $mihomo && $startedMihomo) do={ :set shouldStop true }
       :if ($shouldStop) do={
-        :if ([/container get $containerID status] != "stopped") do={
+        :if ([$FoxOSContainerState $containerID] != "stopped") do={
           :onerror stopError in={ /container/stop $containerID } do={ :put ("补偿 stop 命令失败，继续回读: " . $stopError) }
         }
         :local stopped false
         :for attempt from=1 to=12 do={
-          :if ([/container get $containerID status] = "stopped") do={ :set stopped true; :break }
+          :if ([$FoxOSContainerState $containerID] = "stopped") do={ :set stopped true; :break }
           :delay 5s
         }
         :if ($stopped = false) do={ :set compensationFailed true }
@@ -211,7 +215,7 @@
   :local mosdnsRunning false
   :for attempt from=1 to=12 do={
     :delay 5s
-    :if ([/container get $mosdns status] = "running") do={ :set mosdnsRunning true; :break }
+    :if ([$FoxOSContainerState $mosdns] = "running") do={ :set mosdnsRunning true; :break }
   }
   :if ($mosdnsRunning = false) do={
     :local compensationFailed false
@@ -220,12 +224,12 @@
       :if ($containerID = $mosdns && $startedMosDNS) do={ :set shouldStop true }
       :if ($containerID = $mihomo && $startedMihomo) do={ :set shouldStop true }
       :if ($shouldStop) do={
-        :if ([/container get $containerID status] != "stopped") do={
+        :if ([$FoxOSContainerState $containerID] != "stopped") do={
           :onerror stopError in={ /container/stop $containerID } do={ :put ("补偿 stop 命令失败，继续回读: " . $stopError) }
         }
         :local stopped false
         :for attempt from=1 to=12 do={
-          :if ([/container get $containerID status] = "stopped") do={ :set stopped true; :break }
+          :if ([$FoxOSContainerState $containerID] = "stopped") do={ :set stopped true; :break }
           :delay 5s
         }
         :if ($stopped = false) do={ :set compensationFailed true }
@@ -236,7 +240,7 @@
   }
 }
 
-:if ([/container get $active status] = "stopped") do={
+:if ([$FoxOSContainerState $active] = "stopped") do={
   :put "FoxOS: 启动管理后台..."
   :set startedFoxOS true
   :local foxosStartOK false
@@ -252,12 +256,12 @@
       :if ($containerID = $mosdns && $startedMosDNS) do={ :set shouldStop true }
       :if ($containerID = $mihomo && $startedMihomo) do={ :set shouldStop true }
       :if ($shouldStop) do={
-        :if ([/container get $containerID status] != "stopped") do={
+        :if ([$FoxOSContainerState $containerID] != "stopped") do={
           :onerror stopError in={ /container/stop $containerID } do={ :put ("补偿 stop 命令失败，继续回读: " . $stopError) }
         }
         :local stopped false
         :for attempt from=1 to=12 do={
-          :if ([/container get $containerID status] = "stopped") do={ :set stopped true; :break }
+          :if ([$FoxOSContainerState $containerID] = "stopped") do={ :set stopped true; :break }
           :delay 5s
         }
         :if ($stopped = false) do={ :set compensationFailed true }
@@ -269,7 +273,7 @@
   :local foxosRunning false
   :for attempt from=1 to=18 do={
     :delay 5s
-    :if ([/container get $active status] = "running") do={ :set foxosRunning true; :break }
+    :if ([$FoxOSContainerState $active] = "running") do={ :set foxosRunning true; :break }
   }
   :if ($foxosRunning = false) do={
     :local compensationFailed false
@@ -279,12 +283,12 @@
       :if ($containerID = $mosdns && $startedMosDNS) do={ :set shouldStop true }
       :if ($containerID = $mihomo && $startedMihomo) do={ :set shouldStop true }
       :if ($shouldStop) do={
-        :if ([/container get $containerID status] != "stopped") do={
+        :if ([$FoxOSContainerState $containerID] != "stopped") do={
           :onerror stopError in={ /container/stop $containerID } do={ :put ("补偿 stop 命令失败，继续回读: " . $stopError) }
         }
         :local stopped false
         :for attempt from=1 to=12 do={
-          :if ([/container get $containerID status] = "stopped") do={ :set stopped true; :break }
+          :if ([$FoxOSContainerState $containerID] = "stopped") do={ :set stopped true; :break }
           :delay 5s
         }
         :if ($stopped = false) do={ :set compensationFailed true }
@@ -296,7 +300,7 @@
 }
 
 :foreach containerID in={$mihomo;$mosdns;$active} do={
-  :if ([/container get $containerID status] != "running") do={
+  :if ([$FoxOSContainerState $containerID] != "running") do={
     :local compensationFailed false
     :foreach startedID in={$active;$mosdns;$mihomo} do={
       :local shouldStop false
@@ -304,12 +308,12 @@
       :if ($startedID = $mosdns && $startedMosDNS) do={ :set shouldStop true }
       :if ($startedID = $mihomo && $startedMihomo) do={ :set shouldStop true }
       :if ($shouldStop) do={
-        :if ([/container get $startedID status] != "stopped") do={
+        :if ([$FoxOSContainerState $startedID] != "stopped") do={
           :onerror stopError in={ /container/stop $startedID } do={ :put ("联合回读补偿 stop 命令失败，继续回读: " . $stopError) }
         }
         :local stopped false
         :for attempt from=1 to=12 do={
-          :if ([/container get $startedID status] = "stopped") do={ :set stopped true; :break }
+          :if ([$FoxOSContainerState $startedID] = "stopped") do={ :set stopped true; :break }
           :delay 5s
         }
         :if ($stopped = false) do={ :set compensationFailed true }
@@ -323,7 +327,7 @@
 :local finalRunningAdminCount 0
 :local finalRunningAdminID ""
 :foreach adminSlot in=[/container find where interface="veth-foxos"] do={
-  :if ([/container get $adminSlot status] = "running") do={
+  :if ([$FoxOSContainerState $adminSlot] = "running") do={
     :set finalRunningAdminCount ($finalRunningAdminCount + 1)
     :set finalRunningAdminID $adminSlot
   }

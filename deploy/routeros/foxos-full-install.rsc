@@ -1,8 +1,8 @@
-# FoxOS 全栈安装脚本（RouterOS x86_64 / architecture-name=x86）
+# FoxOS 全栈安装脚本（RouterOS x86/x86_64 -> Linux amd64）
 # 目标拓扑只从不可变 loader 已验证并加载的 site-config.rsc 读取。
 # 只管理带 foxos: 所有权标识的资源，不修改 DNS、DHCP、默认路由、NAT、Mangle 或现有防火墙。
 # 执行前必须先运行 preflight.rsc 和 foxos-plan.rsc，完成 RouterOS export/backup，并由操作者明确确认计划。
-# 目标 RouterOS/container package 版本为 7.21+，x86_64 CPU 的 architecture-name 是 x86。
+# 目标 RouterOS/container package 版本为 7.21+；官方 x86 通常对应 Linux amd64。
 
 :global FoxOSSiteManifestVersion
 :global FoxOSSiteManagementBridge
@@ -15,16 +15,22 @@
 :global FoxOSSiteFoxOSAddress
 :global FoxOSSitePublicHostname
 :global FoxOSSiteSubscriptionPrivateCIDRs
+:global FoxOSContainerCompatVersion
+:global FoxOSContainerState
+:global FoxOSContainerRoot
 :global FoxOSInstallInspectVerbose false
 :global FoxOSInstallCurrentDigest
 :global FoxOSInstallApprovedDigest
 :global FoxOSInstallConfirmation
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
+:if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
+:local storageMode "disk"
+:if ($storageRoot = "foxos") do={ :set storageMode "internal" }
 :local releaseID "__FOXOS_RELEASE_ID__"
-:if ($releaseID ~ "^__.*__$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || $releaseID !~ "^[A-Za-z0-9._-]+$") do={ :error "foxos-full-install.rsc 未绑定有效 release ID；只能使用发布包内脚本" }
+:if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "foxos-full-install.rsc 未绑定有效 release ID；只能使用发布包内脚本" }
 :local foxosImagePath ($storageRoot . "/foxos-upgrade-" . $releaseID . "/foxos-amd64.tar")
 :local siteNetwork $FoxOSSiteNetwork
 :local prefixLength $FoxOSSitePrefixLength
@@ -39,6 +45,8 @@
 :local publicHostname $FoxOSSitePublicHostname
 :local subscriptionPrivateCIDRs $FoxOSSiteSubscriptionPrivateCIDRs
 :local architecture [/system/resource get architecture-name]
+:local imageArchitecture ""
+:if ($architecture = "x86" || $architecture = "x86_64") do={ :set imageArchitecture "amd64" }
 :local routerVersion [/system/resource get version]
 :local routerVersionBase $routerVersion
 :local routerVersionSpace [:find $routerVersionBase " "]
@@ -60,11 +68,13 @@
 :put "Create or reuse only: foxos-rest, foxos-service, foxos-env, foxos-* mounts, foxos:* veth/bridge ports/containers."
 :put ("Create or reuse addresses: " . $mihomoAddress . ", " . $mosdnsAddress . ", " . $foxosAddress . " on " . $managementBridge . ".")
 :put "No DNS, DHCP, default route, NAT, Mangle, or existing firewall changes."
+:put ("Storage: mode=" . $storageMode . " root=" . $storageRoot . ".")
 :put ("Rollback: stop FoxOS containers, restore RouterOS backup, and keep " . $storageRoot . "/foxos-data plus old image tar files.")
 
-:if ($architecture != "x86") do={
-  :error ("此 amd64 安装包仅支持 architecture-name=x86，当前为 " . $architecture)
+:if ($imageArchitecture != "amd64") do={
+  :error ("此 amd64 安装包仅支持 RouterOS x86 或 x86_64，当前为 " . $architecture)
 }
+:if ($architecture = "x86_64") do={ :put "WARNING architecture-name=x86_64 是非标准 RouterOS 环境；本次兼容仅代表允许进入目标机验收" }
 :local firstVersionDot [:find $routerVersionBase "."]
 :if ([:typeof $firstVersionDot] = "nil") do={ :error ("无法解析 RouterOS 版本: " . $routerVersion) }
 :local versionMajor [:tonum [:pick $routerVersionBase 0 $firstVersionDot]]
@@ -77,13 +87,18 @@
 :if ([:len [/interface/bridge find where name=$managementBridge]] != 1) do={
   :error ("未找到唯一管理桥: " . $managementBridge)
 }
-:local diskID [/disk find where slot=$storageRoot]
-:if ([:len $diskID] != 1) do={
-  :error ("未找到持久化磁盘: " . $storageRoot)
+:local storageFree 0
+:if ($storageMode = "internal") do={
+  :set storageFree [/system/resource get free-hdd-space]
+} else={
+  :local diskID [/disk find where slot=$storageRoot]
+  :if ([:len $diskID] != 1) do={
+    :error ("未找到唯一持久化磁盘: " . $storageRoot)
+  }
+  :set storageFree [/disk get $diskID free]
 }
-:local diskFree [/disk get $diskID free]
-:if ($diskFree < 536870912) do={
-  :error ($storageRoot . " 可用空间不足 512 MiB: " . $diskFree)
+:if ($storageFree < 536870912) do={
+  :error ($storageRoot . " 可用空间不足 512 MiB: " . $storageFree)
 }
 :local packageID [/system/package find where name="container"]
 :if ([:len $packageID] != 1) do={
@@ -383,7 +398,7 @@
 }
 :set mihomoContainer [/container find where comment="foxos:mihomo"]
 :set mihomoByName [/container find where name="foxos-mihomo"]
-:if ([:len $mihomoContainer] != 1 || [:len $mihomoByName] != 1 || [/container get $mihomoContainer .id] != [/container get $mihomoByName .id] || [/container get $mihomoContainer interface] != "veth-mihomo" || [/container get $mihomoContainer envlists] != "" || [/container get $mihomoContainer mountlists] != "foxos-mihomo-runtime" || [/container get $mihomoContainer root-dir] != ($storageRoot . "/containers/mihomo") || ([/container get $mihomoContainer start-on-boot] != false && [/container get $mihomoContainer start-on-boot] != "no") || ([/container get $mihomoContainer logging] != true && [/container get $mihomoContainer logging] != "yes")) do={
+:if ([:len $mihomoContainer] != 1 || [:len $mihomoByName] != 1 || $mihomoContainer != $mihomoByName || [/container get $mihomoContainer interface] != "veth-mihomo" || [/container get $mihomoContainer envlists] != "" || [/container get $mihomoContainer mountlists] != "foxos-mihomo-runtime" || [$FoxOSContainerRoot $mihomoContainer] != ($storageRoot . "/containers/mihomo") || ([/container get $mihomoContainer start-on-boot] != false && [/container get $mihomoContainer start-on-boot] != "no") || ([/container get $mihomoContainer logging] != true && [/container get $mihomoContainer logging] != "yes")) do={
   :error "Mihomo 容器身份契约不匹配"
 }
 
@@ -395,7 +410,7 @@
 }
 :set mosdnsContainer [/container find where comment="foxos:mosdns"]
 :set mosdnsByName [/container find where name="foxos-mosdns"]
-:if ([:len $mosdnsContainer] != 1 || [:len $mosdnsByName] != 1 || [/container get $mosdnsContainer .id] != [/container get $mosdnsByName .id] || [/container get $mosdnsContainer interface] != "veth-mosdns" || [/container get $mosdnsContainer envlists] != "foxos-mosdns-env" || [/container get $mosdnsContainer mountlists] != "foxos-mosdns-runtime" || [/container get $mosdnsContainer root-dir] != ($storageRoot . "/containers/mosdns") || ([/container get $mosdnsContainer start-on-boot] != false && [/container get $mosdnsContainer start-on-boot] != "no") || ([/container get $mosdnsContainer logging] != true && [/container get $mosdnsContainer logging] != "yes")) do={
+:if ([:len $mosdnsContainer] != 1 || [:len $mosdnsByName] != 1 || $mosdnsContainer != $mosdnsByName || [/container get $mosdnsContainer interface] != "veth-mosdns" || [/container get $mosdnsContainer envlists] != "foxos-mosdns-env" || [/container get $mosdnsContainer mountlists] != "foxos-mosdns-runtime" || [$FoxOSContainerRoot $mosdnsContainer] != ($storageRoot . "/containers/mosdns") || ([/container get $mosdnsContainer start-on-boot] != false && [/container get $mosdnsContainer start-on-boot] != "no") || ([/container get $mosdnsContainer logging] != true && [/container get $mosdnsContainer logging] != "yes")) do={
   :error "MosDNS 容器身份契约不匹配"
 }
 
@@ -403,12 +418,12 @@
 :local foxosByName [/container find where name="foxos-initial"]
 :if ([:len $foxosContainer] = 0) do={
   :if ([:len $foxosByName] > 0) do={ :error "foxos-initial 同名容器没有 FoxOS 所有权标记" }
-  /container/add name=foxos-initial file=$foxosImagePath interface=veth-foxos root-dir=($storageRoot . "/containers/foxos-initial") envlists=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=yes start-on-boot=no comment="foxos:active"
+  /container/add name=foxos-initial file=$foxosImagePath interface=veth-foxos root-dir=($storageRoot . "/containers/foxos-initial") envlists=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=no start-on-boot=no comment="foxos:active"
 }
 :set foxosContainer [/container find where comment="foxos:active"]
 :local activeName ""
 :if ([:len $foxosContainer] = 1) do={ :set activeName [/container get $foxosContainer name] }
-:if ([:len $foxosContainer] != 1 || $activeName !~ "^foxos-[A-Za-z0-9._-]+$" || [/container get $foxosContainer interface] != "veth-foxos" || [/container get $foxosContainer envlists] != "foxos-env" || [/container get $foxosContainer mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [/container get $foxosContainer root-dir] != ($storageRoot . "/containers/" . $activeName) || ([/container get $foxosContainer start-on-boot] != false && [/container get $foxosContainer start-on-boot] != "no") || ([/container get $foxosContainer logging] != true && [/container get $foxosContainer logging] != "yes")) do={
+:if ([:len $foxosContainer] != 1 || !($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $foxosContainer interface] != "veth-foxos" || [/container get $foxosContainer envlists] != "foxos-env" || [/container get $foxosContainer mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $foxosContainer] != ($storageRoot . "/containers/" . $activeName) || ([/container get $foxosContainer start-on-boot] != false && [/container get $foxosContainer start-on-boot] != "no") || ([/container get $foxosContainer logging] != false && [/container get $foxosContainer logging] != "no")) do={
   :error "FoxOS active 容器身份契约不匹配"
 }
 

@@ -9,6 +9,27 @@
 :global FoxOSCHREnvlistsSmokeImagePath
 :global FoxOSCHREnvlistsSmokeStorageRoot
 
+:local containerState do={
+  :local container $1
+  :local running [/container get $container running]
+  :local stopped [/container get $container stopped]
+  :local isRunning ($running = true || $running = "yes")
+  :local isStopped ($stopped = true || $stopped = "yes")
+  :if ($isRunning && $isStopped) do={ :return "invalid" }
+  :if ($isRunning) do={ :return "running" }
+  :if ($isStopped) do={ :return "stopped" }
+  :return "transitional"
+}
+:local containerRoot do={
+  :local container $1
+  :local rootDirectory [/container get $container root-dir]
+  :if ([:typeof $rootDirectory] != "str") do={ :return "" }
+  :if ([:len $rootDirectory] > 0 && [:pick $rootDirectory 0 1] = "/") do={
+    :return [:pick $rootDirectory 1 [:len $rootDirectory]]
+  }
+  :return $rootDirectory
+}
+
 :put "=== FoxOS CHR envlists destructive smoke test ==="
 :put "WARNING disposable CHR only; abort on every production RouterOS device."
 :put "=== RouterOS evidence: system resource ==="
@@ -20,6 +41,8 @@
 
 :local routerVersion [/system/resource get version]
 :local architecture [/system/resource get architecture-name]
+:local imageArchitecture ""
+:if ($architecture = "x86" || $architecture = "x86_64") do={ :set imageArchitecture "amd64" }
 :local boardName [/system/resource get board-name]
 :local versionBase $routerVersion
 :local versionSpace [:find $versionBase " "]
@@ -29,7 +52,8 @@
 :put ("EVIDENCE board-name=" . $boardName)
 
 :if ($boardName != "CHR") do={ :error "REFUSED: board-name is not CHR; production hardware is forbidden" }
-:if ($architecture != "x86") do={ :error ("REFUSED: this FoxOS amd64 gate requires CHR architecture-name=x86, got " . $architecture) }
+:if ($imageArchitecture != "amd64") do={ :error ("REFUSED: this FoxOS amd64 gate requires CHR architecture-name=x86 or x86_64, got " . $architecture) }
+:if ($architecture = "x86_64") do={ :put "WARNING architecture-name=x86_64 is non-standard for CHR; retain this as target-specific compatibility evidence only" }
 
 :local firstVersionDot [:find $versionBase "."]
 :if ([:typeof $firstVersionDot] = "nil") do={ :error ("cannot parse RouterOS version: " . $routerVersion) }
@@ -63,13 +87,14 @@
 }
 :local imagePath $FoxOSCHREnvlistsSmokeImagePath
 :local storageRoot $FoxOSCHREnvlistsSmokeStorageRoot
-:if ([:typeof $imagePath] != "str" || [:len $imagePath] < 3 || [:len $imagePath] > 220 || $imagePath !~ "^[A-Za-z0-9][A-Za-z0-9._/-]*$" || [:typeof [:find $imagePath ".."]] != "nil") do={
+:local parentPathMarker ("." . ".")
+:if ([:typeof $imagePath] != "str" || [:len $imagePath] < 3 || [:len $imagePath] > 220 || !($imagePath ~ "^[A-Za-z0-9][A-Za-z0-9._/-]*\$") || [:typeof [:find $imagePath $parentPathMarker]] != "nil") do={
   :error "FoxOSCHREnvlistsSmokeImagePath must be a bounded relative RouterOS file path"
 }
-:if ([:typeof $storageRoot] != "str" || [:len $storageRoot] < 1 || [:len $storageRoot] > 63 || $storageRoot !~ "^[A-Za-z0-9][A-Za-z0-9_-]*$") do={
+:if ([:typeof $storageRoot] != "str" || [:len $storageRoot] < 1 || [:len $storageRoot] > 63 || !($storageRoot ~ "^[A-Za-z0-9][A-Za-z0-9_-]*\$")) do={
   :error "FoxOSCHREnvlistsSmokeStorageRoot must be one mounted slot name"
 }
-:if ($imagePath !~ ("^" . $storageRoot . "/")) do={
+:if (!($imagePath ~ ("^" . $storageRoot . "/"))) do={
   :error "smoke image must be stored below FoxOSCHREnvlistsSmokeStorageRoot"
 }
 :local imageFile [/file find where name=$imagePath]
@@ -93,8 +118,8 @@
 :local rootDirectory ($storageRoot . "/chr-envlists-smoke-" . $runID)
 :local vethAddress "192.0.2.2/30"
 :local vethGateway "192.0.2.1"
-:local rootPattern ("^" . $rootDirectory . "($|/)")
-:if ($owner ~ "^foxos:" || $envListName ~ "^foxos-" || $vethName ~ "^veth-(foxos|mihomo|mosdns)$" || $containerName ~ "^foxos-") do={
+:local rootPattern ("^" . $rootDirectory . "(\$|/)")
+:if ($owner ~ "^foxos:" || $envListName ~ "^foxos-" || $vethName ~ "^veth-(foxos|mihomo|mosdns)\$" || $containerName ~ "^foxos-") do={
   :error "internal isolation guard rejected a FoxOS production namespace"
 }
 :if ([:len [/container find where name=$containerName]] > 0 || [:len [/container find where comment=$owner]] > 0 || [:len [/container/envs find where list=$envListName]] > 0 || [:len [/interface/veth find where name=$vethName]] > 0 || [:len [/file find where name~$rootPattern]] > 0) do={
@@ -135,7 +160,7 @@
   :for discoverAttempt from=1 to=10 do={
     :local byName [/container find where name=$containerName]
     :local byOwner [/container find where comment=$owner]
-    :if ([:len $byName] = 1 && [:len $byOwner] = 1 && [/container get $byName .id] = [/container get $byOwner .id]) do={
+    :if ([:len $byName] = 1 && [:len $byOwner] = 1 && $byName = $byOwner) do={
       :set container $byName
       :set containerFound true
       :break
@@ -145,21 +170,21 @@
   :if ($containerFound = false) do={ :error "container add did not create one identity-bound object" }
   :local containerEnvLists [/container get $container envlists]
   :local containerInterface [/container get $container interface]
-  :local containerRoot [/container get $container root-dir]
+  :local containerRootReadback [$containerRoot $container]
   :local containerStartOnBoot [/container get $container start-on-boot]
   :local containerLogging [/container get $container logging]
-  :put ("READBACK container-id=" . [/container get $container .id] . " name=" . [/container get $container name] . " envlists=" . $containerEnvLists . " interface=" . $containerInterface . " root-dir=" . $containerRoot . " start-on-boot=" . $containerStartOnBoot . " logging=" . $containerLogging)
-  :if ($containerEnvLists != $envListName || $containerInterface != $vethName || $containerRoot != $rootDirectory || ($containerStartOnBoot != false && $containerStartOnBoot != "no") || ($containerLogging != false && $containerLogging != "no")) do={
+  :put ("READBACK container-id=" . [:pick $container 0] . " name=" . [/container get $container name] . " envlists=" . $containerEnvLists . " interface=" . $containerInterface . " root-dir=" . $containerRootReadback . " start-on-boot=" . $containerStartOnBoot . " logging=" . $containerLogging)
+  :if ($containerEnvLists != $envListName || $containerInterface != $vethName || $containerRootReadback != $rootDirectory || ($containerStartOnBoot != false && $containerStartOnBoot != "no") || ($containerLogging != false && $containerLogging != "no")) do={
     :error "container add/get identity or envlists readback mismatch"
   }
 
   :local importedStopped false
   :for importAttempt from=1 to=120 do={
-    :local currentStatus [/container get $container status]
+    :local currentStatus [$containerState $container]
     :if ($currentStatus = "stopped") do={ :set importedStopped true; :break }
     :delay 2s
   }
-  :if ($importedStopped = false) do={ :error ("container image did not reach status=stopped; last-status=" . [/container get $container status]) }
+  :if ($importedStopped = false) do={ :error ("container image did not reach stopped=true; last-state=" . [$containerState $container]) }
 
   :local stopReturned true
   :onerror stopError in={ /container/stop $container } do={
@@ -168,11 +193,11 @@
   }
   :local stopReadback false
   :for stopAttempt from=1 to=12 do={
-    :if ([/container get $container status] = "stopped") do={ :set stopReadback true; :break }
+    :if ([$containerState $container] = "stopped") do={ :set stopReadback true; :break }
     :delay 5s
   }
-  :if ($stopReadback = false) do={ :error "container stop did not reach status=stopped within 60 seconds" }
-  :put ("READBACK stop-command-returned=" . $stopReturned . " status=" . [/container get $container status])
+  :if ($stopReadback = false) do={ :error "container stop did not reach stopped=true within 60 seconds" }
+  :put ("READBACK stop-command-returned=" . $stopReturned . " state=" . [$containerState $container])
   :set operationComplete true
 } do={
   :set primaryFailure ("operation failed: " . $smokeError)
@@ -187,15 +212,15 @@
   :if ([:len $cleanupByName] = 0 && [:len $cleanupByOwner] = 0) do={
     :set containerGone true
   } else={
-    :if ([:len $cleanupByName] != 1 || [:len $cleanupByOwner] != 1 || [/container get $cleanupByName .id] != [/container get $cleanupByOwner .id] || [/container get $cleanupByName interface] != $vethName || [/container get $cleanupByName root-dir] != $rootDirectory || ([/container get $cleanupByName start-on-boot] != false && [/container get $cleanupByName start-on-boot] != "no")) do={
+    :if ([:len $cleanupByName] != 1 || [:len $cleanupByOwner] != 1 || $cleanupByName != $cleanupByOwner || [/container get $cleanupByName interface] != $vethName || [$containerRoot $cleanupByName] != $rootDirectory || ([/container get $cleanupByName start-on-boot] != false && [/container get $cleanupByName start-on-boot] != "no")) do={
       :error "temporary container identity changed; refusing unbound cleanup"
     }
     :local cleanupContainer $cleanupByName
-    :if ([/container get $cleanupContainer status] != "stopped") do={
+    :if ([$containerState $cleanupContainer] != "stopped") do={
       :onerror cleanupStopError in={ /container/stop $cleanupContainer } do={ :put ("WARN cleanup stop command failed; status readback decides: " . $cleanupStopError) }
       :local cleanupStopped false
       :for cleanupStopAttempt from=1 to=12 do={
-        :if ([/container get $cleanupContainer status] = "stopped") do={ :set cleanupStopped true; :break }
+        :if ([$containerState $cleanupContainer] = "stopped") do={ :set cleanupStopped true; :break }
         :delay 5s
       }
       :if ($cleanupStopped = false) do={ :error "temporary container did not stop within 60 seconds during cleanup" }

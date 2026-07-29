@@ -392,23 +392,56 @@ quick_install_preupload_safety_contract() {
     && ! rg -Fq '"./${backup_id}.' "$guide"
 }
 
+amd64_architecture_contract() {
+  local script=$1
+  local invariant
+  for invariant in \
+    ':local architecture ' \
+    ':local imageArchitecture ""' \
+    ':if ($architecture = "x86" || $architecture = "x86_64") do={ :set imageArchitecture "amd64" }' \
+    '$imageArchitecture != "amd64"'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+  ! rg -n 'architecture[^#]*!=[^#]*"x86"' "$script" >/dev/null
+}
+
+reserved_internal_storage_contract() {
+  local script=$1
+  local invariant
+  for invariant in \
+    ':local storageMode "disk"' \
+    ':if ($storageRoot = "foxos") do={ :set storageMode "internal" }' \
+    '/system/resource get free-hdd-space' \
+    '/disk find where slot=$storageRoot'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+}
+
 chr_envlists_smoke_contract() {
   local script=$1
   local confirmation_line first_write residual_line failure_line pass_line
   local invariant
   for invariant in \
     ':if ($boardName != "CHR") do={' \
-    ':if ($architecture != "x86") do={' \
+    ':if ($imageArchitecture != "amd64") do={' \
     ':if ($containerPackageVersion != $versionBase) do={' \
     ':if ($FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR") do={' \
+    ':local parentPathMarker ("." . ".")' \
+    ':local rootPattern ("^" . $rootDirectory . "(\$|/)")' \
+    '[:find $imagePath $parentPathMarker]' \
     '/container/envs/add list=$envListName key=$envKey value=$runID' \
     '/container/envs get $envItem value] != $runID' \
     '/container/add name=$containerName file=$imagePath interface=$vethName root-dir=$rootDirectory envlists=$envListName logging=no start-on-boot=no comment=$owner' \
+    ':local containerState do={' \
+    ':local running [/container get $container running]' \
+    ':local stopped [/container get $container stopped]' \
+    ':local containerRoot do={' \
     ':local containerEnvLists [/container get $container envlists]' \
     '$containerEnvLists != $envListName' \
-    '[/container get $cleanupByName .id] != [/container get $cleanupByOwner .id]' \
+    '$cleanupByName != $cleanupByOwner' \
     '[/container get $cleanupByName interface] != $vethName' \
-    '[/container get $cleanupByName root-dir] != $rootDirectory' \
+    '[$containerRoot $cleanupByName] != $rootDirectory' \
+    '[$containerState $cleanupContainer] != "stopped"' \
     '[/interface/veth get $cleanupVeth comment] != $owner' \
     '[/container/envs get $cleanupEnvItems value] != $runID' \
     '/container/remove $cleanupContainer' \
@@ -442,6 +475,10 @@ foxos_doctor_contract() {
     'PASS|container-package|' \
     'PASS|device-mode-container|' \
     'PASS|device-mode-scheduler|' \
+    'PASS|footprint-veth-ports|state=' \
+    'reusable-veth-count=' \
+    '[/interface/veth get $expectedVeth gateway] != $routerAddress' \
+    '$namedVethCount != $reusableVethCount' \
     'CONFLICT|footprint-containers|' \
     'CONFLICT|footprint-env-lists|' \
     'CONFLICT|footprint-files|' \
@@ -524,12 +561,12 @@ upgrade_promote_api_contract() {
         index($0, "[:len $finalRollbackOwner] != 1") &&
         index($0, "$finalActiveOwner != $pending") &&
         index($0, "$finalRollbackOwner != $active") &&
-        index($0, "[/container get $finalActiveOwner status] != \"running\"") &&
+        index($0, "[$FoxOSContainerState $finalActiveOwner] != \"running\"") &&
         index($0, "[/container get $finalActiveOwner name] != $pendingName") &&
-        index($0, "[/container get $finalActiveOwner root-dir] != $pendingRoot") &&
-        index($0, "[/container get $finalRollbackOwner status] != \"stopped\"") &&
+        index($0, "[$FoxOSContainerRoot $finalActiveOwner] != $pendingRoot") &&
+        index($0, "[$FoxOSContainerState $finalRollbackOwner] != \"stopped\"") &&
         index($0, "[/container get $finalRollbackOwner name] != $rollbackName") &&
-        index($0, "[/container get $finalRollbackOwner root-dir] != ($FoxOSSiteStorageRoot . \"/containers/\" . $rollbackName)") {
+        index($0, "[$FoxOSContainerRoot $finalRollbackOwner] != ($FoxOSSiteStorageRoot . \"/containers/\" . $rollbackName)") {
           owner_gate = 1
         }
       END { exit !(live && ready && page && read_only && combined && active_owner && rollback_owner && owner_gate) }
@@ -633,19 +670,55 @@ routeros_private_cidr_contract() {
 routeros_hostname_contract() {
   local script=$1
   rg -Fq ':local publicHostnameLength [:len $publicHostname]' "$script" \
+    && rg -Fq ':local publicHostnameDoubleDot ("." . ".")' "$script" \
     && rg -Fq '$publicHostnameLength < 3' "$script" \
     && rg -Fq '$publicHostnameLength > 253' "$script" \
-    && rg -Fq '$publicHostname !~ "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"' "$script" \
-    && rg -Fq '[:find $publicHostname ".."]' "$script" \
+    && rg -Fq '!($publicHostname ~ "^[a-z0-9][a-z0-9.-]*[a-z0-9]\$")' "$script" \
+    && rg -Fq '[:find $publicHostname $publicHostnameDoubleDot]' "$script" \
     && rg -Fq '[:find $publicHostname ".-"]' "$script" \
     && rg -Fq '[:find $publicHostname "-."]' "$script" \
-    && rg -Fq '$publicHostname !~ "\\.home\\.arpa$"' "$script" \
+    && rg -Fq '!($publicHostname ~ "\\.home\\.arpa\$")' "$script" \
     && rg -Fq ':local hostnameLabelEnd [:find $publicHostname "." $hostnameLabelCursor]' "$script" \
     && rg -Fq ':local hostnameLabel [:pick $publicHostname $hostnameLabelCursor $hostnameLabelEnd]' "$script" \
     && rg -Fq '$hostnameLabelLength < 1 || $hostnameLabelLength > 63' "$script" \
-    && rg -Fq '$hostnameLabel !~ "^[a-z0-9-]+$"' "$script" \
+    && rg -Fq '!($hostnameLabel ~ "^[a-z0-9-]+\$")' "$script" \
     && rg -Fq '[:pick $hostnameLabel 0 1] = "-"' "$script" \
     && rg -Fq '[:pick $hostnameLabel ($hostnameLabelLength - 1) $hostnameLabelLength] = "-"' "$script"
+}
+
+site_loader_cursor_contract() {
+  local script=$1
+  rg -U -Fq -- $'  :if ([:pick $configContents $cursor ($cursor + 1)] = "\\n") do={\n    :set cursor ($cursor + 1)\n    :continue\n  }\n  :local lineEnd [:find $configContents "\\n" $cursor]' "$script"
+}
+
+site_loader_manifest_model() {
+  local manifest=$1
+  python3 - "$manifest" <<'PY'
+from pathlib import Path
+import sys
+
+content = Path(sys.argv[1]).read_bytes()
+cursor = 0
+assignments = []
+
+while cursor < len(content):
+    # RouterOS :find excludes the supplied start offset. The loader guard must
+    # consume an LF at the cursor before looking for the next line ending.
+    if content[cursor : cursor + 1] == b"\n":
+        cursor += 1
+        continue
+    line_end = content.find(b"\n", cursor + 1)
+    if line_end < 0:
+        line_end = len(content)
+    line = content[cursor:line_end]
+    cursor = line_end + 1
+    if not line or line.startswith(b"#"):
+        continue
+    assignments.append(line)
+
+if len(assignments) != 11 or assignments[0] != b":global FoxOSSiteManifestVersion 2":
+    raise SystemExit(1)
+PY
 }
 
 container_envlist_contract() {
@@ -699,9 +772,65 @@ container_identity_fields_contract() {
   rg -q '/container get \$[A-Za-z][A-Za-z0-9]* interface\]' "$script" \
     && rg -q '/container get \$[A-Za-z][A-Za-z0-9]* envlists\]' "$script" \
     && rg -q '/container get \$[A-Za-z][A-Za-z0-9]* mountlists\]' "$script" \
-    && rg -q '/container get \$[A-Za-z][A-Za-z0-9]* root-dir\]' "$script" \
+    && rg -q '\[\$FoxOSContainerRoot \$[A-Za-z][A-Za-z0-9]*\]' "$script" \
     && rg -q '/container get \$[A-Za-z][A-Za-z0-9]* start-on-boot\]' "$script" \
     && rg -q '/container get \$[A-Za-z][A-Za-z0-9]* logging\]' "$script"
+}
+
+container_compatibility_contract() {
+  local script=$1
+  local invariant
+  for invariant in \
+    ':global FoxOSContainerCompatVersion 1' \
+    ':global FoxOSContainerState do={' \
+    ':local running [/container get $container running]' \
+    ':local stopped [/container get $container stopped]' \
+    ':if ($isRunning && $isStopped) do={ :return "invalid" }' \
+    ':if ($isRunning) do={ :return "running" }' \
+    ':if ($isStopped) do={ :return "stopped" }' \
+    ':return "transitional"' \
+    ':global FoxOSContainerRoot do={' \
+    ':local rootDirectory [/container get $container root-dir]' \
+    '[:pick $rootDirectory 0 1] = "/"' \
+    ':return [:pick $rootDirectory 1 [:len $rootDirectory]]'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+}
+
+container_compatibility_consumer_contract() {
+  local script=$1
+  rg -Fq ':global FoxOSContainerCompatVersion' "$script" \
+    && rg -Fq ':global FoxOSContainerState' "$script" \
+    && rg -Fq ':global FoxOSContainerRoot' "$script" \
+    && rg -Fq '$FoxOSContainerCompatVersion != 1' "$script" \
+    && rg -q '\[\$FoxOSContainer(State|Root) \$[A-Za-z][A-Za-z0-9]*\]' "$script"
+}
+
+admin_container_logging_contract() {
+  local root=$1
+  local script
+  if rg -q -g '*.rsc' '/container/add[^#]*interface=veth-foxos[^#]*logging=yes' "$root"; then
+    return 1
+  fi
+  for script in upgrade-inspect.rsc upgrade.rsc upgrade-promote-inspect.rsc upgrade-promote.rsc rollback-inspect.rsc rollback.rsc upgrade-cleanup-inspect.rsc; do
+    if rg -q 'logging=yes|logging\] != true|Logging != true' "$root/$script"; then
+      return 1
+    fi
+    rg -q 'logging=no|logging\] != false|Logging != false' "$root/$script" || return 1
+  done
+  rg -Fq 'interface=veth-foxos root-dir=($storageRoot . "/containers/foxos-initial") envlists=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=no' "$root/foxos-full-install.rsc" \
+    && rg -Fq '[/container get $foxosContainer logging] != false' "$root/foxos-full-install.rsc" \
+    && rg -Fq '[/container get $activeContainer logging] = false' "$root/foxos-install-inspect.rsc" \
+    && rg -Fq '[/container get $adminSlot logging] != false' "$root/foxos-start-all.rsc" \
+    && rg -Fq '[/container get $active logging] != false' "$root/foxos-start-all.rsc" \
+    && rg -Fq '[/container get $active logging] != false' "$root/foxos-verify.rsc" \
+    || return 1
+  for script in foxos-uninstall-inspect.rsc uninstall-apply.rsc; do
+    rg -Fq ':local loggingMatches false' "$root/$script" \
+      && rg -Fq '$owner = "foxos:mihomo" || $owner = "foxos:mosdns"' "$root/$script" \
+      && rg -Fq '$containerLogging = false || $containerLogging = "no"' "$root/$script" \
+      || return 1
+  done
 }
 
 cleanup_inspector_contract() {
@@ -718,19 +847,19 @@ cleanup_inspector_contract() {
     && rg -Fq '([:len $rollback] + [:len $rollbackComplete]) != 1' "$script" \
     && rg -Fq ':if ([:len $pending] > 0)' "$script" \
     && rg -Fq ':if ([:len $transitions] > 0)' "$script" \
-    && rg -Fq '[/container get $active status] != "running"' "$script" \
-    && rg -Fq '[/container get $retirement status] != "stopped"' "$script" \
+    && rg -Fq '[$FoxOSContainerState $active] != "running"' "$script" \
+    && rg -Fq '[$FoxOSContainerState $retirement] != "stopped"' "$script" \
     && rg -Fq '$sourceMarker = "foxos:rollback" && $activeName != $releaseName' "$script" \
     && rg -Fq '$sourceMarker = "foxos:rollback-complete" && $retirementName != $releaseName' "$script" \
-    && rg -Fq ':local knownAdminSlots [/container find where comment~"^foxos:(active|pending|rollback|rollback-complete|transition:promote|transition:rollback|transition:rollback:previous|retained|failed)$"]' "$script" \
+    && rg -Fq ':local knownAdminSlots [/container find where comment~"^foxos:(active|pending|rollback|rollback-complete|transition:promote|transition:rollback|transition:rollback:previous|retained|failed)\$"]' "$script" \
     && rg -Fq ':local interfaceAdminSlots [/container find where interface="veth-foxos"]' "$script" \
     && rg -Fq ':if ([:len $knownAdminSlots] != [:len $interfaceAdminSlots])' "$script" \
     && rg -Fq ':if ($runningAdminCount != 1 || $runningAdminID != $active)' "$script" \
     && rg -Fq 'foxos-upgrade-cleanup-v3|release=' "$script" \
     && rg -Fq '|site=" . $FoxOSSiteLoadedDigest' "$script" \
-    && rg -Fq '|active=" . [/container get $active .id]' "$script" \
-    && rg -Fq '|rollback=" . [/container get $retirement .id]' "$script" \
-    && rg -Fq '|admin-slot=" . [/container get $adminSlot .id]' "$script" \
+    && rg -Fq '|active=" . [:pick $active 0]' "$script" \
+    && rg -Fq '|rollback=" . [:pick $retirement 0]' "$script" \
+    && rg -Fq '|admin-slot=" . $adminSlot' "$script" \
     && rg -Fq '|veth=" . [/interface/veth get $foxosVeth .id]' "$script" \
     && rg -Fq '|mount=" . [/container/mounts get $mountID .id]' "$script" \
     && rg -Fq ':local startScriptByName [/system/script find where name="foxos-start-sequence"]' "$script" \
@@ -961,8 +1090,9 @@ lifecycle_start_sequence_contract() {
     && rg -q '\|(start-scheduler|scheduler)=" \. \[/system/scheduler get \$[A-Za-z][A-Za-z0-9]* \.id\]' "$script"
 }
 
-while IFS= read -r -d '' script; do
-  if ! awk '
+routeros_parse_safety_contract() {
+  local script=$1
+  awk '
     BEGIN { braces = 0; brackets = 0; parens = 0; bad = 0 }
     {
       in_string = 0
@@ -971,8 +1101,20 @@ while IFS= read -r -d '' script; do
         c = substr($0, i, 1)
         if (escaped) { escaped = 0; continue }
         if (in_string && c == "\\") { escaped = 1; continue }
+        if (in_string && c == "$" && substr($0, i + 1, 1) == "\"") {
+          printf "%s:%d:%d: unescaped $ before closing quote\n", FILENAME, NR, i > "/dev/stderr"
+          bad = 1
+        }
         if (c == "\"") { in_string = !in_string; continue }
         if (!in_string && c == "#") { break }
+        if (!in_string && c == "!") {
+          j = i + 1
+          while (j <= length($0) && substr($0, j, 1) ~ /[ \t]/) j++
+          if (substr($0, j, 1) == "~") {
+            printf "%s:%d:%d: unsupported !~ operator; negate a parenthesized ~ expression\n", FILENAME, NR, i > "/dev/stderr"
+            bad = 1
+          }
+        }
         if (!in_string && c == "{") braces++
         if (!in_string && c == "}") braces--
         if (!in_string && c == "[") brackets++
@@ -990,7 +1132,11 @@ while IFS= read -r -d '' script; do
       }
       exit bad
     }
-  ' "$script"; then
+  ' "$script"
+}
+
+while IFS= read -r -d '' script; do
+  if ! routeros_parse_safety_contract "$script"; then
     failed=1
   fi
 done < <(find "$rsc_root" -maxdepth 1 -type f -name '*.rsc' -print0)
@@ -1007,8 +1153,20 @@ fi
 if rg -n -g '*.rsc' '^[[:space:]]*/system/device-mode/update' "$rsc_root"; then
   report "deployment scripts must not change device-mode"
 fi
-if rg -n -g '*.rsc' 'architecture[^#]*(=|!=)[^#]*"x86_64"|file=[^[:space:]]*/\$[A-Za-z_]' "$rsc_root"; then
-  report "found an invalid RouterOS architecture or path expression"
+if rg -n -g '*.rsc' 'file=[^[:space:]]*/\$[A-Za-z_]' "$rsc_root"; then
+  report "found an invalid RouterOS path expression"
+fi
+if rg -n -F -g '*.rsc' '".."' "$rsc_root"; then
+  report "found a RouterOS parser-hostile double-dot string literal"
+fi
+if rg -n -g '*.rsc' 'architecture[^#]*!=[^#]*"x86"' "$rsc_root"; then
+  report "found a stale direct architecture-name=x86 rejection instead of amd64 normalization"
+fi
+if rg -n -g '*.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (\.id|status)\]|value-name=(\.id|status)' "$rsc_root"; then
+  report "container identity or state uses unsupported RouterOS .id/status readback instead of native handles and dynamic flags"
+fi
+if rg -n -g '*.rsc' -g '!load-site-config.rsc' -g '!chr-envlists-smoke.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (root-dir|running|stopped)\]' "$rsc_root"; then
+  report "container path or state bypasses the loader-owned compatibility contract"
 fi
 if rg -n -g '*.rsc' '/container/add[^#]*(foxos-mihomo|foxos-mosdns)[^#]*envlists=foxos-env' "$rsc_root"; then
   report "Mihomo or MosDNS would inherit FoxOS credentials"
@@ -1047,6 +1205,17 @@ for identity_script in foxos-full-install.rsc foxos-install-inspect.rsc foxos-st
     report "$identity_script does not bind container interface/env/mount/root/start/logging fields"
   fi
 done
+if ! container_compatibility_contract "$rsc_root/load-site-config.rsc"; then
+  report "the immutable loader does not own the RouterOS native-handle, dynamic-state, and root-dir normalization contract"
+fi
+for compatibility_script in foxos-full-install.rsc foxos-install-inspect.rsc foxos-start-all.rsc foxos-verify.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc upgrade-inspect.rsc upgrade.rsc upgrade-promote-inspect.rsc upgrade-promote.rsc rollback-inspect.rsc rollback.rsc upgrade-cleanup-inspect.rsc upgrade-cleanup-apply.rsc; do
+  if ! container_compatibility_consumer_contract "$rsc_root/$compatibility_script"; then
+    report "$compatibility_script bypasses or does not require the loader-owned container compatibility contract"
+  fi
+done
+if ! admin_container_logging_contract "$rsc_root"; then
+  report "FoxOS admin container lifecycle does not enforce logging=no while preserving auxiliary diagnostics"
+fi
 if ! uninstall_snapshot_contract "$rsc_root/uninstall-apply.rsc"; then
   report "uninstall apply does not freeze the inspector-approved RouterOS object IDs before its first write"
 fi
@@ -1160,6 +1329,16 @@ fi
 if ! chr_envlists_smoke_contract "$rsc_root/chr-envlists-smoke.rsc"; then
   report "CHR envlists smoke does not preserve confirmation, isolation, readback and zero-residual cleanup contracts"
 fi
+for architecture_script in preflight.rsc foxos-doctor.rsc foxos-full-install.rsc upgrade-inspect.rsc chr-envlists-smoke.rsc; do
+  if ! amd64_architecture_contract "$rsc_root/$architecture_script"; then
+    report "$architecture_script does not normalize RouterOS x86 and x86_64 to amd64 while rejecting unknown architectures"
+  fi
+done
+for storage_script in preflight.rsc foxos-doctor.rsc foxos-full-install.rsc; do
+  if ! reserved_internal_storage_contract "$rsc_root/$storage_script"; then
+    report "$storage_script does not reserve exact root foxos for internal storage while retaining strict disk-slot validation"
+  fi
+done
 if ! foxos_doctor_contract "$rsc_root/foxos-doctor.rsc"; then
   report "FoxOS doctor is not strictly read-only or does not preserve its output contract"
 fi
@@ -1438,14 +1617,105 @@ for invariant in \
     report "site loader is missing an assignment-only integrity invariant: $invariant"
   fi
 done
+if ! site_loader_cursor_contract "$rsc_root/load-site-config.rsc"; then
+  report "site loader does not skip a cursor-position LF before the exclusive-start line search"
+fi
 
 site_seal_root=$(mktemp -d "${TMPDIR:-/tmp}/foxos-site-seal-check.XXXXXX")
 trap 'rm -rf -- "$site_seal_root"' EXIT
+parser_unsafe_dollar_fixture="$site_seal_root/routeros-unescaped-dollar.rsc"
+parser_safe_dollar_fixture="$site_seal_root/routeros-escaped-dollar.rsc"
+printf '%s\n' ':put "anchor$"' > "$parser_unsafe_dollar_fixture"
+printf '%s\n' ':put "anchor\$"' > "$parser_safe_dollar_fixture"
+if routeros_parse_safety_contract "$parser_unsafe_dollar_fixture" 2>/dev/null; then
+  report "RouterOS parser safety accepted an unescaped dollar before a closing quote"
+fi
+if ! routeros_parse_safety_contract "$parser_safe_dollar_fixture"; then
+  report "RouterOS parser safety rejected an escaped literal dollar"
+fi
+parser_unsafe_negated_regex_fixture="$site_seal_root/routeros-unsafe-negated-regex.rsc"
+parser_safe_negated_regex_fixture="$site_seal_root/routeros-safe-negated-regex.rsc"
+printf '%s\n' ':local value "abc"; :if ($value !~ "^a") do={ :put "bad" }' > "$parser_unsafe_negated_regex_fixture"
+printf '%s\n' ':local value "abc"; :if (!($value ~ "^a")) do={ :put "good" }' > "$parser_safe_negated_regex_fixture"
+if routeros_parse_safety_contract "$parser_unsafe_negated_regex_fixture" 2>/dev/null; then
+  report "RouterOS parser safety accepted the unsupported !~ operator"
+fi
+if ! routeros_parse_safety_contract "$parser_safe_negated_regex_fixture"; then
+  report "RouterOS parser safety rejected a parenthesized negated regex match"
+fi
+ascii_fixture="$site_seal_root/routeros-utf8.rsc"
+ascii_encoded="$site_seal_root/routeros-utf8-ascii.rsc"
+printf ':put "\346\265\213\350\257\225"\n' > "$ascii_fixture"
+if ! "$repo_root/scripts/encode-routeros-rsc-ascii.sh" "$ascii_fixture" "$ascii_encoded"; then
+  report "RouterOS ASCII encoder rejected a valid UTF-8 script fixture"
+elif LC_ALL=C rg -n '[^\x00-\x7F]' "$ascii_encoded" >/dev/null; then
+  report "RouterOS ASCII encoder left non-ASCII bytes in its output"
+elif ! rg -Fq ':put "\E6\B5\8B\E8\AF\95"' "$ascii_encoded"; then
+  report "RouterOS ASCII encoder did not emit byte-preserving hex escapes"
+fi
+ascii_passthrough="$site_seal_root/routeros-ascii.rsc"
+ascii_passthrough_encoded="$site_seal_root/routeros-ascii-encoded.rsc"
+printf '%s\n' ':put "ASCII"' > "$ascii_passthrough"
+if ! "$repo_root/scripts/encode-routeros-rsc-ascii.sh" "$ascii_passthrough" "$ascii_passthrough_encoded" \
+  || ! cmp -s "$ascii_passthrough" "$ascii_passthrough_encoded"; then
+  report "RouterOS ASCII encoder changed an already-ASCII script"
+fi
+loader_ascii_encoded="$site_seal_root/load-site-config-ascii.rsc"
+if ! "$repo_root/scripts/encode-routeros-rsc-ascii.sh" "$rsc_root/load-site-config.rsc" "$loader_ascii_encoded"; then
+  report "RouterOS ASCII encoder rejected the site loader"
+elif ! site_loader_cursor_contract "$loader_ascii_encoded"; then
+  report "the release-encoded site loader lost its exclusive-start cursor guard"
+fi
+for bundle_ascii_invariant in \
+  'scripts/encode-routeros-rsc-ascii.sh' \
+  "find \"\$stage_root\" -type f -name '*.rsc' -print0" \
+  'RouterOS release scripts must be ASCII-only'; do
+  if ! rg -Fq -- "$bundle_ascii_invariant" "$repo_root/scripts/build-routeros-bundle.sh"; then
+    report "RouterOS bundle assembly does not enforce ASCII-only release scripts"
+    break
+  fi
+done
+admin_logging_add_negative_root="$site_seal_root/admin-logging-add-negative"
+mkdir -p -- "$admin_logging_add_negative_root"
+cp -- "$rsc_root"/*.rsc "$admin_logging_add_negative_root/"
+sed '/name=foxos-initial .*interface=veth-foxos/s/logging=no/logging=yes/' \
+  "$rsc_root/foxos-full-install.rsc" > "$admin_logging_add_negative_root/foxos-full-install.rsc"
+if cmp -s "$rsc_root/foxos-full-install.rsc" "$admin_logging_add_negative_root/foxos-full-install.rsc"; then
+  report "admin logging add failure injection did not mutate the initial FoxOS container"
+elif admin_container_logging_contract "$admin_logging_add_negative_root"; then
+  report "admin logging contract accepted a credential-bearing FoxOS container with logging=yes"
+fi
+admin_logging_readback_negative_root="$site_seal_root/admin-logging-readback-negative"
+mkdir -p -- "$admin_logging_readback_negative_root"
+cp -- "$rsc_root"/*.rsc "$admin_logging_readback_negative_root/"
+sed 's/logging] != false/logging] != true/' \
+  "$rsc_root/upgrade-inspect.rsc" > "$admin_logging_readback_negative_root/upgrade-inspect.rsc"
+if cmp -s "$rsc_root/upgrade-inspect.rsc" "$admin_logging_readback_negative_root/upgrade-inspect.rsc"; then
+  report "admin logging readback failure injection did not mutate upgrade-inspect"
+elif admin_container_logging_contract "$admin_logging_readback_negative_root"; then
+  report "admin logging contract accepted a lifecycle inspector that requires logging=yes"
+fi
 cp -- "$rsc_root/site-config.example.rsc" "$site_seal_root/site-config.rsc"
 if ! "$rsc_root/seal-site-config.sh" "$site_seal_root/site-config.rsc" >/dev/null; then
   report "the immutable site manifest example cannot be sealed"
 elif [[ "$(wc -c < "$site_seal_root/site-config.rsc.sha512" | tr -d ' ')" != 129 ]]; then
   report "the site manifest seal is not a SHA-512 hex digest"
+elif ! site_loader_manifest_model "$site_seal_root/site-config.rsc"; then
+  report "the site loader cursor model rejected the default manifest layout"
+fi
+mkdir -p -- "$site_seal_root/blank-lines" "$site_seal_root/no-trailing-newline"
+awk '
+  /^:global FoxOSSiteManifestVersion 2$/ && !inserted { print ""; print ""; inserted = 1 }
+  { print }
+' "$rsc_root/site-config.example.rsc" > "$site_seal_root/blank-lines/site-config.rsc"
+if ! "$rsc_root/seal-site-config.sh" "$site_seal_root/blank-lines/site-config.rsc" >/dev/null \
+  || ! site_loader_manifest_model "$site_seal_root/blank-lines/site-config.rsc"; then
+  report "the site loader cursor model rejected consecutive blank lines"
+fi
+perl -0pe 's/\n\z//' "$rsc_root/site-config.example.rsc" > "$site_seal_root/no-trailing-newline/site-config.rsc"
+if ! "$rsc_root/seal-site-config.sh" "$site_seal_root/no-trailing-newline/site-config.rsc" >/dev/null \
+  || ! site_loader_manifest_model "$site_seal_root/no-trailing-newline/site-config.rsc"; then
+  report "the site loader cursor model rejected a manifest without a trailing LF"
 fi
 for private_cidr in 'fc00::/7' 'fd12:3456::/48'; do
   case_name=$(printf '%s' "$private_cidr" | tr ':/' '__')
@@ -1535,20 +1805,52 @@ if "$rsc_root/seal-site-config.sh" "$site_seal_root/same-line/site-config.rsc" >
 fi
 
 mkdir -p -- "$site_seal_root/lifecycle"
+sed '/:set cursor (\$cursor + 1)/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/site-loader-cursor-guard-missing.rsc"
+if site_loader_cursor_contract "$site_seal_root/lifecycle/site-loader-cursor-guard-missing.rsc"; then
+  report "site loader cursor contract accepted a loader without the blank-line advance"
+fi
+sed '/:local stopped \[\/container get \$container stopped\]/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/container-state-flag-missing.rsc"
+if container_compatibility_contract "$site_seal_root/lifecycle/container-state-flag-missing.rsc"; then
+  report "container compatibility contract accepted a state helper without stopped flag readback"
+fi
+sed '/:return \[:pick \$rootDirectory 1 \[:len \$rootDirectory\]\]/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/container-root-normalization-missing.rsc"
+if container_compatibility_contract "$site_seal_root/lifecycle/container-root-normalization-missing.rsc"; then
+  report "container compatibility contract accepted root-dir readback without leading-slash normalization"
+fi
 sed '/FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR"/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-confirmation-missing.rsc"
 if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-confirmation-missing.rsc"; then
   report "CHR envlists smoke contract accepted a script without the destructive confirmation gate"
+fi
+sed '/:local parentPathMarker ("\." \. "\.")/d' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-parent-path-marker-missing.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-parent-path-marker-missing.rsc"; then
+  report "CHR envlists smoke contract accepted a parser-unsafe or missing parent-path marker"
+fi
+sed 's#(\\\$|/)#($|/)#' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-root-pattern-anchor-unescaped.rsc"
+if cmp -s "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-root-pattern-anchor-unescaped.rsc"; then
+  report "CHR envlists smoke root-pattern failure injection did not remove the anchor escape"
+elif chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-root-pattern-anchor-unescaped.rsc"; then
+  report "CHR envlists smoke contract accepted an unescaped root-pattern anchor"
 fi
 sed '/:local containerEnvLists \[\/container get \$container envlists\]/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-envlists-readback-missing.rsc"
 if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-envlists-readback-missing.rsc"; then
   report "CHR envlists smoke contract accepted a script without envlists readback"
 fi
-sed '/\[\/container get \$cleanupByName \.id\] != \[\/container get \$cleanupByOwner \.id\]/d' \
+sed '/\$cleanupByName != \$cleanupByOwner/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-cleanup-binding-missing.rsc"
 if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-cleanup-binding-missing.rsc"; then
   report "CHR envlists smoke contract accepted identity-unbound cleanup"
+fi
+sed '/:local stopped \[\/container get \$container stopped\]/d' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-state-flag-missing.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-state-flag-missing.rsc"; then
+  report "CHR envlists smoke contract accepted status inference without stopped flag readback"
 fi
 sed 's/ || \$residualRoots > 0//' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-residual-root-guard-missing.rsc"
@@ -1566,6 +1868,11 @@ sed '/PASS|summary|needs-action-count=0|conflict-count=0|first-install=ready-for
 if foxos_doctor_contract "$site_seal_root/lifecycle/doctor-pass-summary-missing.rsc"; then
   report "FoxOS doctor contract accepted a script without the PASS summary"
 fi
+sed '/\$namedVethCount != \$reusableVethCount/d' \
+  "$rsc_root/foxos-doctor.rsc" > "$site_seal_root/lifecycle/doctor-veth-reuse-binding-missing.rsc"
+if foxos_doctor_contract "$site_seal_root/lifecycle/doctor-veth-reuse-binding-missing.rsc"; then
+  report "FoxOS doctor contract accepted reusable VETHs without exact count and ownership binding"
+fi
 cp -- "$rsc_root/foxos-doctor.rsc" "$site_seal_root/lifecycle/doctor-write-added.rsc"
 printf '%s\n' '/system/device-mode/update container=yes' >> "$site_seal_root/lifecycle/doctor-write-added.rsc"
 if foxos_doctor_contract "$site_seal_root/lifecycle/doctor-write-added.rsc"; then
@@ -1575,6 +1882,22 @@ cp -- "$rsc_root/foxos-doctor.rsc" "$site_seal_root/lifecycle/doctor-secret-read
 printf '%s\n' ':put [/container/envs get [find where key="SECRET"] value]' >> "$site_seal_root/lifecycle/doctor-secret-read-added.rsc"
 if foxos_doctor_contract "$site_seal_root/lifecycle/doctor-secret-read-added.rsc"; then
   report "FoxOS doctor contract accepted a sensitive env value read"
+fi
+
+sed '/:if (\$architecture = "x86" || \$architecture = "x86_64") do={ :set imageArchitecture "amd64" }/d' \
+  "$rsc_root/preflight.rsc" > "$site_seal_root/lifecycle/preflight-architecture-normalization-missing.rsc"
+if amd64_architecture_contract "$site_seal_root/lifecycle/preflight-architecture-normalization-missing.rsc"; then
+  report "architecture contract accepted a preflight without x86 and x86_64 normalization"
+fi
+sed '/:if (\$storageRoot = "foxos") do={ :set storageMode "internal" }/d' \
+  "$rsc_root/preflight.rsc" > "$site_seal_root/lifecycle/preflight-internal-root-reservation-missing.rsc"
+if reserved_internal_storage_contract "$site_seal_root/lifecycle/preflight-internal-root-reservation-missing.rsc"; then
+  report "storage contract accepted a preflight without the exact internal root reservation"
+fi
+sed '/\/disk find where slot=\$storageRoot/d' \
+  "$rsc_root/preflight.rsc" > "$site_seal_root/lifecycle/preflight-disk-slot-check-missing.rsc"
+if reserved_internal_storage_contract "$site_seal_root/lifecycle/preflight-disk-slot-check-missing.rsc"; then
+  report "storage contract accepted a preflight that could not reject a misspelled external disk slot"
 fi
 
 sed '/disk1\/mihomo-config\/base.yaml/d' "$quick_install" > "$site_seal_root/lifecycle/quick-install-missing-config.md"
@@ -1708,6 +2031,11 @@ if cmp -s "$rsc_root/load-site-config.rsc" "$site_seal_root/lifecycle/hostname-l
   report "hostname label-length failure injection did not mutate the loader"
 elif routeros_hostname_contract "$site_seal_root/lifecycle/hostname-label-64-allowed.rsc"; then
   report "hostname label-length failure injection was not rejected"
+fi
+sed '/:local publicHostnameDoubleDot ("\." \. "\.")/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/hostname-double-dot-marker-missing.rsc"
+if routeros_hostname_contract "$site_seal_root/lifecycle/hostname-double-dot-marker-missing.rsc"; then
+  report "hostname contract accepted a parser-unsafe or missing double-dot marker"
 fi
 sed '/publicHostnameLength > 253/s/home/example/' \
   "$rsc_root/preflight.rsc" > "$site_seal_root/lifecycle/hostname-suffix-weakened.rsc"

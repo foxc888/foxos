@@ -4,10 +4,10 @@
 
 ## 目标要求
 
-- RouterOS 7.21 是脚本语法下限，x86_64 CPU 对应 `architecture-name=x86`；目标完整版本必须先通过同版本 CHR 的 `envlists` add/get/delete 门禁。
+- RouterOS 7.21 是脚本语法下限；官方 amd64 环境通常为 `architecture-name=x86`，非标准目标返回的 `x86_64` 也会归一到 Linux `amd64`，但仍需单独验收；目标完整版本必须先通过同版本 CHR 的 `envlists` add/get/delete 门禁。
 - 与 RouterOS 完全同版本的 x86 `container` package。
 - 由设备操作者按 MikroTik 官方流程确认并启用 `container=yes` 与 `scheduler=yes`；两项 device-mode 更新都可能要求物理确认，FoxOS 脚本不会代为修改。
-- 已从不可变 `site-config.example.rsc` 生成、审核并独立封存 `site-config.rsc`；其中管理桥、RouterOS 地址和存储已存在且唯一。
+- 已从不可变 `site-config.example.rsc` 生成、审核并独立封存 `site-config.rsc`；其中管理桥和 RouterOS 地址已存在且唯一。外置模式填写唯一 `/disk` 槽位；无 `/disk` 对象的 x86 系统盘模式必须精确填写保留根 `foxos`。
 - 清单存储在上传后至少有 512 MiB 可用。
 - 清单中的 Mihomo、MosDNS、FoxOS 地址未被占用。
 
@@ -29,7 +29,7 @@ FoxOS、Mihomo、MosDNS 三张 amd64 输入镜像在 workflow 内从固定源码
 4. 逐项确认所有顶层上传目标计数为零后，才上传解压目录、站点清单及其摘要；随后 import 包内固定的 `load-site-config.rsc`，由它校验清单摘要和赋值白名单，再运行 `foxos-doctor.rsc`。doctor 只读输出主机前置项和首装冲突，不修改 device-mode、桥、地址、磁盘或 REST。
 5. 运行 `foxos-plan.rsc`；plan 自动执行 preflight 与共享 inspector，只读输出逐项 `CREATE/REUSE/FAIL` 和摘要。不得直接 import 可编辑的 `site-config.rsc`。
 6. 操作者核对影响、备份和回滚路径，把计划摘要原样设置为确认值。
-7. import 唯一正式入口 `disk1/foxos-full-install.rsc`；它在首次写入前重新回读并拒绝过期计划。
+7. 从清单存储根 import 唯一正式入口 `<storage>/foxos-full-install.rsc`；它在首次写入前重新回读并拒绝过期计划。
 8. 等三个容器均为 stopped，再运行可重入 `foxos-start-all.rsc`；此时 autostart 仍关闭。
 9. 导入并信任生成的本地 CA，运行 `foxos-verify.rsc`；全部健康门禁通过后才启用 owned 顺序启动 scheduler。三个容器始终保持 `start-on-boot=no`。
 10. 从 `foxos-env` 安全读取一次 API Token，保存到离线密码库并登录 HTTPS 管理页。
@@ -50,5 +50,7 @@ FoxOS、Mihomo、MosDNS 三张 amd64 输入镜像在 workflow 内从固定源码
 ## DNS 和所有权边界
 
 安装脚本不修改 DNS、DHCP、默认路由、NAT、Mangle、FastTrack 或防火墙，也不创建透明代理。MosDNS 保持只读接入。可选 DNS 脚本只添加一条精确确认的 owned A 记录。所有脚本仅复用匹配 `foxos:` comment/marker 的资源，遇到同名用户资源则停止。
+
+FoxOS 管理容器持有 API Token、确认密钥、RouterOS 服务密码和 Mihomo Secret，因此其 RouterOS `logging` 必须保持 `no`。RouterOS 启用容器日志时会把启动环境写入系统日志；验收时如果发现任何敏感键名进入新日志，立即停止容器并轮换本次全部凭据。Mihomo 与 MosDNS 不继承 `foxos-env`，仍保留运行日志用于诊断。
 
 `uninstall-plan.rsc` 只读列出精确 owned 资源并生成 SHA-512；存在 Mihomo pending apply journal 时拒绝生成卸载摘要。`uninstall-apply.rsc` 仅在摘要确认且前态未变化时停止资源，并在所有容器停止后再次确认 journal 不存在，才删除 RouterOS 资源和持有 `FOXOS_CONFIRMATION_KEY` 的 env。默认保留全部数据、镜像、配置、版本化 root-dir、备份、站点清单和本地 CA；保留数据仍绑定原确认密钥，因此直接按全新安装覆盖会失败关闭，必须恢复原密钥或先把旧数据与备份归档到非活动路径。RouterOS binary restore 仍是会重启并覆盖设备配置的独立破坏性操作，只能在维护窗口再次确认。

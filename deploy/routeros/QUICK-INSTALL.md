@@ -31,9 +31,11 @@ ${EDITOR:-vi} site-config.rsc
 
 四个服务地址必须唯一、可用且位于管理网段内，RouterOS 地址必须以清单中的 prefix 配置在管理桥上；hostname 必须是小写 `home.arpa` 子域。不要在其他脚本中改地址。每次运行 plan/install、DNS、upgrade、rollback、cleanup、uninstall 或 verify 前都 import 同一份不可变 loader；preflight 会在 RouterOS 上重算 SHA-512，并核对 loader 对当前内容和每个字段的证明。
 
-下文命令使用默认 `disk1`。如果修改了存储根，所有 `file-name=disk1/...` 都替换为实际目录。
+外置存储仍是推荐方式：`FoxOSSiteStorageRoot "disk1"` 表示必须存在且唯一的 `/disk slot=disk1`。没有 `/disk` 对象、但系统盘容量和耐久度足够的 x86 设备，可以显式设为唯一保留值 `FoxOSSiteStorageRoot "foxos"`；此时 preflight/doctor/install 从 `/system/resource free-hdd-space` 读取系统盘空间。除此之外的任何值都按外置磁盘槽位处理，拼错的 `disk1` 不会自动降级到系统盘。
 
-x86_64 CPU 在 RouterOS 中的 `architecture-name` 是 `x86`；容器镜像架构是 Linux `amd64`。
+下文命令使用默认 `disk1`。内部系统盘模式必须把所有 `file-name=disk1/...` 和工作站 `storage_root=disk1` 一并替换为 `foxos`，不能只改其中一处。
+
+官方 RouterOS 的 amd64 设备通常报告 `architecture-name=x86`；安装脚本也把非标准环境返回的 `x86_64` 归一为 Linux `amd64`，但会输出目标环境兼容警告，不能据此声称官方 CHR 或实体 RouterOS 已验收。其他架构继续拒绝 amd64 镜像。
 
 ## 安全边界
 
@@ -47,16 +49,18 @@ x86_64 CPU 在 RouterOS 中的 `architecture-name` 是 `x86`；容器镜像架�
 
 FoxOS 只检查 MosDNS TCP 53；MosDNS 9099 API 仅监听容器 loopback，包内不提供其独立管理 UI。
 
+持有 `foxos-env` 凭据的 FoxOS 管理容器固定 `logging=no`。RouterOS 会把启用容器日志时的启动环境写入系统日志；若验收发现任何敏感键名进入新日志，立即停止容器并轮换本次全部凭据。Mihomo 与 MosDNS 不继承 FoxOS 凭据，保留 `logging=yes` 便于诊断。
+
 可选 DNS 脚本只在精确确认后添加一条 `foxos:dns:admin` A 记录，不启用 DNS，不改 upstream，不改 DHCP。只有原本使用 RouterOS DNS 的客户端才会得到该记录。
 
 ## 1. RouterOS 前置条件
 
 必须全部满足：
 
-- RouterOS 7.21 或更高的语法下限，`architecture-name=x86`；目标完整版本必须先通过下述同版本 CHR 门禁。
+- RouterOS 7.21 或更高的语法下限，`architecture-name=x86`，或待目标机验收的非标准 `x86_64`；目标完整版本必须先通过下述同版本 CHR 门禁。
 - 安装且启用与 RouterOS 完全同版本的 x86 `container` package。
 - `/system/device-mode get container` 与 `get scheduler` 都为 `yes`。启用其中任一能力都可能按 MikroTik 官方流程要求设备操作者在物理设备上确认；脚本只读检查，绝不代为修改 device-mode。
-- 清单指定的管理桥、RouterOS 地址和持久存储已存在且唯一。
+- 清单指定的管理桥和 RouterOS 地址已存在且唯一；存储要么是唯一 `/disk` 槽位，要么显式使用内部保留根 `foxos`。
 - 上传完整包后存储仍至少有 512 MiB 可用。
 - RouterOS `www`/REST 已启用在 TCP 80，并限制为清单网段或 FoxOS `/32`。
 - Mihomo、MosDNS、FoxOS 三个保留地址未被 RouterOS address、DHCP Lease、其他 veth、ARP 或在线主机占用。
@@ -75,7 +79,7 @@ FoxOS 只检查 MosDNS TCP 53；MosDNS 9099 API 仅监听容器 loopback，包�
 
 安装器会创建最小 `foxos-service` 账号。RouterOS REST 在管理 LAN 内仍是 HTTP，因此管理 LAN 必须可信且隔离；不得暴露到 WAN。FoxOS 浏览器/API 访问则强制使用本地 CA 保护的 HTTPS。
 
-只读人工检查示例：
+只读人工检查示例；内部 `foxos` 模式允许 `/disk/print` 为空，但 `free-hdd-space` 必须满足空间门禁：
 
 ```routeros
 /system/resource/print
@@ -217,7 +221,7 @@ disk1/QUICK-INSTALL.md
 
 只有最终输出 `UPLOAD-COLLISIONS total=0` 才能继续。若存在碰撞，单独下载并归档相关普通文件或目录，确认它们不属于既有 FoxOS/其他服务后再制定处理方案；不要删除、改名或直接覆盖。保留的 `foxos-data`、`foxos-backups` 或 FoxOS env 表示这不是空白首装，应转入升级或恢复流程。
 
-零碰撞后，使用 WinBox 时进入 `Files`，打开清单指定的存储根，选中解压目录内的全部内容并拖入；不要拖入外层 `foxos-full-amd64-*` 目录。使用命令行时，在已完成两层校验并生成 `site-config.rsc.sha512` 的解压目录执行：
+零碰撞后，使用 WinBox 时，内部模式先在 `Files` 中创建或确认空的顶层 `foxos` 目录，外置模式使用清单指定的磁盘目录。打开该存储根，选中解压目录内的全部内容并拖入；不要拖入外层 `foxos-full-amd64-*` 目录。使用命令行时，在已完成两层校验并生成 `site-config.rsc.sha512` 的解压目录执行：
 
 ```bash
 router_address="REPLACE_WITH_ROUTEROS_MANAGEMENT_ADDRESS"
@@ -415,7 +419,7 @@ CA 已导入客户端信任库且 DNS 可解析后，访问 `https://foxos.home.
 | 脚本要求站点清单 | 每个操作前是否重新 import 正确存储根下的不可变 `load-site-config.rsc`；不要直接 import 可编辑清单 |
 | `bad command name container` | 同版本 x86 container package 是否已上传、执行 `/system/package/apply-changes`，并在重启后回读为 enabled |
 | `not allowed by device-mode` | `container=yes` 与 `scheduler=yes` 是否都完成所需物理确认 |
-| preflight 地址/磁盘失败 | `site-config.rsc` 是否与现有管理桥、地址和存储完全一致 |
+| preflight 地址/存储失败 | `site-config.rsc` 是否与现有管理桥、地址和存储完全一致；内部模式是否精确写成 `foxos`，外置模式是否存在同名唯一 `/disk slot` |
 | 镜像长期不为 stopped | checksum、文件大小、磁盘、package、container 日志 |
 | FoxOS running 但 verify 失败 | CA 是否唯一且 trusted、HTTPS 443、SQLite/挂载、RouterOS REST、Mihomo 9090、MosDNS TCP 53 |
 | hostname 不解析 | 客户端是否原本使用 RouterOS DNS；DNS plan/apply 是否完成 |
