@@ -88,7 +88,7 @@ FoxOS 只检查 MosDNS TCP 53；MosDNS 9099 API 仅监听容器 loopback，包�
 /interface/bridge/print
 /disk/print
 /ip/address/print
-/ip/service/print where name="www"
+/ip/service/print where name="www" && dynamic=no
 /container/print
 ```
 

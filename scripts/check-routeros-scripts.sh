@@ -1026,6 +1026,11 @@ rest_address_contract() {
     && rg -Fq '$wwwCount > 2' "$script"
 }
 
+rest_www_static_service_contract() {
+  local script=$1
+  rg -Fq ':local wwwService [/ip/service find where name="www" && dynamic=no]' "$script"
+}
+
 rest_address_model() {
   local value=$1
   local site_network=$2
@@ -1237,6 +1242,11 @@ fi
 if ! rg -Fq 'address] != $routerCIDR' "$rsc_root/preflight.rsc"; then
   report "preflight does not require the exact RouterOS management prefix"
 fi
+for rest_www_script in foxos-doctor.rsc preflight.rsc foxos-full-install.rsc; do
+  if ! rest_www_static_service_contract "$rsc_root/$rest_www_script"; then
+    report "$rest_www_script can confuse dynamic www connection rows with the static RouterOS REST service"
+  fi
+done
 if ! rest_address_contract "$rsc_root/preflight.rsc"; then
   report "preflight does not parse the RouterOS REST address list as an exact allowlist"
 fi
@@ -2014,6 +2024,13 @@ sed 's/interval] = "0s"/interval] = "1m"/' \
   "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/scheduler-interval-1m.rsc"
 if scheduler_contract "$site_seal_root/lifecycle/scheduler-interval-1m.rsc"; then
   report "scheduler interval=1m failure injection was not rejected"
+fi
+sed 's/name="www" && dynamic=no/name="www"/' \
+  "$rsc_root/foxos-doctor.rsc" > "$site_seal_root/lifecycle/rest-www-dynamic-connections-counted.rsc"
+if cmp -s "$rsc_root/foxos-doctor.rsc" "$site_seal_root/lifecycle/rest-www-dynamic-connections-counted.rsc"; then
+  report "REST static-service failure injection did not mutate the doctor"
+elif rest_www_static_service_contract "$site_seal_root/lifecycle/rest-www-dynamic-connections-counted.rsc"; then
+  report "REST static-service contract accepted a query that counts dynamic www connections"
 fi
 sed 's/(\$wwwAddress != \$siteNetwork && \$wwwAddress != \$foxosRESTAddress)/(false)/' \
   "$rsc_root/preflight.rsc" > "$site_seal_root/lifecycle/rest-extra-address-allowed.rsc"

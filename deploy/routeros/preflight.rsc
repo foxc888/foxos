@@ -279,7 +279,7 @@
   }
 }
 
-:local wwwService [/ip/service find where name="www"]
+:local wwwService [/ip/service find where name="www" && dynamic=no]
 :if ([:len $wwwService] != 1) do={
   :put "ERROR RouterOS www/REST service is missing or ambiguous"
   :set failed true

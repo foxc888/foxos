@@ -51,7 +51,7 @@ DHCP 提供主机名、Lease 和 server；ARP 提供接口邻居。FoxOS 规范�
 
 依次检查：
 
-1. `/ip/service/print where name=www` 或可信 `www-ssl`。
+1. `/ip/service/print where name=www && dynamic=no` 或可信 `www-ssl`。
 2. `foxos-service` 地址限制与 policy。
 3. `veth-foxos`、站点管理桥和 FoxOS 地址到 RouterOS 地址的路径。
 4. RouterOS 日志中的 401/403。

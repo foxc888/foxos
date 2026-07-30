@@ -125,7 +125,7 @@
 :if ([/ip/address get $routerManagementIP address] != $routerCIDR || [/ip/address get $routerManagementIP interface] != $managementBridge) do={
   :error ("RouterOS 管理地址必须是 " . $managementBridge . " 上的 " . $routerCIDR)
 }
-:local wwwService [/ip/service find where name="www"]
+:local wwwService [/ip/service find where name="www" && dynamic=no]
 :if ([:len $wwwService] != 1) do={ :error "未找到唯一 RouterOS www/REST 服务" }
 :local wwwAddresses [/ip/service get $wwwService address]
 :if ([/ip/service get $wwwService disabled] = true || [/ip/service get $wwwService port] != 80) do={

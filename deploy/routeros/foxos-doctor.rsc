@@ -175,7 +175,7 @@
     }
   }
 
-  :local wwwService [/ip/service find where name="www"]
+  :local wwwService [/ip/service find where name="www" && dynamic=no]
   :if ([:len $wwwService] != 1) do={
     :put ("NEEDS-ACTION|rest-www|count=" . [:len $wwwService] . "|required-count=1")
     :set needsActionCount ($needsActionCount + 1)
