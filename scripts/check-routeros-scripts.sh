@@ -861,6 +861,11 @@ container_compatibility_contract() {
   done
 }
 
+file_native_handle_contract() {
+  local target=$1
+  ! rg -q -g '*.rsc' '/file get[[:space:]]+(?:[^[:space:]\[]+|\[[^]]+\])[[:space:]]+(?:\.id|value-name[[:space:]]*=[[:space:]]*\.id)[[:space:]]*\]' "$target"
+}
+
 container_compatibility_consumer_contract() {
   local script=$1
   rg -Fq ':global FoxOSContainerCompatVersion' "$script" \
@@ -1233,6 +1238,9 @@ if rg -n -g '*.rsc' 'architecture[^#]*!=[^#]*"x86"' "$rsc_root"; then
 fi
 if rg -n -g '*.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (\.id|status)\]|value-name=(\.id|status)' "$rsc_root"; then
   report "container identity or state uses unsupported RouterOS .id/status readback instead of native handles and dynamic flags"
+fi
+if ! file_native_handle_contract "$rsc_root"; then
+  report "file identity uses unsupported RouterOS .id readback instead of native handles"
 fi
 if rg -n -g '*.rsc' -g '!load-site-config.rsc' -g '!chr-envlists-smoke.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (root-dir|running|stopped)\]' "$rsc_root"; then
   report "container path or state bypasses the loader-owned compatibility contract"
@@ -1904,6 +1912,20 @@ sed '/:return \[:pick \$rootDirectory 1 \[:len \$rootDirectory\]\]/d' \
   "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/container-root-normalization-missing.rsc"
 if container_compatibility_contract "$site_seal_root/lifecycle/container-root-normalization-missing.rsc"; then
   report "container compatibility contract accepted root-dir readback without leading-slash normalization"
+fi
+sed 's#\[:pick \$imageID 0\]#[/file get $imageID .id]#' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/install-file-id-readback.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/install-file-id-readback.rsc"; then
+  report "install file-handle failure injection did not mutate the inspector"
+elif file_native_handle_contract "$site_seal_root/lifecycle/install-file-id-readback.rsc"; then
+  report "file native-handle contract accepted install .id readback"
+fi
+sed 's#\[:pick \$imageFile 0\]#[/file get [/file find where name=$imagePath] value-name=.id ]#' \
+  "$rsc_root/upgrade-inspect.rsc" > "$site_seal_root/lifecycle/upgrade-file-id-readback.rsc"
+if cmp -s "$rsc_root/upgrade-inspect.rsc" "$site_seal_root/lifecycle/upgrade-file-id-readback.rsc"; then
+  report "upgrade file-handle failure injection did not mutate the inspector"
+elif file_native_handle_contract "$site_seal_root/lifecycle/upgrade-file-id-readback.rsc"; then
+  report "file native-handle contract accepted upgrade .id readback"
 fi
 sed '/FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR"/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-confirmation-missing.rsc"

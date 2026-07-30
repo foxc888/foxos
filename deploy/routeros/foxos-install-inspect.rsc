@@ -374,7 +374,7 @@
     :set imageState "FAIL"
     :set failed true
   } else={
-    :set material ($material . "|image=" . [/file get $imageID .id] . ":" . [/file get $imageID name] . ":" . [/file get $imageID size])
+    :set material ($material . "|image=" . [:pick $imageID 0] . ":" . [/file get $imageID name] . ":" . [/file get $imageID size])
   }
 }
 :if ($FoxOSInstallInspectVerbose) do={ :put ("RESOURCE file/container-images " . $imageState) }
