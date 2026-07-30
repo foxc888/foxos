@@ -14,12 +14,16 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSMountCompatVersion
+:global FoxOSWritableMountMode
+:global FoxOSMountMode
 :global FoxOSUninstallInspectVerbose
 :global FoxOSUninstallCurrentDigest
 :global FoxOSUninstallContainerCount
 :global FoxOSUninstallDNSCount
 :global FoxOSUninstallRemainingCount
 :if ($FoxOSSiteManifestVersion != 2 || $FoxOSContainerCompatVersion != 1) do={ :error "site manifest and container compatibility contract are required" }
+:if ($FoxOSMountCompatVersion != 1 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 
 :local failed false
 :local remaining 0
@@ -196,9 +200,9 @@
     :set material ($material . "|mount:" . $mountName . ":DONE")
     :if ($FoxOSUninstallInspectVerbose) do={ :put ("DONE mount/" . $mountName) }
   } else={
-    :if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $sourcePath || [/container/mounts get $mountID dst] != $destination || ([/container/mounts get $mountID read-only] != false && [/container/mounts get $mountID read-only] != "no")) do={ :set failed true }
+    :if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $sourcePath || [/container/mounts get $mountID dst] != $destination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={ :set failed true }
     :set remaining ($remaining + 1)
-    :set material ($material . "|mount:" . $mountName . ":REMOVE:" . [/container/mounts get $mountID .id] . ":" . [/container/mounts get $mountID src] . ":" . [/container/mounts get $mountID dst] . ":" . [/container/mounts get $mountID read-only])
+    :set material ($material . "|mount:" . $mountName . ":REMOVE:" . [:pick $mountID 0] . ":" . [/container/mounts get $mountID src] . ":" . [/container/mounts get $mountID dst] . ":" . [$FoxOSMountMode $mountID])
     :if ($FoxOSUninstallInspectVerbose) do={ :put ("REMOVE mount/" . $mountName) }
   }
 }

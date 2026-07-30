@@ -171,7 +171,7 @@ printf '%s\n' \
   "image-inputs: explicit FoxOS, Mihomo, and MosDNS archives built by the caller" \
   "component-provenance: provenance/*.lock.json" \
   "release-gate: Core CI and Release workflows scan all three input images with Trivy" \
-  "chr-compatibility-gate: chr-envlists-smoke.rsc on a disposable exact-version CHR" \
+  "chr-compatibility-gate: envlists, mountlists, and mode=rw via chr-envlists-smoke.rsc on a disposable exact-version CHR" \
   "host-doctor: load-site-config.rsc then foxos-doctor.rsc (strictly read-only)" \
   "routeros-script-encoding: ASCII-only with non-ASCII message bytes encoded as RouterOS hex escapes" \
   "integrity: verify SHA256SUMS before upload" \

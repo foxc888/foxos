@@ -4,7 +4,7 @@
 
 ## 目标要求
 
-- RouterOS 7.21 是脚本语法下限；官方 amd64 环境通常为 `architecture-name=x86`，非标准目标返回的 `x86_64` 也会归一到 Linux `amd64`，但仍需单独验收；目标完整版本必须先通过同版本 CHR 的 `envlists` add/get/delete 门禁。
+- RouterOS 7.21 是脚本语法下限；官方 amd64 环境通常为 `architecture-name=x86`，非标准目标返回的 `x86_64` 也会归一到 Linux `amd64`，但仍需单独验收；目标完整版本必须先通过同版本 CHR 的 `envlists`/`mountlists`、命名挂载 `mode=rw` add/get/delete 门禁。
 - 与 RouterOS 完全同版本的 x86 `container` package。
 - 由设备操作者按 MikroTik 官方流程确认并启用 `container=yes` 与 `scheduler=yes`；两项 device-mode 更新都可能要求物理确认，FoxOS 脚本不会代为修改。
 - 已从不可变 `site-config.example.rsc` 生成、审核并独立封存 `site-config.rsc`；其中管理桥和 RouterOS 地址已存在且唯一。外置模式填写唯一 `/disk` 槽位；无 `/disk` 对象的 x86 系统盘模式必须精确填写保留根 `foxos`。
@@ -24,7 +24,7 @@ FoxOS、Mihomo、MosDNS 三张 amd64 输入镜像在 workflow 内从固定源码
 ## 安装顺序
 
 1. 工作站验证两层 checksum；复制模板为 `site-config.rsc`，编辑后运行 `seal-site-config.sh` 生成独立 `.sha512`。
-2. 目标精确版本先在可丢弃 CHR 上运行 `chr-envlists-smoke.rsc` 并取得零残留 PASS。
+2. 目标精确版本先在可丢弃 CHR 上运行 `chr-envlists-smoke.rsc`，确认 env/mount 契约并取得零残留 PASS。
 3. 实体目标接收任何 FoxOS 文件前，保存脱敏 RouterOS export 和带唯一离线密码、`aes-sha256` 的 binary backup，并把两个文件下载到离线位置。
 4. 逐项确认所有顶层上传目标计数为零后，才上传解压目录、站点清单及其摘要；随后 import 包内固定的 `load-site-config.rsc`，由它校验清单摘要和赋值白名单，再运行 `foxos-doctor.rsc`。doctor 只读输出主机前置项和首装冲突，不修改 device-mode、桥、地址、磁盘或 REST。
 5. 运行 `foxos-plan.rsc`；plan 自动执行 preflight 与共享 inspector，只读输出逐项 `CREATE/REUSE/FAIL` 和摘要。不得直接 import 可编辑的 `site-config.rsc`。

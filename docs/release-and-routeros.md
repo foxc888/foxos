@@ -82,7 +82,7 @@ foxos-full-amd64-<release-id>.tar.gz.sha256
 
 完整命令见 [QUICK-INSTALL](../deploy/routeros/QUICK-INSTALL.md)。不可跳过：
 
-1. RouterOS 7.21 是脚本语法下限，目标完整版本已通过同版本 CHR `envlists` add/get/delete 门禁；设备为标准 `architecture-name=x86` 或单独验收的非标准 `x86_64`，使用同版本 container package、`container=yes` 与 `scheduler=yes`。两项 device-mode 更新都可能要求设备操作者按官方流程物理确认。
+1. RouterOS 7.21 是脚本语法下限，目标完整版本已通过同版本 CHR `envlists`/`mountlists`、命名挂载 `mode=rw` add/get/delete 门禁；设备为标准 `architecture-name=x86` 或单独验收的非标准 `x86_64`，使用同版本 container package、`container=yes` 与 `scheduler=yes`。两项 device-mode 更新都可能要求设备操作者按官方流程物理确认。
 2. 清单指定的管理桥、存储、RouterOS 地址和受限 REST 已存在；存储是唯一 `/disk` 槽位或精确内部保留根 `foxos`。
 3. 工作站验证外层与包内 checksum，从模板生成并独立封存站点清单，但尚不上传。
 4. 在任何上传前保存脱敏 RouterOS export 与带唯一离线密码、`aes-sha256` 的 binary backup，下载两个副本；确认所有顶层上传目标零碰撞后才上传，并通过固定 loader 运行只读 doctor。
@@ -95,11 +95,11 @@ foxos-full-amd64-<release-id>.tar.gz.sha256
 
 FoxOS 完整 env allowlist 基线是 27 键：安装 marker、`FOXOS_ENV=production`、四个随机/凭据字段、RouterOS/Mihomo/MosDNS 端点和路径、升级检查点、八个 `FOXOS_SITE_*` 字段、`FOXOS_HTTPS_ENABLED=true`。站点清单显式配置私网订阅 allowlist 时增加 `FOXOS_SUBSCRIPTION_PRIVATE_CIDRS`，共 28 键。重复安装可补齐缺项，但未知额外键或固定值不一致会失败关闭。
 
-当前生命周期脚本统一使用 `envlists=` 与 `mountlists=` 引用命名列表。FoxOS 的版本下限是 RouterOS 7.21，静态门禁会拒绝单数 `envlist` 或混用拼写。
+当前生命周期脚本统一使用 `envlists=` 与 `mountlists=` 引用命名列表，并通过 loader-owned getter 把命名挂载精确约束为 `mode=rw`。FoxOS 的版本下限是 RouterOS 7.21，静态门禁会拒绝单数 `envlist`、旧 `read-only` 属性、直接绕过 getter 或混用拼写。
 
 MikroTik 当前 Container 官方页面在 2026-07-28 回读时仍把容器环境列表属性记录为单数 `envlist`，页面示例也使用单数；但是官方 `container-7.21.npk`、`container-7.21.3.npk`、`container-7.21.5.npk` 的 console/WebFig 命令元数据均暴露复数 `envlists`。三份审计输入的 SHA-256 分别为 `f51c93fe9331f2460171cbdc359339704ef1f763cb295190155dab4353961d16`、`c427ffd3a5a757116b4b5ed8ec6a5533f3a6eaa8afa6ad5adc2f22a124901f66`、`823c2386f6bd4657f7eae1b50f1f0ce167b9a945e0f95953e1182a9d73340e9b`。FoxOS 以目标版本包内的命令元数据为静态实现依据，但这仍不等于真实 RouterOS 已验收。
 
-因此 CHR 发布门禁仍必须在目标完整版本上保存 `/console/inspect request=completion input="/container/add "` 的原始输出，并在隔离、可丢弃的测试配置中完成最小 `/container/add`、`/container get` 和删除回读，确认实际接受 `envlists`。现有静态元数据证据只覆盖若干 7.21.x package，不代表这些版本已完成 CHR 验收，也不能外推到后续 minor；该门禁未通过前，不能把 RouterOS 首装、升级、回滚或卸载标记为已验收。
+因此 CHR 发布门禁仍必须在目标完整版本上保存 `/container/add` 与 `/container/mounts/add` 的 `/console/inspect` 原始输出，并在隔离、可丢弃的测试配置中完成最小 env、RW mount、VETH、container add/get/delete 回读，确认实际接受复数 `envlists`/`mountlists` 和 `mode=rw`。现有静态元数据证据只覆盖若干 7.21.x package 的 `envlists`，没有证明那些版本的 mount 属性，也不能外推到后续 minor；该门禁未通过前，不能把 RouterOS 首装、升级、回滚或卸载标记为已验收。
 
 ## HTTPS 与 CA
 

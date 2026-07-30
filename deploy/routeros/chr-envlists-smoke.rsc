@@ -1,8 +1,8 @@
-# FoxOS RouterOS 7.21+ envlists compatibility smoke test.
+# FoxOS RouterOS 7.21+ container env and mount compatibility smoke test.
 # DESTRUCTIVE: run only on a disposable CHR. Never run on a production router.
-# This script creates and removes an isolated env list, VETH, container, and
-# container root directory. It never imports site configuration and never uses
-# FoxOS production object names or ownership comments.
+# This script creates and removes an isolated env list, named RW mount, VETH,
+# container, and container root directory. It never imports site configuration
+# and never uses FoxOS production object names or ownership comments.
 # This standalone compatibility gate intentionally does not load site topology.
 
 :global FoxOSCHREnvlistsSmokeConfirm
@@ -29,8 +29,16 @@
   }
   :return $rootDirectory
 }
+:local writableMountMode "rw"
+:local mountMode do={
+  :local mount $1
+  :local currentMode [/container/mounts get $mount mode]
+  :if ([:typeof $currentMode] != "str") do={ :return "invalid" }
+  :if ($currentMode = "ro" || $currentMode = "ro,noexec" || $currentMode = "rw" || $currentMode = "rw,noexec") do={ :return $currentMode }
+  :return "invalid"
+}
 
-:put "=== FoxOS CHR envlists destructive smoke test ==="
+:put "=== FoxOS CHR container contract destructive smoke test ==="
 :put "WARNING disposable CHR only; abort on every production RouterOS device."
 :put "=== RouterOS evidence: system resource ==="
 /system/resource/print
@@ -113,6 +121,9 @@
 :local owner ("chr-envlists-smoke:" . $runID)
 :local envListName ("chr-envlists-smoke-env-" . $runID)
 :local envKey "CHR_ENVLISTS_SMOKE_RUN_ID"
+:local mountListName ("chr-envlists-smoke-mount-" . $runID)
+:local mountSource $storageRoot
+:local mountDestination ("/chr-envlists-smoke-" . $runID)
 :local vethName ("veth-chr-smoke-" . $runID)
 :local containerName ("chr-envlists-smoke-" . $runID)
 :local rootDirectory ($storageRoot . "/chr-envlists-smoke-" . $runID)
@@ -121,6 +132,9 @@
 :local rootPattern ("^" . $rootDirectory . "(\$|/)")
 :if ($owner ~ "^foxos:" || $envListName ~ "^foxos-" || $vethName ~ "^veth-(foxos|mihomo|mosdns)\$" || $containerName ~ "^foxos-") do={
   :error "internal isolation guard rejected a FoxOS production namespace"
+}
+:if ([:len [/container/mounts find where list=$mountListName]] > 0 || [:len [/container/mounts find where comment=$owner]] > 0) do={
+  :error ("random smoke mount namespace collision before write: " . $runID)
 }
 :if ([:len [/container find where name=$containerName]] > 0 || [:len [/container find where comment=$owner]] > 0 || [:len [/container/envs find where list=$envListName]] > 0 || [:len [/interface/veth find where name=$vethName]] > 0 || [:len [/file find where name~$rootPattern]] > 0) do={
   :error ("random smoke namespace collision before write: " . $runID)
@@ -131,7 +145,7 @@
 :if ($imagePath ~ $rootPattern) do={ :error "smoke image cannot be inside the generated root directory" }
 
 :put ("RUN destructive-temporary-namespace=" . $runID)
-:put ("RUN owner=" . $owner . " envlist=" . $envListName . " veth=" . $vethName . " container=" . $containerName)
+:put ("RUN owner=" . $owner . " envlist=" . $envListName . " mountlist=" . $mountListName . " veth=" . $vethName . " container=" . $containerName)
 :set FoxOSCHREnvlistsSmokeConfirm ""
 :set FoxOSCHREnvlistsSmokeImagePath ""
 :set FoxOSCHREnvlistsSmokeStorageRoot ""
@@ -147,6 +161,14 @@
   }
   :put ("READBACK env-list=" . [/container/envs get $envItem list] . " key=" . [/container/envs get $envItem key] . " value=" . [/container/envs get $envItem value])
 
+  /container/mounts/add list=$mountListName src=$mountSource dst=$mountDestination mode=$writableMountMode comment=$owner
+  :local mountByList [/container/mounts find where list=$mountListName]
+  :local mountByOwner [/container/mounts find where comment=$owner]
+  :if ([:len $mountByList] != 1 || [:len $mountByOwner] != 1 || $mountByList != $mountByOwner || [/container/mounts get $mountByList src] != $mountSource || [/container/mounts get $mountByList dst] != $mountDestination || [$mountMode $mountByList] != $writableMountMode || [/container/mounts get $mountByList comment] != $owner) do={
+    :error "mount add/get did not return the exact temporary RW object"
+  }
+  :put ("READBACK mount-list=" . [/container/mounts get $mountByList list] . " src=" . [/container/mounts get $mountByList src] . " dst=" . [/container/mounts get $mountByList dst] . " mode=" . [$mountMode $mountByList])
+
   /interface/veth/add name=$vethName address=$vethAddress gateway=$vethGateway comment=$owner
   :local veth [/interface/veth find where name=$vethName]
   :if ([:len $veth] != 1 || [/interface/veth get $veth comment] != $owner || [/interface/veth get $veth address] != $vethAddress || [/interface/veth get $veth gateway] != $vethGateway) do={
@@ -154,7 +176,7 @@
   }
   :put ("READBACK veth=" . [/interface/veth get $veth name] . " address=" . [/interface/veth get $veth address] . " gateway=" . [/interface/veth get $veth gateway])
 
-  /container/add name=$containerName file=$imagePath interface=$vethName root-dir=$rootDirectory envlists=$envListName logging=no start-on-boot=no comment=$owner
+  /container/add name=$containerName file=$imagePath interface=$vethName root-dir=$rootDirectory envlists=$envListName mountlists=$mountListName logging=no start-on-boot=no comment=$owner
   :local container
   :local containerFound false
   :for discoverAttempt from=1 to=10 do={
@@ -169,13 +191,14 @@
   }
   :if ($containerFound = false) do={ :error "container add did not create one identity-bound object" }
   :local containerEnvLists [/container get $container envlists]
+  :local containerMountLists [/container get $container mountlists]
   :local containerInterface [/container get $container interface]
   :local containerRootReadback [$containerRoot $container]
   :local containerStartOnBoot [/container get $container start-on-boot]
   :local containerLogging [/container get $container logging]
-  :put ("READBACK container-id=" . [:pick $container 0] . " name=" . [/container get $container name] . " envlists=" . $containerEnvLists . " interface=" . $containerInterface . " root-dir=" . $containerRootReadback . " start-on-boot=" . $containerStartOnBoot . " logging=" . $containerLogging)
-  :if ($containerEnvLists != $envListName || $containerInterface != $vethName || $containerRootReadback != $rootDirectory || ($containerStartOnBoot != false && $containerStartOnBoot != "no") || ($containerLogging != false && $containerLogging != "no")) do={
-    :error "container add/get identity or envlists readback mismatch"
+  :put ("READBACK container-id=" . [:pick $container 0] . " name=" . [/container get $container name] . " envlists=" . $containerEnvLists . " mountlists=" . $containerMountLists . " interface=" . $containerInterface . " root-dir=" . $containerRootReadback . " start-on-boot=" . $containerStartOnBoot . " logging=" . $containerLogging)
+  :if ($containerEnvLists != $envListName || $containerMountLists != $mountListName || $containerInterface != $vethName || $containerRootReadback != $rootDirectory || ($containerStartOnBoot != false && $containerStartOnBoot != "no") || ($containerLogging != false && $containerLogging != "no")) do={
+    :error "container add/get identity, envlists, or mountlists readback mismatch"
   }
 
   :local importedStopped false
@@ -212,7 +235,7 @@
   :if ([:len $cleanupByName] = 0 && [:len $cleanupByOwner] = 0) do={
     :set containerGone true
   } else={
-    :if ([:len $cleanupByName] != 1 || [:len $cleanupByOwner] != 1 || $cleanupByName != $cleanupByOwner || [/container get $cleanupByName interface] != $vethName || [$containerRoot $cleanupByName] != $rootDirectory || ([/container get $cleanupByName start-on-boot] != false && [/container get $cleanupByName start-on-boot] != "no")) do={
+    :if ([:len $cleanupByName] != 1 || [:len $cleanupByOwner] != 1 || $cleanupByName != $cleanupByOwner || [/container get $cleanupByName interface] != $vethName || [/container get $cleanupByName envlists] != $envListName || [/container get $cleanupByName mountlists] != $mountListName || [$containerRoot $cleanupByName] != $rootDirectory || ([/container get $cleanupByName start-on-boot] != false && [/container get $cleanupByName start-on-boot] != "no")) do={
       :error "temporary container identity changed; refusing unbound cleanup"
     }
     :local cleanupContainer $cleanupByName
@@ -238,6 +261,21 @@
 }
 
 :if ($containerGone) do={
+  :onerror mountCleanupError in={
+    :local cleanupMountByList [/container/mounts find where list=$mountListName]
+    :local cleanupMountByOwner [/container/mounts find where comment=$owner]
+    :if ([:len $cleanupMountByList] > 0 || [:len $cleanupMountByOwner] > 0) do={
+      :if ([:len $cleanupMountByList] != 1 || [:len $cleanupMountByOwner] != 1 || $cleanupMountByList != $cleanupMountByOwner || [/container/mounts get $cleanupMountByList src] != $mountSource || [/container/mounts get $cleanupMountByList dst] != $mountDestination || [$mountMode $cleanupMountByList] != $writableMountMode || [/container/mounts get $cleanupMountByList comment] != $owner) do={
+        :error "temporary mount identity changed; refusing unbound cleanup"
+      }
+      /container/mounts/remove $cleanupMountByList
+    }
+    :if ([:len [/container/mounts find where list=$mountListName]] > 0 || [:len [/container/mounts find where comment=$owner]] > 0) do={ :error "temporary mount remains after remove" }
+  } do={
+    :set cleanupFailed true
+    :put ("FAIL mount cleanup: " . $mountCleanupError)
+  }
+
   :onerror vethCleanupError in={
     :local cleanupVeth [/interface/veth find where name=$vethName]
     :if ([:len $cleanupVeth] > 0) do={
@@ -286,11 +324,12 @@
 }
 
 :local residualContainers ([:len [/container find where name=$containerName]] + [:len [/container find where comment=$owner]])
+:local residualMounts ([:len [/container/mounts find where list=$mountListName]] + [:len [/container/mounts find where comment=$owner]])
 :local residualVeths [:len [/interface/veth find where name=$vethName]]
 :local residualEnvs [:len [/container/envs find where list=$envListName]]
 :local residualRoots [:len [/file find where name~$rootPattern]]
-:put ("CLEANUP residual-containers=" . $residualContainers . " residual-veths=" . $residualVeths . " residual-envs=" . $residualEnvs . " residual-root-entries=" . $residualRoots)
-:if ($operationComplete = false || [:len $primaryFailure] > 0 || $cleanupFailed || $residualContainers > 0 || $residualVeths > 0 || $residualEnvs > 0 || $residualRoots > 0) do={
+:put ("CLEANUP residual-containers=" . $residualContainers . " residual-mounts=" . $residualMounts . " residual-veths=" . $residualVeths . " residual-envs=" . $residualEnvs . " residual-root-entries=" . $residualRoots)
+:if ($operationComplete = false || [:len $primaryFailure] > 0 || $cleanupFailed || $residualContainers > 0 || $residualMounts > 0 || $residualVeths > 0 || $residualEnvs > 0 || $residualRoots > 0) do={
   :error ("CHR_ENVLISTS_SMOKE FAIL run=" . $runID . " primary=" . $primaryFailure . "; discard this CHR after collecting evidence")
 }
-:put ("CHR_ENVLISTS_SMOKE PASS run=" . $runID . " routeros=" . $routerVersion . " architecture=" . $architecture . " package=" . $containerPackageVersion . " envlists-readback=exact cleanup=clean")
+:put ("CHR_ENVLISTS_SMOKE PASS run=" . $runID . " routeros=" . $routerVersion . " architecture=" . $architecture . " package=" . $containerPackageVersion . " envlists-readback=exact mount-mode=rw mountlists-readback=exact cleanup=clean")

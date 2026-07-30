@@ -8,9 +8,13 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSMountCompatVersion
+:global FoxOSWritableMountMode
+:global FoxOSMountMode
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
+:if ($FoxOSMountCompatVersion != 1 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 :local storageRoot $FoxOSSiteStorageRoot
 :local promoteTransition [/container find where comment="foxos:transition:promote"]
 :local rollbackTransition [/container find where comment="foxos:transition:rollback"]
@@ -54,7 +58,7 @@
   :local expectedSource ($storageRoot . "/" . [:pick $definition ($p1 + 1) $p2])
   :local expectedDestination [:pick $definition ($p2 + 1) [:len $definition]]
   :local mountID [/container/mounts find where list=$mountName]
-  :if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || ([/container/mounts get $mountID read-only] != false && [/container/mounts get $mountID read-only] != "no")) do={
+  :if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={
     :error ("启动所需共享挂载身份或读写属性不匹配: " . $mountName)
   }
   :set verifiedSharedMounts ($verifiedSharedMounts + 1)

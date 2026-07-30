@@ -2,7 +2,7 @@
 
 本包用于备用 RouterOS 或 CHR 验收。仓库已完成自动化、浏览器、静态脚本和 Linux 网络命名空间验证，但尚未执行 CHR 或实体 RouterOS 验收；容器 `running`、CI 绿色或模拟连通都不能记为 RouterOS 部署成功。
 
-当前 RC1 的 `7.21+` 表示脚本语法下限，不表示所有后续版本已经兼容。仓库内尚无任何 RouterOS 完整版本的 CHR/实体验收记录；目标设备的精确版本必须先通过第 1 节的同版本 CHR `envlists` add/get/delete 门禁，才可进入备用设备安装。最短安全路径固定为：下载同一 SHA 制品 -> 工作站两层校验 -> 同版本 CHR 兼容门禁 -> 封存唯一站点清单 -> 加密备份并下载 -> 零碰撞检查 -> 上传 -> 只读 doctor/plan -> 摘要确认 install -> start -> verify。
+当前 RC1 的 `7.21+` 表示脚本语法下限，不表示所有后续版本已经兼容。目标设备的精确版本必须先通过第 1 节的同版本 CHR container 契约门禁，实际证明复数 `envlists`/`mountlists` 和命名挂载 `mode=rw`，才可进入备用设备安装。最短安全路径固定为：下载同一 SHA 制品 -> 工作站两层校验 -> 同版本 CHR 兼容门禁 -> 封存唯一站点清单 -> 加密备份并下载 -> 零碰撞检查 -> 上传 -> 只读 doctor/plan -> 摘要确认 install -> start -> verify。
 
 ## 0. 先审核站点清单
 
@@ -65,17 +65,19 @@ FoxOS 只检查 MosDNS TCP 53；MosDNS 9099 API 仅监听容器 loopback，包�
 - RouterOS `www`/REST 已启用在 TCP 80，并限制为清单网段或 FoxOS `/32`。
 - Mihomo、MosDNS、FoxOS 三个保留地址未被 RouterOS address、DHCP Lease、其他 veth、ARP 或在线主机占用。
 
-部署候选还必须先在同版本、可丢弃的 CHR 上保存以下命令的原始输出，并用包内 `chr-envlists-smoke.rsc` 完成一次最小 `/container/add ... envlists=...`、`/container get ... envlists` 和删除回读。先把 smoke 脚本与包内 `foxos-upgrade-<release-id>/foxos-amd64.tar` 上传到 CHR 的临时存储，再运行：
+部署候选还必须先在同版本、可丢弃的 CHR 上保存以下命令的原始输出，并用包内 `chr-envlists-smoke.rsc` 完成一次最小 env、`mode=rw` mount、VETH、带 `envlists`/`mountlists` 容器的 add/get/delete 回读。先把 smoke 脚本与包内 `foxos-upgrade-<release-id>/foxos-amd64.tar` 上传到 CHR 的临时存储，再运行：
 
 ```routeros
 /console/inspect request=completion input="/container/add "
+/console/inspect request=completion input="/container/mounts/add "
+/console/inspect request=completion input="/container/mounts/add mode="
 :global FoxOSCHREnvlistsSmokeStorageRoot "disk1"
 :global FoxOSCHREnvlistsSmokeImagePath "disk1/foxos-upgrade-<release-id>/foxos-amd64.tar"
 :global FoxOSCHREnvlistsSmokeConfirm "RUN-ON-DISPOSABLE-CHR"
 /import file-name=disk1/chr-envlists-smoke.rsc
 ```
 
-完整准备、证据与失败清理要求见包内 `chr-envlists-smoke.md`。只有目标完整版本的命令元数据与实际回读都接受复数 `envlists`、残留计数全为零且最终出现 `CHR_ENVLISTS_SMOKE PASS`，该版本才可进入后续首装、升级、回滚和卸载验收。升级 RouterOS patch/minor 后必须重新执行；这个兼容性门禁只能在隔离 CHR 中完成，不能把实体设备作为第一次拼写试验对象。
+完整准备、证据与失败清理要求见包内 `chr-envlists-smoke.md`。只有目标完整版本的命令元数据与实际回读都接受复数 `envlists`/`mountlists`、命名挂载 `mode=rw`，残留计数全为零且最终出现 `CHR_ENVLISTS_SMOKE PASS`，该版本才可进入后续首装、升级、回滚和卸载验收。升级 RouterOS patch/minor 后必须重新执行；这个兼容性门禁只能在隔离 CHR 中完成，不能把实体设备作为第一次拼写试验对象。
 
 安装器会创建最小 `foxos-service` 账号。RouterOS REST 在管理 LAN 内仍是 HTTP，因此管理 LAN 必须可信且隔离；不得暴露到 WAN。FoxOS 浏览器/API 访问则强制使用本地 CA 保护的 HTTPS。
 
@@ -412,7 +414,7 @@ CA 已导入客户端信任库且 DNS 可解析后，访问 `https://foxos.home.
 
 ## 常见故障
 
-本项目脚本下限为 RouterOS 7.21。若缺少 container package，上传与 RouterOS 完全同版本的 x86 包（x86 单包通常名为 `container-<version>.npk`），然后执行 `/system/package/apply-changes`。普通 `/system/reboot` 不会应用 7.21 的待安装 package；设备重启后必须用 `/system/package/print where name="container"` 回读版本与 disabled 状态，并在精确版本 CHR 上重新通过 `envlists` 门禁。
+本项目脚本下限为 RouterOS 7.21。若缺少 container package，上传与 RouterOS 完全同版本的 x86 包（x86 单包通常名为 `container-<version>.npk`），然后执行 `/system/package/apply-changes`。普通 `/system/reboot` 不会应用 7.21 的待安装 package；设备重启后必须用 `/system/package/print where name="container"` 回读版本与 disabled 状态，并在精确版本 CHR 上重新通过 container env/mount 契约门禁。
 
 | 现象 | 检查 |
 |---|---|

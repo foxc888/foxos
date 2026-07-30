@@ -7,6 +7,9 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSMountCompatVersion
+:global FoxOSWritableMountMode
+:global FoxOSMountMode
 :global FoxOSRollbackInspectVerbose false
 :global FoxOSRollbackCurrentDigest
 :global FoxOSRollbackApprovedDigest
@@ -16,6 +19,7 @@
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
+:if ($FoxOSMountCompatVersion != 1 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 :local releaseID "__FOXOS_RELEASE_ID__"
 :if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "rollback.rsc 未绑定有效 release ID" }
 :local payloadRoot ($FoxOSSiteStorageRoot . "/foxos-upgrade-" . $releaseID)
@@ -55,7 +59,7 @@
   :local expectedSource ($FoxOSSiteStorageRoot . "/" . [:pick $definition ($p1 + 1) $p2])
   :local expectedDestination [:pick $definition ($p2 + 1) [:len $definition]]
   :local mountID [/container/mounts find where list=$mountName]
-  :if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || ([/container/mounts get $mountID read-only] != false && [/container/mounts get $mountID read-only] != "no")) do={
+  :if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={
     :error ("rollback 所需共享挂载身份或读写属性不匹配: " . $mountName)
   }
   :set verifiedSharedMounts ($verifiedSharedMounts + 1)

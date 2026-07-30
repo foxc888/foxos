@@ -431,31 +431,44 @@ chr_envlists_smoke_contract() {
     '[:find $imagePath $parentPathMarker]' \
     '/container/envs/add list=$envListName key=$envKey value=$runID' \
     '/container/envs get $envItem value] != $runID' \
-    '/container/add name=$containerName file=$imagePath interface=$vethName root-dir=$rootDirectory envlists=$envListName logging=no start-on-boot=no comment=$owner' \
+    ':local mountListName ("chr-envlists-smoke-mount-" . $runID)' \
+    ':local writableMountMode "rw"' \
+    ':local mountMode do={' \
+    ':local currentMode [/container/mounts get $mount mode]' \
+    '/container/mounts/add list=$mountListName src=$mountSource dst=$mountDestination mode=$writableMountMode comment=$owner' \
+    '[$mountMode $mountByList] != $writableMountMode' \
+    '/container/add name=$containerName file=$imagePath interface=$vethName root-dir=$rootDirectory envlists=$envListName mountlists=$mountListName logging=no start-on-boot=no comment=$owner' \
     ':local containerState do={' \
     ':local running [/container get $container running]' \
     ':local stopped [/container get $container stopped]' \
     ':local containerRoot do={' \
     ':local containerEnvLists [/container get $container envlists]' \
+    ':local containerMountLists [/container get $container mountlists]' \
     '$containerEnvLists != $envListName' \
+    '$containerMountLists != $mountListName' \
     '$cleanupByName != $cleanupByOwner' \
     '[/container get $cleanupByName interface] != $vethName' \
     '[$containerRoot $cleanupByName] != $rootDirectory' \
     '[$containerState $cleanupContainer] != "stopped"' \
     '[/interface/veth get $cleanupVeth comment] != $owner' \
     '[/container/envs get $cleanupEnvItems value] != $runID' \
+    '$cleanupMountByList != $cleanupMountByOwner' \
+    '[$mountMode $cleanupMountByList] != $writableMountMode' \
     '/container/remove $cleanupContainer' \
+    '/container/mounts/remove $cleanupMountByList' \
     '/interface/veth/remove $cleanupVeth' \
     '/container/envs/remove $cleanupEnvItems' \
+    ':local residualMounts ([:len [/container/mounts find where list=$mountListName]] + [:len [/container/mounts find where comment=$owner]])' \
     'CLEANUP residual-containers=' \
+    'residual-mounts=' \
     'CHR_ENVLISTS_SMOKE PASS'; do
     rg -Fq -- "$invariant" "$script" || return 1
   done
 
   confirmation_line=$(rg -n -F ':if ($FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR") do={' "$script" | head -n1 | cut -d: -f1)
-  first_write=$(rg -n '^[[:space:]]*/(container/envs/add|interface/veth/add|container/add)[[:space:]]' "$script" | head -n1 | cut -d: -f1)
+  first_write=$(rg -n '^[[:space:]]*/(container/envs/add|container/mounts/add|interface/veth/add|container/add)[[:space:]]' "$script" | head -n1 | cut -d: -f1)
   residual_line=$(rg -n -F ':local residualContainers ' "$script" | head -n1 | cut -d: -f1)
-  failure_line=$(rg -n -F ':if ($operationComplete = false || [:len $primaryFailure] > 0 || $cleanupFailed || $residualContainers > 0 || $residualVeths > 0 || $residualEnvs > 0 || $residualRoots > 0) do={' "$script" | head -n1 | cut -d: -f1)
+  failure_line=$(rg -n -F ':if ($operationComplete = false || [:len $primaryFailure] > 0 || $cleanupFailed || $residualContainers > 0 || $residualMounts > 0 || $residualVeths > 0 || $residualEnvs > 0 || $residualRoots > 0) do={' "$script" | head -n1 | cut -d: -f1)
   pass_line=$(rg -n -F ':put ("CHR_ENVLISTS_SMOKE PASS ' "$script" | head -n1 | cut -d: -f1)
   [[ -n "$confirmation_line" && -n "$first_write" && -n "$residual_line" && -n "$failure_line" && -n "$pass_line" ]] \
     && ((confirmation_line < first_write && first_write < residual_line && residual_line < failure_line && failure_line < pass_line)) \
@@ -799,8 +812,7 @@ container_mount_list_contract() {
 
 container_mount_readback_contract() {
   local script=$1
-  rg -q '/container/mounts get \$[A-Za-z][A-Za-z0-9]* read-only\]' "$script" \
-    && rg -q 'read-only\] (!=|=) false' "$script"
+  rg -q '\[\$FoxOSMountMode \$[A-Za-z][A-Za-z0-9]*\] (!=|=) \$FoxOSWritableMountMode' "$script"
 }
 
 lifecycle_shared_mount_contract() {
@@ -816,7 +828,7 @@ lifecycle_shared_mount_contract() {
     && rg -Fq ':local verifiedSharedMounts 0' "$script" \
     && rg -Fq ':local expectedDestination [:pick $definition ($p2 + 1) [:len $definition]]' "$script" \
     && rg -Fq ':local mountID [/container/mounts find where list=$mountName]' "$script" \
-    && rg -Fq ':if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || ([/container/mounts get $mountID read-only] != false && [/container/mounts get $mountID read-only] != "no")) do={' "$script" \
+    && rg -Fq ':if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={' "$script" \
     && rg -Fq ':set verifiedSharedMounts ($verifiedSharedMounts + 1)' "$script" \
     && rg -Fq ':if ($verifiedSharedMounts != 3) do={ :error "三个共享挂载未全部通过身份与可写检查" }' "$script" \
     || return 1
@@ -828,7 +840,7 @@ lifecycle_shared_mount_contract() {
 full_install_mount_contract() {
   local script=$1
   container_mount_readback_contract "$script" \
-    && rg -q '/container/mounts add list=\$mountName[^#]*read-only=no' "$script"
+    && rg -q '/container/mounts add list=\$mountName[^#]*mode=\$FoxOSWritableMountMode' "$script"
 }
 
 container_identity_fields_contract() {
@@ -861,9 +873,29 @@ container_compatibility_contract() {
   done
 }
 
+mount_compatibility_contract() {
+  local script=$1
+  local invariant
+  for invariant in \
+    ':global FoxOSMountCompatVersion 1' \
+    ':global FoxOSWritableMountMode "rw"' \
+    ':global FoxOSMountMode do={' \
+    ':local mountMode [/container/mounts get $mount mode]' \
+    ':if ([:typeof $mountMode] != "str") do={ :return "invalid" }' \
+    '$mountMode = "ro" || $mountMode = "ro,noexec" || $mountMode = "rw" || $mountMode = "rw,noexec"' \
+    ':return "invalid"'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+}
+
 file_native_handle_contract() {
   local target=$1
   ! rg -q -g '*.rsc' '/file get[[:space:]]+(?:[^[:space:]\[]+|\[[^]]+\])[[:space:]]+(?:\.id|value-name[[:space:]]*=[[:space:]]*\.id)[[:space:]]*\]' "$target"
+}
+
+mount_native_handle_contract() {
+  local target=$1
+  ! rg -q -g '*.rsc' '/container/mounts get[[:space:]]+\$[A-Za-z][A-Za-z0-9]*[[:space:]]+\.id\]' "$target"
 }
 
 container_compatibility_consumer_contract() {
@@ -873,6 +905,15 @@ container_compatibility_consumer_contract() {
     && rg -Fq ':global FoxOSContainerRoot' "$script" \
     && rg -Fq '$FoxOSContainerCompatVersion != 1' "$script" \
     && rg -q '\[\$FoxOSContainer(State|Root) \$[A-Za-z][A-Za-z0-9]*\]' "$script"
+}
+
+mount_compatibility_consumer_contract() {
+  local script=$1
+  rg -Fq ':global FoxOSMountCompatVersion' "$script" \
+    && rg -Fq ':global FoxOSWritableMountMode' "$script" \
+    && rg -Fq ':global FoxOSMountMode' "$script" \
+    && rg -Fq '$FoxOSMountCompatVersion != 1 || $FoxOSWritableMountMode != "rw"' "$script" \
+    && rg -q '\[\$FoxOSMountMode \$[A-Za-z][A-Za-z0-9]*\]' "$script"
 }
 
 admin_container_logging_contract() {
@@ -930,7 +971,7 @@ cleanup_inspector_contract() {
     && rg -Fq '|rollback=" . [:pick $retirement 0]' "$script" \
     && rg -Fq '|admin-slot=" . $adminSlot' "$script" \
     && rg -Fq '|veth=" . [/interface/veth get $foxosVeth .id]' "$script" \
-    && rg -Fq '|mount=" . [/container/mounts get $mountID .id]' "$script" \
+    && rg -Fq '|mount=" . [:pick $mountID 0]' "$script" \
     && rg -Fq ':local startScriptByName [/system/script find where name="foxos-start-sequence"]' "$script" \
     && rg -Fq ':local startScriptByOwner [/system/script find where comment="foxos:start-sequence"]' "$script" \
     && rg -Fq '[/system/script get $startScriptByName .id] != [/system/script get $startScriptByOwner .id]' "$script" \
@@ -1242,6 +1283,9 @@ fi
 if ! file_native_handle_contract "$rsc_root"; then
   report "file identity uses unsupported RouterOS .id readback instead of native handles"
 fi
+if ! mount_native_handle_contract "$rsc_root"; then
+  report "mount identity uses unsupported RouterOS .id readback instead of native handles"
+fi
 if rg -n -g '*.rsc' -g '!load-site-config.rsc' -g '!chr-envlists-smoke.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (root-dir|running|stopped)\]' "$rsc_root"; then
   report "container path or state bypasses the loader-owned compatibility contract"
 fi
@@ -1259,17 +1303,23 @@ done
 if rg -n -g '*.rsc' '/container/mounts (add|find)[^#]*(name=|where name)' "$rsc_root"; then
   report "RouterOS named mounts must use the official list property, not name"
 fi
+if rg -n -g '*.rsc' '/container/mounts (add|get)[^#]*read-only' "$rsc_root"; then
+  report "RouterOS named mounts must use mode=rw and the loader-owned mode getter, not read-only"
+fi
+if rg -n -g '*.rsc' -g '!load-site-config.rsc' -g '!chr-envlists-smoke.rsc' '/container/mounts get \$[A-Za-z][A-Za-z0-9]* mode\]' "$rsc_root"; then
+  report "deployment scripts bypass the loader-owned mount mode compatibility contract"
+fi
 for mount_list_script in foxos-full-install.rsc foxos-install-inspect.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc upgrade-inspect.rsc upgrade-promote-inspect.rsc rollback-inspect.rsc upgrade-cleanup-inspect.rsc preflight.rsc; do
   if ! container_mount_list_contract "$rsc_root/$mount_list_script"; then
     report "$mount_list_script does not use the RouterOS mount list property consistently"
   fi
 done
 if ! full_install_mount_contract "$rsc_root/foxos-full-install.rsc"; then
-  report "full install does not create and read back every named mount as read-only=no"
+  report "full install does not create and read back every named mount as mode=rw"
 fi
 for mount_readback_script in foxos-install-inspect.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc upgrade-inspect.rsc upgrade-promote-inspect.rsc rollback-inspect.rsc upgrade-cleanup-inspect.rsc; do
   if ! container_mount_readback_contract "$rsc_root/$mount_readback_script"; then
-    report "$mount_readback_script does not bind named mounts to read-only=no"
+    report "$mount_readback_script does not bind named mounts to mode=rw"
   fi
 done
 for lifecycle_mount_script in foxos-start-all.rsc upgrade-promote.rsc rollback.rsc; do
@@ -1285,9 +1335,17 @@ done
 if ! container_compatibility_contract "$rsc_root/load-site-config.rsc"; then
   report "the immutable loader does not own the RouterOS native-handle, dynamic-state, and root-dir normalization contract"
 fi
+if ! mount_compatibility_contract "$rsc_root/load-site-config.rsc"; then
+  report "the immutable loader does not own the RouterOS named-mount mode compatibility contract"
+fi
 for compatibility_script in foxos-full-install.rsc foxos-install-inspect.rsc foxos-start-all.rsc foxos-verify.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc upgrade-inspect.rsc upgrade.rsc upgrade-promote-inspect.rsc upgrade-promote.rsc rollback-inspect.rsc rollback.rsc upgrade-cleanup-inspect.rsc upgrade-cleanup-apply.rsc; do
   if ! container_compatibility_consumer_contract "$rsc_root/$compatibility_script"; then
     report "$compatibility_script bypasses or does not require the loader-owned container compatibility contract"
+  fi
+done
+for mount_compatibility_script in foxos-full-install.rsc foxos-install-inspect.rsc foxos-start-all.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc upgrade-inspect.rsc upgrade-promote-inspect.rsc upgrade-promote.rsc rollback-inspect.rsc rollback.rsc upgrade-cleanup-inspect.rsc; do
+  if ! mount_compatibility_consumer_contract "$rsc_root/$mount_compatibility_script"; then
+    report "$mount_compatibility_script bypasses or does not require the loader-owned mount compatibility contract"
   fi
 done
 if ! admin_container_logging_contract "$rsc_root"; then
@@ -1494,9 +1552,9 @@ for identity_material in \
     report "the uninstall digest material omits container identity field: $identity_material"
   fi
 done
-if ! rg -Fq '[/container/mounts get $mountID read-only])' "$rsc_root/foxos-install-inspect.rsc" \
-  || ! rg -Fq '[/container/mounts get $mountID read-only])' "$rsc_root/foxos-uninstall-inspect.rsc"; then
-  report "install or uninstall digest material does not bind mount read-only state"
+if ! rg -Fq '[$FoxOSMountMode $mountID])' "$rsc_root/foxos-install-inspect.rsc" \
+  || ! rg -Fq '[$FoxOSMountMode $mountID])' "$rsc_root/foxos-uninstall-inspect.rsc"; then
+  report "install or uninstall digest material does not bind normalized mount mode"
 fi
 
 for invariant in \
@@ -1913,6 +1971,13 @@ sed '/:return \[:pick \$rootDirectory 1 \[:len \$rootDirectory\]\]/d' \
 if container_compatibility_contract "$site_seal_root/lifecycle/container-root-normalization-missing.rsc"; then
   report "container compatibility contract accepted root-dir readback without leading-slash normalization"
 fi
+sed 's#/container/mounts get \$mount mode#/container/mounts get $mount read-only#' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/mount-mode-legacy-readback.rsc"
+if cmp -s "$rsc_root/load-site-config.rsc" "$site_seal_root/lifecycle/mount-mode-legacy-readback.rsc"; then
+  report "mount compatibility failure injection did not mutate the loader"
+elif mount_compatibility_contract "$site_seal_root/lifecycle/mount-mode-legacy-readback.rsc"; then
+  report "mount compatibility contract accepted the legacy read-only property"
+fi
 sed 's#\[:pick \$imageID 0\]#[/file get $imageID .id]#' \
   "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/install-file-id-readback.rsc"
 if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/install-file-id-readback.rsc"; then
@@ -1926,6 +1991,13 @@ if cmp -s "$rsc_root/upgrade-inspect.rsc" "$site_seal_root/lifecycle/upgrade-fil
   report "upgrade file-handle failure injection did not mutate the inspector"
 elif file_native_handle_contract "$site_seal_root/lifecycle/upgrade-file-id-readback.rsc"; then
   report "file native-handle contract accepted upgrade .id readback"
+fi
+sed 's#\[:pick \$mountID 0\]#[/container/mounts get $mountID .id]#' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/install-mount-id-readback.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/install-mount-id-readback.rsc"; then
+  report "install mount-handle failure injection did not mutate the inspector"
+elif mount_native_handle_contract "$site_seal_root/lifecycle/install-mount-id-readback.rsc"; then
+  report "mount native-handle contract accepted install .id readback"
 fi
 sed '/FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR"/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-confirmation-missing.rsc"
@@ -1949,6 +2021,18 @@ sed '/:local containerEnvLists \[\/container get \$container envlists\]/d' \
 if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-envlists-readback-missing.rsc"; then
   report "CHR envlists smoke contract accepted a script without envlists readback"
 fi
+sed 's/:local writableMountMode "rw"/:local writableMountMode "ro"/' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-mount-mode-ro.rsc"
+if cmp -s "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-mount-mode-ro.rsc"; then
+  report "CHR mount mode failure injection did not mutate the smoke"
+elif chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-mount-mode-ro.rsc"; then
+  report "CHR smoke contract accepted a read-only named mount"
+fi
+sed '/:local containerMountLists \[\/container get \$container mountlists\]/d' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-mountlists-readback-missing.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-mountlists-readback-missing.rsc"; then
+  report "CHR smoke contract accepted a script without mountlists readback"
+fi
 sed '/\$cleanupByName != \$cleanupByOwner/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-cleanup-binding-missing.rsc"
 if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-cleanup-binding-missing.rsc"; then
@@ -1963,6 +2047,11 @@ sed 's/ || \$residualRoots > 0//' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-residual-root-guard-missing.rsc"
 if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-residual-root-guard-missing.rsc"; then
   report "CHR envlists smoke contract accepted PASS with an incomplete residual guard"
+fi
+sed 's/ || \$residualMounts > 0//' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-residual-mount-guard-missing.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-residual-mount-guard-missing.rsc"; then
+  report "CHR smoke contract accepted PASS with an incomplete mount residual guard"
 fi
 cp -- "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-container-start-added.rsc"
 printf '%s\n' '/container/start [find where name="unexpected"]' >> "$site_seal_root/lifecycle/smoke-container-start-added.rsc"
@@ -2232,23 +2321,23 @@ if cmp -s "$rsc_root/foxos-full-install.rsc" "$site_seal_root/lifecycle/containe
 elif container_mount_list_contract "$site_seal_root/lifecycle/container-mount-name.rsc"; then
   report "unsupported container mount name property failure injection was not rejected"
 fi
-sed 's/read-only=no/read-only=yes/' \
-  "$rsc_root/foxos-full-install.rsc" > "$site_seal_root/lifecycle/container-mount-read-only.rsc"
-if cmp -s "$rsc_root/foxos-full-install.rsc" "$site_seal_root/lifecycle/container-mount-read-only.rsc"; then
-  report "mount read-only failure injection did not mutate full install"
-elif full_install_mount_contract "$site_seal_root/lifecycle/container-mount-read-only.rsc"; then
-  report "read-only=yes named mount failure injection was not rejected"
+sed 's/mode=\$FoxOSWritableMountMode/read-only=no/' \
+  "$rsc_root/foxos-full-install.rsc" > "$site_seal_root/lifecycle/container-mount-legacy-property.rsc"
+if cmp -s "$rsc_root/foxos-full-install.rsc" "$site_seal_root/lifecycle/container-mount-legacy-property.rsc"; then
+  report "mount legacy-property failure injection did not mutate full install"
+elif full_install_mount_contract "$site_seal_root/lifecycle/container-mount-legacy-property.rsc"; then
+  report "legacy read-only=no named mount creation was not rejected"
 fi
-sed 's/ read-only] = false/ read-only] = true/g' \
+sed 's/\[\$FoxOSMountMode \$mountID\] = \$FoxOSWritableMountMode/[$FoxOSMountMode $mountID] = "ro"/g' \
   "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/container-mount-readback-weakened.rsc"
 if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/container-mount-readback-weakened.rsc"; then
   report "mount readback failure injection did not mutate install inspector"
 elif container_mount_readback_contract "$site_seal_root/lifecycle/container-mount-readback-weakened.rsc"; then
-  report "weakened mount read-only readback was not rejected"
+  report "weakened mount mode readback was not rejected"
 fi
 for lifecycle_mount_script in foxos-start-all.rsc upgrade-promote.rsc rollback.rsc; do
   mutated_script="$site_seal_root/lifecycle/${lifecycle_mount_script%.rsc}-shared-mount-rw-weakened.rsc"
-  sed 's/read-only] != false/read-only] != true/g' "$rsc_root/$lifecycle_mount_script" > "$mutated_script"
+  sed 's/\[\$FoxOSMountMode \$mountID\] != \$FoxOSWritableMountMode/[$FoxOSMountMode $mountID] != "ro"/g' "$rsc_root/$lifecycle_mount_script" > "$mutated_script"
   if cmp -s "$rsc_root/$lifecycle_mount_script" "$mutated_script"; then
     report "shared mount RW failure injection did not mutate $lifecycle_mount_script"
   elif lifecycle_shared_mount_contract "$mutated_script"; then
