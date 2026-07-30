@@ -156,10 +156,14 @@
   :local privateCIDRCursor 0
   :local privateCIDRCount 0
   :local privateCIDRSeen ","
-  :local private10 [:toip "10.0.0.0/8"]
-  :local private172 [:toip "172.16.0.0/12"]
-  :local private192 [:toip "192.168.0.0/16"]
+  :local private10Address [:toip "10.0.0.0"]
+  :local private10Netmask [:toip "255.0.0.0"]
+  :local private172Address [:toip "172.16.0.0"]
+  :local private172Netmask [:toip "255.240.0.0"]
+  :local private192Address [:toip "192.168.0.0"]
+  :local private192Netmask [:toip "255.255.0.0"]
   :local privateULA [:toip6 "fc00::/7"]
+  :local ipv4MaskDefinitions {"8|255.0.0.0";"9|255.128.0.0";"10|255.192.0.0";"11|255.224.0.0";"12|255.240.0.0";"13|255.248.0.0";"14|255.252.0.0";"15|255.254.0.0";"16|255.255.0.0";"17|255.255.128.0";"18|255.255.192.0";"19|255.255.224.0";"20|255.255.240.0";"21|255.255.248.0";"22|255.255.252.0";"23|255.255.254.0";"24|255.255.255.0";"25|255.255.255.128";"26|255.255.255.192";"27|255.255.255.224";"28|255.255.255.240";"29|255.255.255.248";"30|255.255.255.252";"31|255.255.255.254";"32|255.255.255.255"}
   :while ($privateCIDRCursor < [:len $privateCIDRs]) do={
     :local privateCIDREnd [:find $privateCIDRs "," $privateCIDRCursor]
     :if ([:typeof $privateCIDREnd] = "nil") do={ :set privateCIDREnd [:len $privateCIDRs] }
@@ -171,9 +175,9 @@
     }
     :local privateCIDRSlash [:find $privateCIDR "/"]
     :local privateCIDRIsIPv6 ([:typeof [:find $privateCIDR ":"]] != "nil")
-    :local privateCIDRValue
-    :if ($privateCIDRIsIPv6) do={ :set privateCIDRValue [:toip6 $privateCIDR] } else={ :set privateCIDRValue [:toip $privateCIDR] }
-    :if ([:typeof $privateCIDRSlash] = "nil" || ($privateCIDRIsIPv6 && [:typeof $privateCIDRValue] != "ip6-prefix") || (!$privateCIDRIsIPv6 && [:typeof $privateCIDRValue] != "ip-prefix")) do={
+    :local privateCIDRPrefixValue
+    :if ($privateCIDRIsIPv6) do={ :set privateCIDRPrefixValue [:toip6 $privateCIDR] }
+    :if ([:typeof $privateCIDRSlash] = "nil" || ($privateCIDRIsIPv6 && [:typeof $privateCIDRPrefixValue] != "ip6-prefix")) do={
       :error ("订阅私网 allowlist 包含无效 CIDR: " . $privateCIDR)
     }
     :local privateCIDRAddress
@@ -185,11 +189,21 @@
     :if ($privateCIDR != ($privateCIDRAddress . "/" . $privateCIDRBits)) do={
       :error ("订阅私网 allowlist 必须使用 canonical network address: " . $privateCIDR)
     }
+    :if ($privateCIDRIsIPv6 = false) do={
+      :local privateCIDRNetmask
+      :foreach maskDefinition in=$ipv4MaskDefinitions do={
+        :local separator [:find $maskDefinition "|"]
+        :if ([:tonum [:pick $maskDefinition 0 $separator]] = $privateCIDRBits) do={ :set privateCIDRNetmask [:toip [:pick $maskDefinition ($separator + 1) [:len $maskDefinition]]] }
+      }
+      :if ([:typeof $privateCIDRNetmask] != "ip" || (($privateCIDRAddress & $privateCIDRNetmask) != $privateCIDRAddress)) do={
+        :error ("订阅私网 allowlist 必须使用有效的 canonical IPv4 network address: " . $privateCIDR)
+      }
+    }
     :local privateCIDRAllowed false
     :if ($privateCIDRIsIPv6 = false) do={
-      :if (($privateCIDRAddress in $private10) && $privateCIDRBits >= 8) do={ :set privateCIDRAllowed true }
-      :if (($privateCIDRAddress in $private172) && $privateCIDRBits >= 12) do={ :set privateCIDRAllowed true }
-      :if (($privateCIDRAddress in $private192) && $privateCIDRBits >= 16) do={ :set privateCIDRAllowed true }
+      :if ($privateCIDRBits >= 8 && (($privateCIDRAddress & $private10Netmask) = $private10Address)) do={ :set privateCIDRAllowed true }
+      :if ($privateCIDRBits >= 12 && (($privateCIDRAddress & $private172Netmask) = $private172Address)) do={ :set privateCIDRAllowed true }
+      :if ($privateCIDRBits >= 16 && (($privateCIDRAddress & $private192Netmask) = $private192Address)) do={ :set privateCIDRAllowed true }
     }
     :if ($privateCIDRIsIPv6 && ($privateCIDRAddress in $privateULA) && $privateCIDRBits >= 7) do={ :set privateCIDRAllowed true }
     :if ($privateCIDRAllowed = false) do={ :error ("订阅私网 allowlist 只接受 RFC1918 或 IPv6 ULA 前缀: " . $privateCIDR) }

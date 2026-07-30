@@ -75,8 +75,7 @@
 }
 :local prefixSeparator [:find $siteNetwork "/"]
 :local networkAddressValue
-:local sitePrefixValue [:toip $siteNetwork]
-:if ([:typeof $prefixSeparator] = "nil" || [:typeof $sitePrefixValue] != "ip-prefix") do={
+:if ([:typeof $prefixSeparator] = "nil") do={
   :put "ERROR FoxOSSiteNetwork must be a valid IPv4 CIDR"
   :set failed true
 } else={
@@ -98,15 +97,20 @@
   :put "ERROR RouterOS, Mihomo, MosDNS, and FoxOS addresses must be distinct"
   :set failed true
 }
+:local ipv4MaskDefinitions {"8|255.0.0.0";"9|255.128.0.0";"10|255.192.0.0";"11|255.224.0.0";"12|255.240.0.0";"13|255.248.0.0";"14|255.252.0.0";"15|255.254.0.0";"16|255.255.0.0";"17|255.255.128.0";"18|255.255.192.0";"19|255.255.224.0";"20|255.255.240.0";"21|255.255.248.0";"22|255.255.252.0";"23|255.255.254.0";"24|255.255.255.0";"25|255.255.255.128";"26|255.255.255.192";"27|255.255.255.224";"28|255.255.255.240";"29|255.255.255.248";"30|255.255.255.252";"31|255.255.255.254";"32|255.255.255.255"}
 :local netmaskValue
-:foreach maskDefinition in={"8|255.0.0.0";"9|255.128.0.0";"10|255.192.0.0";"11|255.224.0.0";"12|255.240.0.0";"13|255.248.0.0";"14|255.252.0.0";"15|255.254.0.0";"16|255.255.0.0";"17|255.255.128.0";"18|255.255.192.0";"19|255.255.224.0";"20|255.255.240.0";"21|255.255.248.0";"22|255.255.252.0";"23|255.255.254.0";"24|255.255.255.0";"25|255.255.255.128";"26|255.255.255.192";"27|255.255.255.224";"28|255.255.255.240";"29|255.255.255.248";"30|255.255.255.252"} do={
+:foreach maskDefinition in=$ipv4MaskDefinitions do={
   :local separator [:find $maskDefinition "|"]
   :if ([:tonum [:pick $maskDefinition 0 $separator]] = $prefixLength) do={ :set netmaskValue [:toip [:pick $maskDefinition ($separator + 1) [:len $maskDefinition]]] }
 }
-:if ([:typeof $networkAddressValue] = "ip" && [:typeof $sitePrefixValue] = "ip-prefix" && [:typeof $netmaskValue] = "ip" && [:typeof $routerAddressValue] = "ip" && [:typeof $mihomoAddressValue] = "ip" && [:typeof $mosdnsAddressValue] = "ip" && [:typeof $foxosAddressValue] = "ip") do={
+:if ([:typeof $networkAddressValue] = "ip" && [:typeof $netmaskValue] = "ip" && (($networkAddressValue & $netmaskValue) != $networkAddressValue)) do={
+  :put "ERROR FoxOSSiteNetwork must use the canonical network address and match FoxOSSitePrefixLength"
+  :set failed true
+}
+:if ([:typeof $networkAddressValue] = "ip" && [:typeof $netmaskValue] = "ip" && [:typeof $routerAddressValue] = "ip" && [:typeof $mihomoAddressValue] = "ip" && [:typeof $mosdnsAddressValue] = "ip" && [:typeof $foxosAddressValue] = "ip") do={
   :local broadcastAddressValue ($networkAddressValue | (~$netmaskValue))
   :foreach serviceAddress in={$routerAddressValue;$mihomoAddressValue;$mosdnsAddressValue;$foxosAddressValue} do={
-    :if (!($serviceAddress in $sitePrefixValue)) do={ :put ("ERROR address is outside FoxOSSiteNetwork: " . $serviceAddress); :set failed true }
+    :if (($serviceAddress & $netmaskValue) != $networkAddressValue) do={ :put ("ERROR address is outside FoxOSSiteNetwork: " . $serviceAddress); :set failed true }
     :if ($serviceAddress = $networkAddressValue || $serviceAddress = $broadcastAddressValue) do={ :put ("ERROR network or broadcast address is not a usable host: " . $serviceAddress); :set failed true }
   }
 }
@@ -140,9 +144,12 @@
   :local privateCIDRCursor 0
   :local privateCIDRCount 0
   :local privateCIDRSeen ","
-  :local private10 [:toip "10.0.0.0/8"]
-  :local private172 [:toip "172.16.0.0/12"]
-  :local private192 [:toip "192.168.0.0/16"]
+  :local private10Address [:toip "10.0.0.0"]
+  :local private10Netmask [:toip "255.0.0.0"]
+  :local private172Address [:toip "172.16.0.0"]
+  :local private172Netmask [:toip "255.240.0.0"]
+  :local private192Address [:toip "192.168.0.0"]
+  :local private192Netmask [:toip "255.255.0.0"]
   :local privateULA [:toip6 "fc00::/7"]
   :while ($privateCIDRCursor < [:len $subscriptionPrivateCIDRs]) do={
     :local privateCIDREnd [:find $subscriptionPrivateCIDRs "," $privateCIDRCursor]
@@ -152,24 +159,32 @@
     :set privateCIDRCount ($privateCIDRCount + 1)
     :local privateCIDRSlash [:find $privateCIDR "/"]
     :local privateCIDRIsIPv6 ([:typeof [:find $privateCIDR ":"]] != "nil")
-    :local privateCIDRValue
-    :if ($privateCIDRIsIPv6) do={ :set privateCIDRValue [:toip6 $privateCIDR] } else={ :set privateCIDRValue [:toip $privateCIDR] }
+    :local privateCIDRPrefixValue
+    :if ($privateCIDRIsIPv6) do={ :set privateCIDRPrefixValue [:toip6 $privateCIDR] }
     :local privateCIDRValid true
     :if ($privateCIDRCount > 32 || [:typeof [:find $privateCIDRSeen ("," . $privateCIDR . ",")]] != "nil") do={ :set privateCIDRValid false }
-    :if ([:typeof $privateCIDRSlash] = "nil" || ($privateCIDRIsIPv6 && [:typeof $privateCIDRValue] != "ip6-prefix") || (!$privateCIDRIsIPv6 && [:typeof $privateCIDRValue] != "ip-prefix")) do={ :set privateCIDRValid false }
+    :if ([:typeof $privateCIDRSlash] = "nil" || ($privateCIDRIsIPv6 && [:typeof $privateCIDRPrefixValue] != "ip6-prefix")) do={ :set privateCIDRValid false }
     :if ($privateCIDRValid) do={
       :local privateCIDRAddress
       :if ($privateCIDRIsIPv6) do={ :set privateCIDRAddress [:toip6 [:pick $privateCIDR 0 $privateCIDRSlash]] } else={ :set privateCIDRAddress [:toip [:pick $privateCIDR 0 $privateCIDRSlash]] }
       :local privateCIDRBits [:tonum [:pick $privateCIDR ($privateCIDRSlash + 1) [:len $privateCIDR]]]
       :if (($privateCIDRIsIPv6 && [:typeof $privateCIDRAddress] != "ip6") || (!$privateCIDRIsIPv6 && [:typeof $privateCIDRAddress] != "ip")) do={ :set privateCIDRValid false }
       :if ($privateCIDR != ($privateCIDRAddress . "/" . $privateCIDRBits)) do={ :set privateCIDRValid false }
-      :local privateCIDRAllowed false
-      :if ($privateCIDRIsIPv6 = false) do={
-        :if (($privateCIDRAddress in $private10) && $privateCIDRBits >= 8) do={ :set privateCIDRAllowed true }
-        :if (($privateCIDRAddress in $private172) && $privateCIDRBits >= 12) do={ :set privateCIDRAllowed true }
-        :if (($privateCIDRAddress in $private192) && $privateCIDRBits >= 16) do={ :set privateCIDRAllowed true }
+      :if ($privateCIDRValid && $privateCIDRIsIPv6 = false) do={
+        :local privateCIDRNetmask
+        :foreach maskDefinition in=$ipv4MaskDefinitions do={
+          :local separator [:find $maskDefinition "|"]
+          :if ([:tonum [:pick $maskDefinition 0 $separator]] = $privateCIDRBits) do={ :set privateCIDRNetmask [:toip [:pick $maskDefinition ($separator + 1) [:len $maskDefinition]]] }
+        }
+        :if ([:typeof $privateCIDRNetmask] != "ip" || (($privateCIDRAddress & $privateCIDRNetmask) != $privateCIDRAddress)) do={ :set privateCIDRValid false }
       }
-      :if ($privateCIDRIsIPv6 && ($privateCIDRAddress in $privateULA) && $privateCIDRBits >= 7) do={ :set privateCIDRAllowed true }
+      :local privateCIDRAllowed false
+      :if ($privateCIDRValid && $privateCIDRIsIPv6 = false) do={
+        :if ($privateCIDRBits >= 8 && (($privateCIDRAddress & $private10Netmask) = $private10Address)) do={ :set privateCIDRAllowed true }
+        :if ($privateCIDRBits >= 12 && (($privateCIDRAddress & $private172Netmask) = $private172Address)) do={ :set privateCIDRAllowed true }
+        :if ($privateCIDRBits >= 16 && (($privateCIDRAddress & $private192Netmask) = $private192Address)) do={ :set privateCIDRAllowed true }
+      }
+      :if ($privateCIDRValid && $privateCIDRIsIPv6 && ($privateCIDRAddress in $privateULA) && $privateCIDRBits >= 7) do={ :set privateCIDRAllowed true }
       :if ($privateCIDRAllowed = false) do={ :set privateCIDRValid false }
     }
     :if ($privateCIDRValid = false) do={ :put ("ERROR invalid, duplicate, non-canonical, or non-private subscription CIDR: " . $privateCIDR); :set failed true }
@@ -319,20 +334,20 @@
   :local p1 [:find $definition "|"]
   :local p2 [:find $definition "|" ($p1 + 1)]
   :local p3 [:find $definition "|" ($p2 + 1)]
-  :local address [:pick $definition 0 $p1]
-  :local cidr [:pick $definition ($p1 + 1) $p2]
+  :local probeAddress [:pick $definition 0 $p1]
+  :local probeCIDR [:pick $definition ($p1 + 1) $p2]
   :local vethName [:pick $definition ($p2 + 1) $p3]
   :local owner [:pick $definition ($p3 + 1) [:len $definition]]
-  :local configuredIP [/ip/address find where address~($address . "/")]
-  :local lease [/ip/dhcp-server/lease find where address=$address]
-  :local arp [/ip/arp find where address=$address]
-  :local replies [/ping address=$address count=2 interval=200ms]
+  :local configuredIP [/ip/address find where address~($probeAddress . "/")]
+  :local lease [/ip/dhcp-server/lease find where address=$probeAddress]
+  :local arp [/ip/arp find where address=$probeAddress && status!="failed"]
+  :local replies [/ping address=$probeAddress count=2 interval=200ms]
   :local expectedVeth [/interface/veth find where name=$vethName]
-  :local addressVeth [/interface/veth find where address=$cidr]
+  :local addressVeth [/interface/veth find where address=$probeCIDR]
   :local owned false
 
   :if ([:len $expectedVeth] = 1) do={
-    :if ([/interface/veth get $expectedVeth comment] = $owner && [/interface/veth get $expectedVeth address] = $cidr) do={
+    :if ([/interface/veth get $expectedVeth comment] = $owner && [/interface/veth get $expectedVeth address] = $probeCIDR) do={
       :set owned true
     } else={
       :put ("ERROR existing " . $vethName . " does not match the FoxOS ownership/address contract")
@@ -344,18 +359,18 @@
     :set failed true
   }
   :if ([:len $addressVeth] > 0 && $owned = false) do={
-    :put ("ERROR management address is used by a non-FoxOS veth: " . $cidr)
+    :put ("ERROR management address is used by a non-FoxOS veth: " . $probeCIDR)
     :set failed true
   }
   :if ([:len $configuredIP] > 0 || [:len $lease] > 0) do={
-    :put ("ERROR reserved address is configured as a RouterOS IP or DHCP lease: " . $address)
+    :put ("ERROR reserved address is configured as a RouterOS IP or DHCP lease: " . $probeAddress)
     :set failed true
   }
   :if (([:len $arp] > 0 || $replies > 0) && $owned = false) do={
-    :put ("ERROR reserved address responds or appears in ARP without an owned veth: " . $address)
+    :put ("ERROR reserved address responds or appears in ARP without an owned veth: " . $probeAddress)
     :set failed true
   }
-  :put ($address . " occupancy: ip=" . [:len $configuredIP] . " lease=" . [:len $lease] . " arp=" . [:len $arp] . " ping=" . $replies . " owned=" . $owned)
+  :put ($probeAddress . " occupancy: ip=" . [:len $configuredIP] . " lease=" . [:len $lease] . " arp=" . [:len $arp] . " ping=" . $replies . " owned=" . $owned)
 }
 
 :put ("=== required files under " . $storageRoot . "/ ===")

@@ -240,7 +240,7 @@
   :local addressVeth [/interface/veth find where address=$vethAddress]
   :local vethState "CREATE"
   :if ([:len $vethID] = 0) do={
-    :if ([:len $addressVeth] > 0 || [:len [/ip/address find where address~($addressOnly . "/")]] > 0 || [:len [/ip/dhcp-server/lease find where address=$addressOnly]] > 0 || [:len [/ip/arp find where address=$addressOnly]] > 0 || [/ping address=$addressOnly count=2 interval=200ms] > 0) do={
+    :if ([:len $addressVeth] > 0 || [:len [/ip/address find where address~($addressOnly . "/")]] > 0 || [:len [/ip/dhcp-server/lease find where address=$addressOnly]] > 0 || [:len [/ip/arp find where address=$addressOnly && status!="failed"]] > 0 || [/ping address=$addressOnly count=2 interval=200ms] > 0) do={
       :set vethState "FAIL"
       :set failed true
     }

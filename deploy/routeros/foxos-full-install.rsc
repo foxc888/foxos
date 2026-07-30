@@ -365,7 +365,7 @@
   :if ([:len [/ip/dhcp-server/lease find where address=$addressOnly]] > 0) do={ :error ("保留地址已被 DHCP Lease 使用: " . $addressOnly) }
   :if ([:len $addressVeth] > 0 && [:len $vethID] = 0) do={ :error ("保留地址已被其他 veth 使用: " . $vethAddress) }
   :if ([:len $vethID] = 0) do={
-    :if ([:len [/ip/arp find where address=$addressOnly]] > 0 || [/ping address=$addressOnly count=2 interval=200ms] > 0) do={
+    :if ([:len [/ip/arp find where address=$addressOnly && status!="failed"]] > 0 || [/ping address=$addressOnly count=2 interval=200ms] > 0) do={
       :error ("保留地址已出现在 ARP 或可达，拒绝创建: " . $addressOnly)
     }
     /interface/veth add name=$vethName address=$vethAddress gateway=$routerAddress comment=$owner

@@ -659,12 +659,76 @@ confirmed_lifecycle_contract() {
 
 routeros_private_cidr_contract() {
   local script=$1
-  rg -Fq ':local privateULA [:toip6 "fc00::/7"]' "$script" \
+  rg -Fq ':local private10Address [:toip "10.0.0.0"]' "$script" \
+    && rg -Fq ':local private10Netmask [:toip "255.0.0.0"]' "$script" \
+    && rg -Fq ':local private172Address [:toip "172.16.0.0"]' "$script" \
+    && rg -Fq ':local private172Netmask [:toip "255.240.0.0"]' "$script" \
+    && rg -Fq ':local private192Address [:toip "192.168.0.0"]' "$script" \
+    && rg -Fq ':local private192Netmask [:toip "255.255.0.0"]' "$script" \
+    && rg -Fq ':local privateULA [:toip6 "fc00::/7"]' "$script" \
+    && rg -Fq ':local ipv4MaskDefinitions {' "$script" \
     && rg -Fq ':local privateCIDRIsIPv6 ([:typeof [:find $privateCIDR ":"]] != "nil")' "$script" \
-    && rg -Fq ':set privateCIDRValue [:toip6 $privateCIDR]' "$script" \
+    && rg -Fq ':set privateCIDRPrefixValue [:toip6 $privateCIDR]' "$script" \
     && rg -Fq ':set privateCIDRAddress [:toip6 [:pick $privateCIDR 0 $privateCIDRSlash]]' "$script" \
-    && rg -Fq '[:typeof $privateCIDRValue] != "ip6-prefix"' "$script" \
-    && rg -Fq '[:typeof $privateCIDRAddress] != "ip6"' "$script"
+    && rg -Fq ':set privateCIDRAddress [:toip [:pick $privateCIDR 0 $privateCIDRSlash]]' "$script" \
+    && rg -Fq '[:typeof $privateCIDRPrefixValue] != "ip6-prefix"' "$script" \
+    && rg -Fq '[:typeof $privateCIDRAddress] != "ip6"' "$script" \
+    && rg -Fq ':local privateCIDRNetmask' "$script" \
+    && rg -Fq '(($privateCIDRAddress & $privateCIDRNetmask) != $privateCIDRAddress)' "$script" \
+    && rg -Fq '(($privateCIDRAddress & $private10Netmask) = $private10Address)' "$script" \
+    && rg -Fq '(($privateCIDRAddress & $private172Netmask) = $private172Address)' "$script" \
+    && rg -Fq '(($privateCIDRAddress & $private192Netmask) = $private192Address)' "$script" \
+    && ! rg -Fq '[:toip $privateCIDR]' "$script" \
+    && ! rg -q ':toip "[0-9.]+/[0-9]+"' "$script"
+}
+
+routeros_site_ipv4_cidr_contract() {
+  local script=$1
+  rg -Fq ':set networkAddressValue [:toip [:pick $siteNetwork 0 $prefixSeparator]]' "$script" \
+    && rg -Fq '(($networkAddressValue & $netmaskValue) != $networkAddressValue)' "$script" \
+    && rg -Fq '(($serviceAddress & $netmaskValue) != $networkAddressValue)' "$script" \
+    && ! rg -Fq '[:toip $siteNetwork]' "$script" \
+    && ! rg -Fq 'sitePrefixValue' "$script"
+}
+
+routeros_find_filter_variable_collision_free() {
+  python3 - "$@" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+collisions = []
+for filename in sys.argv[1:]:
+    path = Path(filename)
+    text = path.read_text(encoding="utf-8")
+    variable_names = set(
+        re.findall(r"(?m)^\s*:(?:local|global)\s+([A-Za-z][A-Za-z0-9]*)\b", text)
+    )
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if "find where" not in line:
+            continue
+        for variable_name in variable_names:
+            same_name_filter = re.compile(
+                rf"(?<![A-Za-z0-9_-]){re.escape(variable_name)}\s*"
+                rf"(?:!=|>=|<=|=|~|>|<)\s*(?:\(\s*)*\${re.escape(variable_name)}"
+                rf"(?![A-Za-z0-9_-])"
+            )
+            if same_name_filter.search(line):
+                collisions.append(f"{path}:{line_number}:{variable_name}")
+
+if collisions:
+    print("RouterOS find filters reuse a property name as the variable name:")
+    print("\n".join(collisions))
+    raise SystemExit(1)
+PY
+}
+
+routeros_arp_occupancy_contract() {
+  local script=$1
+  local query_count guarded_count
+  query_count=$(rg --count-matches '/ip/arp find where address=' "$script" || true)
+  guarded_count=$(rg --count-matches '/ip/arp find where address=[^]]+ && status!="failed"' "$script" || true)
+  [[ -n "$query_count" && "$query_count" != 0 && "$query_count" == "$guarded_count" ]]
 }
 
 routeros_hostname_contract() {
@@ -1149,7 +1213,7 @@ done < <(find "$rsc_root" -maxdepth 1 -type f -name '*.rsc' -print0)
 if rg -n -g '*.rsc' -g '!foxos-dns-apply.rsc' -g '!uninstall-apply.rsc' '^[[:space:]]*/ip/(dns|route|firewall|dhcp-server/network)(/|[[:space:]])[^#]*(add|set|remove|enable|disable|reset|move)' "$rsc_root"; then
   report "deployment scripts contain a forbidden DNS/DHCP route/firewall write"
 fi
-if [[ "$(rg -n '^[[:space:]]*/ip/dns/static add name=\$hostname type=A address=\$address ttl=5m comment="foxos:dns:admin"$' "$rsc_root/foxos-dns-apply.rsc" | wc -l | tr -d ' ')" != 1 ]]; then
+if [[ "$(rg -n '^[[:space:]]*/ip/dns/static add name=\$hostname type=A address=\$dnsAddress ttl=5m comment="foxos:dns:admin"$' "$rsc_root/foxos-dns-apply.rsc" | wc -l | tr -d ' ')" != 1 ]]; then
   report "the confirmed DNS script must contain exactly one bounded owned-record write"
 fi
 if [[ "$(rg -n '^[[:space:]]*/ip/dns/static/remove \$dnsRecord$' "$rsc_root/uninstall-apply.rsc" | wc -l | tr -d ' ')" != 1 ]] || ! rg -Fq 'comment="foxos:dns:admin"' "$rsc_root/uninstall-apply.rsc"; then
@@ -1523,7 +1587,18 @@ if ! transition_contract "$rsc_root/upgrade-promote.rsc" "$rsc_root/rollback.rsc
 fi
 for cidr_script in load-site-config.rsc preflight.rsc; do
   if ! routeros_private_cidr_contract "$rsc_root/$cidr_script"; then
-    report "$cidr_script does not split IPv4 :toip from IPv6 :toip6 validation"
+    report "$cidr_script does not validate IPv4 CIDRs from address and netmask values while preserving IPv6 :toip6 validation"
+  fi
+done
+if ! routeros_site_ipv4_cidr_contract "$rsc_root/preflight.rsc"; then
+  report "preflight.rsc depends on RouterOS converting an IPv4 CIDR to ip-prefix or does not enforce bitmask membership"
+fi
+if ! routeros_find_filter_variable_collision_free "$rsc_root"/*.rsc; then
+  report "RouterOS find filters reuse a property name as the variable name"
+fi
+for arp_script in preflight.rsc foxos-install-inspect.rsc foxos-full-install.rsc; do
+  if ! routeros_arp_occupancy_contract "$rsc_root/$arp_script"; then
+    report "$arp_script treats failed dynamic ARP probes as occupied addresses"
   fi
 done
 for hostname_script in load-site-config.rsc preflight.rsc; do
@@ -2036,6 +2111,50 @@ sed 's/(\$wwwAddress != \$siteNetwork && \$wwwAddress != \$foxosRESTAddress)/(fa
   "$rsc_root/preflight.rsc" > "$site_seal_root/lifecycle/rest-extra-address-allowed.rsc"
 if rest_address_contract "$site_seal_root/lifecycle/rest-extra-address-allowed.rsc"; then
   report "REST mixed-address failure injection was not rejected"
+fi
+sed '/\$serviceAddress & \$netmaskValue/d' \
+  "$rsc_root/preflight.rsc" > "$site_seal_root/lifecycle/site-cidr-membership-missing.rsc"
+if cmp -s "$rsc_root/preflight.rsc" "$site_seal_root/lifecycle/site-cidr-membership-missing.rsc"; then
+  report "site CIDR membership failure injection did not mutate preflight"
+elif routeros_site_ipv4_cidr_contract "$site_seal_root/lifecycle/site-cidr-membership-missing.rsc"; then
+  report "site CIDR contract accepted a preflight without IPv4 bitmask membership"
+fi
+sed 's/\[:toip \[:pick \$privateCIDR 0 \$privateCIDRSlash\]\]/[:toip $privateCIDR]/' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/ipv4-cidr-toip-prefix.rsc"
+if cmp -s "$rsc_root/load-site-config.rsc" "$site_seal_root/lifecycle/ipv4-cidr-toip-prefix.rsc"; then
+  report "IPv4 CIDR conversion failure injection did not mutate the loader"
+elif routeros_private_cidr_contract "$site_seal_root/lifecycle/ipv4-cidr-toip-prefix.rsc"; then
+  report "IPv4 CIDR contract accepted direct :toip conversion of a prefix"
+fi
+sed -e 's/:local probeAddress /:local address /' -e 's/\$probeAddress/\$address/g' \
+  "$rsc_root/preflight.rsc" > "$site_seal_root/lifecycle/find-filter-variable-collision.rsc"
+if cmp -s "$rsc_root/preflight.rsc" "$site_seal_root/lifecycle/find-filter-variable-collision.rsc"; then
+  report "find-filter variable collision failure injection did not mutate preflight"
+elif routeros_find_filter_variable_collision_free "$site_seal_root/lifecycle/find-filter-variable-collision.rsc" >/dev/null 2>&1; then
+  report "RouterOS find-filter variable collision was not rejected"
+fi
+parenthesized_collision_fixture="$site_seal_root/lifecycle/find-filter-parenthesized-variable-collision.rsc"
+printf '%s\n' \
+  ':local address "10.0.0.3"' \
+  ':local configured [/ip/address find where address~($address . "/")]' \
+  > "$parenthesized_collision_fixture"
+if routeros_find_filter_variable_collision_free "$parenthesized_collision_fixture" >/dev/null 2>&1; then
+  report "parenthesized RouterOS find-filter variable collision was not rejected"
+fi
+sed 's/ && status!="failed"//' \
+  "$rsc_root/preflight.rsc" > "$site_seal_root/lifecycle/failed-arp-counted-as-occupied.rsc"
+if cmp -s "$rsc_root/preflight.rsc" "$site_seal_root/lifecycle/failed-arp-counted-as-occupied.rsc"; then
+  report "failed-ARP failure injection did not mutate preflight"
+elif routeros_arp_occupancy_contract "$site_seal_root/lifecycle/failed-arp-counted-as-occupied.rsc"; then
+  report "failed dynamic ARP entries were not excluded from occupancy checks"
+fi
+mixed_arp_fixture="$site_seal_root/lifecycle/mixed-guarded-and-unguarded-arp.rsc"
+printf '%s\n' \
+  ':local probeAddress "10.0.0.3"' \
+  ':local guarded [/ip/arp find where address=$probeAddress && status!="failed"]; :local unguarded [/ip/arp find where address=$probeAddress]' \
+  > "$mixed_arp_fixture"
+if routeros_arp_occupancy_contract "$mixed_arp_fixture"; then
+  report "same-line unguarded ARP query was hidden by a guarded query"
 fi
 sed 's/:local privateULA \[:toip6 "fc00::\/7"\]/:local privateULA [:toip "fc00::\/7"]/' \
   "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/ula-toip-bypass.rsc"
