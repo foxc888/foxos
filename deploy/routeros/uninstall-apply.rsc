@@ -16,6 +16,7 @@
 :global FoxOSContainerRoot
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
+:global FoxOSMountSource
 :global FoxOSMountMode
 :global FoxOSUninstallInspectVerbose false
 :global FoxOSUninstallCurrentDigest
@@ -26,7 +27,7 @@
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
-:if ($FoxOSMountCompatVersion != 1 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 :local approved $FoxOSUninstallApprovedDigest
 :local confirmation $FoxOSUninstallConfirmation
 /import file-name=($FoxOSSiteStorageRoot . "/foxos-uninstall-inspect.rsc")
@@ -234,7 +235,7 @@
   :local currentMountID [/container/mounts find where list=$mountName]
   :if ([:len $currentMountID] != [:len $mountID] || ([:len $mountID] = 1 && $currentMountID != $mountID)) do={ :error ("mount ID 在摘要确认后变化: " . $mountName) }
   :if ([:len $mountID] > 0) do={
-    :if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={ :error ("mount 回读冲突: " . $mountName) }
+    :if ([:len $mountID] != 1 || [$FoxOSMountSource $mountID] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={ :error ("mount 回读冲突: " . $mountName) }
     /container/mounts/remove $mountID
   }
 }

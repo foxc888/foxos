@@ -20,6 +20,7 @@
 :global FoxOSContainerRoot
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
+:global FoxOSMountSource
 :global FoxOSMountMode
 :global FoxOSInstallInspectVerbose false
 :global FoxOSInstallCurrentDigest
@@ -28,7 +29,7 @@
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
-:if ($FoxOSMountCompatVersion != 1 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
 :local storageMode "disk"
@@ -331,7 +332,7 @@
     :if ([:len $mountID] != 1) do={ :error ("挂载名不唯一: " . $mountName) }
   }
   :set mountID [/container/mounts find where list=$mountName]
-  :if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $sourcePath || [/container/mounts get $mountID dst] != $destination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={
+  :if ([:len $mountID] != 1 || [$FoxOSMountSource $mountID] != $sourcePath || [/container/mounts get $mountID dst] != $destination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={
     :error ("挂载内容或读写属性不匹配，拒绝继续: " . $mountName)
   }
 }

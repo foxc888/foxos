@@ -17,11 +17,12 @@
 :global FoxOSContainerRoot
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
+:global FoxOSMountSource
 :global FoxOSMountMode
 :global FoxOSInstallInspectVerbose
 :global FoxOSInstallCurrentDigest
 :if ($FoxOSSiteManifestVersion != 2 || $FoxOSContainerCompatVersion != 1) do={ :error "site-config.rsc manifest version 2 and container compatibility contract are required" }
-:if ($FoxOSMountCompatVersion != 1 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
@@ -220,14 +221,14 @@
   :local mountState "CREATE"
   :local mountEvidence ""
   :if ([:len $mountID] > 0) do={
-    :if ([:len $mountID] = 1 && [/container/mounts get $mountID src] = $sourcePath && [/container/mounts get $mountID dst] = $destination && [$FoxOSMountMode $mountID] = $FoxOSWritableMountMode) do={
+    :if ([:len $mountID] = 1 && [$FoxOSMountSource $mountID] = $sourcePath && [/container/mounts get $mountID dst] = $destination && [$FoxOSMountMode $mountID] = $FoxOSWritableMountMode) do={
       :set mountState "REUSE"
     } else={
       :set mountState "FAIL"
       :set failed true
     }
   }
-  :if ([:len $mountID] = 1) do={ :set mountEvidence (":" . [:pick $mountID 0] . ":" . [/container/mounts get $mountID src] . ":" . [/container/mounts get $mountID dst] . ":" . [$FoxOSMountMode $mountID]) }
+  :if ([:len $mountID] = 1) do={ :set mountEvidence (":" . [:pick $mountID 0] . ":" . [$FoxOSMountSource $mountID] . ":" . [/container/mounts get $mountID dst] . ":" . [$FoxOSMountMode $mountID]) }
   :set material ($material . "|mount:" . $mountName . "=" . $mountState . ":" . [:len $mountID] . $mountEvidence)
   :if ($FoxOSInstallInspectVerbose) do={ :put ("RESOURCE mount/" . $mountName . " " . $mountState) }
 }

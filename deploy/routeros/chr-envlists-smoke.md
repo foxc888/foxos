@@ -4,7 +4,9 @@
 路由或实体 RouterOS 硬件上运行。通过该门禁不等于实体 RouterOS 已验收。
 
 门禁用于证明某一组精确 RouterOS/container package 版本能够使用复数 `envlists`、
-`mountlists` 和命名挂载的 `mode=rw` 契约创建并回读容器。脚本创建随机命名的临时 env、
+`mountlists`、规范化 mount source 和命名挂载的 `mode=rw` 契约创建并回读容器。RouterOS
+可能为 source 回读添加一个前导 `/`；脚本同时保留 raw 值，并只移除这一个差异后比较身份。
+脚本创建随机命名的临时 env、
 RW mount、VETH、container 和 root-dir，执行有界停稳检查，并且只有完整清理后才输出
 `CHR_ENVLISTS_SMOKE PASS`。文件名和 PASS 标识为兼容既有制品而保留。它不会加载 FoxOS
 站点清单、连接 bridge、启动测试容器、修改 device-mode 或选择任何 `foxos:*` 正式对象。
@@ -33,7 +35,7 @@ RW mount、VETH、container 和 root-dir，执行有界停稳检查，并且只�
 保留完整终端输出。同一次运行必须同时具备：
 
 - 完整 `/system/resource`、container package 和 device-mode 证据；
-- env item、`mode=rw` mount、VETH，以及 container `envlists`/`mountlists` 的精确回读；
+- env item、mount source raw/normalized、`mode=rw` mount、VETH，以及 container `envlists`/`mountlists` 的精确回读；
 - 有界 stop 路径后的 `status=stopped`；
 - `CLEANUP` 中 container、mount、VETH、env 和 root 残留计数均为零；
 - 最后一行 `CHR_ENVLISTS_SMOKE PASS`。

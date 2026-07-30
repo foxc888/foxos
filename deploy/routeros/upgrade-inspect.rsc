@@ -14,6 +14,7 @@
 :global FoxOSContainerRoot
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
+:global FoxOSMountSource
 :global FoxOSMountMode
 :global FoxOSUpgradeInspectVerbose
 :global FoxOSUpgradeCurrentDigest
@@ -24,7 +25,7 @@
 :if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || $FoxOSContainerCompatVersion != 1 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
   :error "必须先使用根目录不可变 loader 验证 manifest v2"
 }
-:if ($FoxOSMountCompatVersion != 1 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 
 :local storageRoot $FoxOSSiteStorageRoot
 :local pendingName ("foxos-" . $releaseID)
@@ -101,10 +102,10 @@
   :local expectedSource ($storageRoot . "/" . [:pick $definition ($p1 + 1) $p2])
   :local expectedDestination [:pick $definition ($p2 + 1) [:len $definition]]
   :local mountID [/container/mounts find where list=$mountName]
-  :if ([:len $mountID] != 1 || [/container/mounts get $mountID src] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={
+  :if ([:len $mountID] != 1 || [$FoxOSMountSource $mountID] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={
     :error ("升级所需挂载身份或读写属性不匹配: " . $mountName)
   }
-  :set material ($material . "|mount=" . $mountName . ":" . [:pick $mountID 0] . ":" . [/container/mounts get $mountID src] . ":" . [/container/mounts get $mountID dst] . ":" . [$FoxOSMountMode $mountID])
+  :set material ($material . "|mount=" . $mountName . ":" . [:pick $mountID 0] . ":" . [$FoxOSMountSource $mountID] . ":" . [/container/mounts get $mountID dst] . ":" . [$FoxOSMountMode $mountID])
   :set verifiedMounts ($verifiedMounts + 1)
 }
 :if ($verifiedMounts != 3) do={ :error "三个升级共享挂载未全部验证" }

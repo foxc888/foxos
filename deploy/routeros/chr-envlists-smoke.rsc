@@ -30,6 +30,15 @@
   :return $rootDirectory
 }
 :local writableMountMode "rw"
+:local mountSourcePath do={
+  :local sourceMount $1
+  :local currentSource [/container/mounts get $sourceMount src]
+  :if ([:typeof $currentSource] != "str") do={ :return "" }
+  :if ([:len $currentSource] > 0 && [:pick $currentSource 0 1] = "/") do={
+    :return [:pick $currentSource 1 [:len $currentSource]]
+  }
+  :return $currentSource
+}
 :local mountMode do={
   :local mount $1
   :local currentMode [/container/mounts get $mount mode]
@@ -164,10 +173,10 @@
   /container/mounts/add list=$mountListName src=$mountSource dst=$mountDestination mode=$writableMountMode comment=$owner
   :local mountByList [/container/mounts find where list=$mountListName]
   :local mountByOwner [/container/mounts find where comment=$owner]
-  :if ([:len $mountByList] != 1 || [:len $mountByOwner] != 1 || $mountByList != $mountByOwner || [/container/mounts get $mountByList src] != $mountSource || [/container/mounts get $mountByList dst] != $mountDestination || [$mountMode $mountByList] != $writableMountMode || [/container/mounts get $mountByList comment] != $owner) do={
+  :if ([:len $mountByList] != 1 || [:len $mountByOwner] != 1 || $mountByList != $mountByOwner || [$mountSourcePath $mountByList] != $mountSource || [/container/mounts get $mountByList dst] != $mountDestination || [$mountMode $mountByList] != $writableMountMode || [/container/mounts get $mountByList comment] != $owner) do={
     :error "mount add/get did not return the exact temporary RW object"
   }
-  :put ("READBACK mount-list=" . [/container/mounts get $mountByList list] . " src=" . [/container/mounts get $mountByList src] . " dst=" . [/container/mounts get $mountByList dst] . " mode=" . [$mountMode $mountByList])
+  :put ("READBACK mount-list=" . [/container/mounts get $mountByList list] . " src-raw=" . [/container/mounts get $mountByList src] . " src-normalized=" . [$mountSourcePath $mountByList] . " dst=" . [/container/mounts get $mountByList dst] . " mode=" . [$mountMode $mountByList])
 
   /interface/veth/add name=$vethName address=$vethAddress gateway=$vethGateway comment=$owner
   :local veth [/interface/veth find where name=$vethName]
@@ -265,7 +274,7 @@
     :local cleanupMountByList [/container/mounts find where list=$mountListName]
     :local cleanupMountByOwner [/container/mounts find where comment=$owner]
     :if ([:len $cleanupMountByList] > 0 || [:len $cleanupMountByOwner] > 0) do={
-      :if ([:len $cleanupMountByList] != 1 || [:len $cleanupMountByOwner] != 1 || $cleanupMountByList != $cleanupMountByOwner || [/container/mounts get $cleanupMountByList src] != $mountSource || [/container/mounts get $cleanupMountByList dst] != $mountDestination || [$mountMode $cleanupMountByList] != $writableMountMode || [/container/mounts get $cleanupMountByList comment] != $owner) do={
+      :if ([:len $cleanupMountByList] != 1 || [:len $cleanupMountByOwner] != 1 || $cleanupMountByList != $cleanupMountByOwner || [$mountSourcePath $cleanupMountByList] != $mountSource || [/container/mounts get $cleanupMountByList dst] != $mountDestination || [$mountMode $cleanupMountByList] != $writableMountMode || [/container/mounts get $cleanupMountByList comment] != $owner) do={
         :error "temporary mount identity changed; refusing unbound cleanup"
       }
       /container/mounts/remove $cleanupMountByList
@@ -332,4 +341,4 @@
 :if ($operationComplete = false || [:len $primaryFailure] > 0 || $cleanupFailed || $residualContainers > 0 || $residualMounts > 0 || $residualVeths > 0 || $residualEnvs > 0 || $residualRoots > 0) do={
   :error ("CHR_ENVLISTS_SMOKE FAIL run=" . $runID . " primary=" . $primaryFailure . "; discard this CHR after collecting evidence")
 }
-:put ("CHR_ENVLISTS_SMOKE PASS run=" . $runID . " routeros=" . $routerVersion . " architecture=" . $architecture . " package=" . $containerPackageVersion . " envlists-readback=exact mount-mode=rw mountlists-readback=exact cleanup=clean")
+:put ("CHR_ENVLISTS_SMOKE PASS run=" . $runID . " routeros=" . $routerVersion . " architecture=" . $architecture . " package=" . $containerPackageVersion . " envlists-readback=exact mount-source-readback=normalized mount-mode=rw mountlists-readback=exact cleanup=clean")

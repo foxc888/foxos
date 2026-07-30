@@ -266,9 +266,19 @@
   :return $rootDirectory
 }
 # RouterOS 7.23.2 exposes named mount access through mode instead of the
-# legacy read-only property. Keep consumers bound to one normalized getter.
-:global FoxOSMountCompatVersion 1
+# legacy read-only property and prefixes source readback with one slash.
+# Keep consumers bound to normalized loader-owned getters.
+:global FoxOSMountCompatVersion 2
 :global FoxOSWritableMountMode "rw"
+:global FoxOSMountSource do={
+  :local sourceMount $1
+  :local mountSource [/container/mounts get $sourceMount src]
+  :if ([:typeof $mountSource] != "str") do={ :return "" }
+  :if ([:len $mountSource] > 0 && [:pick $mountSource 0 1] = "/") do={
+    :return [:pick $mountSource 1 [:len $mountSource]]
+  }
+  :return $mountSource
+}
 :global FoxOSMountMode do={
   :local mount $1
   :local mountMode [/container/mounts get $mount mode]
