@@ -87,7 +87,7 @@
       :set envState "FAIL"
       :set failed true
     }
-    :set material ($material . "|env-item:" . $currentKey . "=" . [/container/envs get $envID .id])
+    :set material ($material . "|env-item:" . $currentKey . "=" . $envID)
   }
   :local fixedEnvDefinitions {"FOXOS_ENV|production";("FOXOS_ROUTEROS_URL|http://" . $routerAddress);"FOXOS_ROUTEROS_USERNAME|foxos-service";("FOXOS_MIHOMO_URL|http://" . $mihomoIP . ":9090");("FOXOS_MIHOMO_PROXY_URL|http://" . $mihomoIP . ":7890");"FOXOS_MIHOMO_BASE_CONFIG|/data/mihomo/base.yaml";"FOXOS_MIHOMO_LOCAL_CONFIG|/data/mihomo/config.yaml";"FOXOS_MIHOMO_RUNTIME_CONFIG|/root/.config/mihomo/config.yaml";"FOXOS_MIHOMO_BACKUP_DIR|/backups/mihomo";"FOXOS_MIHOMO_VALIDATOR_BINARY|/usr/local/bin/mihomo";("FOXOS_MOSDNS_URL|http://" . $mosdnsIP . ":53");"FOXOS_BACKUP_DIR|/backups/foxos";"FOXOS_UPGRADE_STATE_PATH|/data/upgrade-checkpoint.json";("FOXOS_SITE_MANAGEMENT_BRIDGE|" . $managementBridge);("FOXOS_SITE_STORAGE_ROOT|" . $storageRoot);("FOXOS_SITE_NETWORK|" . $FoxOSSiteNetwork);("FOXOS_SITE_ROUTER_ADDRESS|" . $routerAddress);("FOXOS_SITE_MIHOMO_ADDRESS|" . $mihomoIP);("FOXOS_SITE_MOSDNS_ADDRESS|" . $mosdnsIP);("FOXOS_SITE_FOXOS_ADDRESS|" . $foxosIP);("FOXOS_SITE_PUBLIC_HOSTNAME|" . $FoxOSSitePublicHostname);"FOXOS_HTTPS_ENABLED|true"}
   :foreach definition in=$fixedEnvDefinitions do={
@@ -104,7 +104,7 @@
         :if ($completeInstall) do={ :set envState "FAIL"; :set failed true }
       } else={
         :if ([/container/envs get $envID value] != $expectedValue) do={ :set envState "FAIL"; :set failed true }
-        :set material ($material . "|env:" . $envKey . "=" . [/container/envs get $envID .id])
+        :set material ($material . "|env:" . $envKey . "=" . [:pick $envID 0])
       }
     }
   }
@@ -125,7 +125,7 @@
         :if ($secretKey = "FOXOS_API_TOKEN") do={ :set foxosApiToken $secretValue }
         :if ($secretKey = "FOXOS_CONFIRMATION_KEY") do={ :set foxosConfirmationKey $secretValue }
         :local secretDigest [:convert $secretValue transform=sha512 to=hex]
-        :set material ($material . "|secret:" . $secretKey . "=" . [/container/envs get $secretID .id] . ":" . $secretDigest)
+        :set material ($material . "|secret:" . $secretKey . "=" . [:pick $secretID 0] . ":" . $secretDigest)
       }
     }
   }
@@ -158,7 +158,7 @@
       :set mosdnsEnvState "FAIL"
       :set failed true
     }
-    :set material ($material . "|mosdns-env-item:" . $mosdnsEnvKey . "=" . [/container/envs get $mosdnsEnvID .id])
+    :set material ($material . "|mosdns-env-item:" . $mosdnsEnvKey . "=" . $mosdnsEnvID)
   }
   :local mosdnsMarkers [/container/envs find where list="foxos-mosdns-env" key="FOXOS_INSTALL_MARKER"]
   :local mosdnsAutoInit [/container/envs find where list="foxos-mosdns-env" key="MOSDNS_AUTO_INIT"]

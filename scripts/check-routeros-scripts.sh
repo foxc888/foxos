@@ -923,6 +923,11 @@ mount_native_handle_contract() {
   ! rg -q -g '*.rsc' '/container/mounts get[[:space:]]+\$[A-Za-z][A-Za-z0-9]*[[:space:]]+\.id\]' "$target"
 }
 
+install_env_native_handle_contract() {
+  local script=$1
+  ! rg -q '/container/envs get[[:space:]]+\$[A-Za-z][A-Za-z0-9]*[[:space:]]+(?:\.id|value-name[[:space:]]*=[[:space:]]*\.id)[[:space:]]*\]' "$script"
+}
+
 container_compatibility_consumer_contract() {
   local script=$1
   rg -Fq ':global FoxOSContainerCompatVersion' "$script" \
@@ -1312,6 +1317,9 @@ if ! file_native_handle_contract "$rsc_root"; then
 fi
 if ! mount_native_handle_contract "$rsc_root"; then
   report "mount identity uses unsupported RouterOS .id readback instead of native handles"
+fi
+if ! install_env_native_handle_contract "$rsc_root/foxos-install-inspect.rsc"; then
+  report "first-install env identity uses unsupported RouterOS .id readback instead of native handles"
 fi
 if rg -n -g '*.rsc' -g '!load-site-config.rsc' -g '!chr-envlists-smoke.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (root-dir|running|stopped)\]' "$rsc_root"; then
   report "container path or state bypasses the loader-owned compatibility contract"
@@ -2056,6 +2064,13 @@ if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/insta
   report "install mount-handle failure injection did not mutate the inspector"
 elif mount_native_handle_contract "$site_seal_root/lifecycle/install-mount-id-readback.rsc"; then
   report "mount native-handle contract accepted install .id readback"
+fi
+sed 's#\[:pick \$envID 0\]#[/container/envs get $envID .id]#' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/install-env-id-readback.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/install-env-id-readback.rsc"; then
+  report "install env-handle failure injection did not mutate the inspector"
+elif install_env_native_handle_contract "$site_seal_root/lifecycle/install-env-id-readback.rsc"; then
+  report "env native-handle contract accepted install .id readback"
 fi
 sed '/FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR"/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-confirmation-missing.rsc"
