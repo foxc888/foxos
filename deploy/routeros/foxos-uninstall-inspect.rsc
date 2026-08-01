@@ -107,7 +107,7 @@
   :set material ($material . "|start-script:DONE")
   :if ($FoxOSUninstallInspectVerbose) do={ :put "DONE system-script/foxos-start-sequence" }
 } else={
-  :if ([:len $startScriptByName] != 1 || [:len $startScriptByOwner] != 1 || [/system/script get $startScriptByName .id] != [/system/script get $startScriptByOwner .id] || [/system/script get $startScriptByName source] != $expectedStartSource || [/system/script get $startScriptByName policy] != "read,write,test") do={
+  :if ([:len $startScriptByName] != 1 || [:len $startScriptByOwner] != 1 || [/system/script get $startScriptByName .id] != [/system/script get $startScriptByOwner .id] || [/system/script get $startScriptByName source] != $expectedStartSource || [/system/script get $startScriptByName policy] != {"read";"write";"test"}) do={
     :set failed true
   } else={
     :set remaining ($remaining + 1)
@@ -121,11 +121,11 @@
   :set material ($material . "|scheduler:DONE")
   :if ($FoxOSUninstallInspectVerbose) do={ :put "DONE scheduler/foxos-start-sequence" }
 } else={
-  :if ([:len $schedulerByName] != 1 || [:len $schedulerByOwner] != 1 || [/system/scheduler get $schedulerByName .id] != [/system/scheduler get $schedulerByOwner .id] || [/system/scheduler get $schedulerByName on-event] != "foxos-start-sequence" || [/system/scheduler get $schedulerByName start-time] != "startup" || [/system/scheduler get $schedulerByName interval] != "0s" || [/system/scheduler get $schedulerByName policy] != "read,write,test") do={
+  :if ([:len $schedulerByName] != 1 || [:len $schedulerByOwner] != 1 || [/system/scheduler get $schedulerByName .id] != [/system/scheduler get $schedulerByOwner .id] || [/system/scheduler get $schedulerByName on-event] != "foxos-start-sequence" || [/system/scheduler get $schedulerByName start-time] != "startup" || [/system/scheduler get $schedulerByName interval] != 0s || [/system/scheduler get $schedulerByName policy] != {"read";"write";"test"}) do={
     :set failed true
   } else={
     :set remaining ($remaining + 1)
-    :set material ($material . "|scheduler:REMOVE:" . [/system/scheduler get $schedulerByName .id] . ":" . [/system/scheduler get $schedulerByName disabled] . ":" . [/system/scheduler get $schedulerByName interval] . ":" . [/system/scheduler get $schedulerByName policy])
+    :set material ($material . "|scheduler:REMOVE:" . [/system/scheduler get $schedulerByName .id] . ":" . [/system/scheduler get $schedulerByName disabled] . ":" . [/system/scheduler get $schedulerByName interval] . ":" . [:tostr [/system/scheduler get $schedulerByName policy]])
     :if ($FoxOSUninstallInspectVerbose) do={ :put "REMOVE scheduler/foxos-start-sequence" }
   }
 }

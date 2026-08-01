@@ -437,7 +437,7 @@
 :if ([:len $startScript] = 0) do={
   /system/script add name=foxos-start-sequence source=$expectedStartSource policy=read,write,test comment="foxos:start-sequence"
 } else={
-  :if ([:len $startScript] != 1 || [/system/script get $startScript comment] != "foxos:start-sequence" || [/system/script get $startScript source] != $expectedStartSource || [/system/script get $startScript policy] != "read,write,test") do={
+  :if ([:len $startScript] != 1 || [/system/script get $startScript comment] != "foxos:start-sequence" || [/system/script get $startScript source] != $expectedStartSource || [/system/script get $startScript policy] != {"read";"write";"test"}) do={
     :error "冷启动协调脚本不符合 FoxOS 精确所有权或内容契约"
   }
 }
@@ -445,7 +445,7 @@
 :if ([:len $startScheduler] = 0) do={
   /system/scheduler add name=foxos-start-sequence start-time=startup interval=0s on-event=foxos-start-sequence policy=read,write,test disabled=yes comment="foxos:start-sequence"
 } else={
-  :if ([:len $startScheduler] != 1 || [/system/scheduler get $startScheduler comment] != "foxos:start-sequence" || [/system/scheduler get $startScheduler on-event] != "foxos-start-sequence" || [/system/scheduler get $startScheduler start-time] != "startup" || [/system/scheduler get $startScheduler interval] != "0s" || [/system/scheduler get $startScheduler policy] != "read,write,test") do={
+  :if ([:len $startScheduler] != 1 || [/system/scheduler get $startScheduler comment] != "foxos:start-sequence" || [/system/scheduler get $startScheduler on-event] != "foxos-start-sequence" || [/system/scheduler get $startScheduler start-time] != "startup" || [/system/scheduler get $startScheduler interval] != 0s || [/system/scheduler get $startScheduler policy] != {"read";"write";"test"}) do={
     :error "冷启动 scheduler 不符合 FoxOS 精确所有权或顺序契约"
   }
 }

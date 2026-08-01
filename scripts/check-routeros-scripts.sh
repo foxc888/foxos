@@ -940,6 +940,15 @@ install_start_native_handle_contract() {
     && rg -Fq '$schedulerByName = $schedulerByOwner' "$script"
 }
 
+install_start_native_value_contract() {
+  local script=$1
+  local code
+  code=$(awk '$0 !~ /^[[:space:]]*#/' "$script")
+  rg -Fq '[/system/script get $startScriptByName policy] = {"read";"write";"test"}' <<< "$code" \
+    && rg -Fq '[/system/scheduler get $schedulerByName interval] = 0s' <<< "$code" \
+    && rg -Fq '[/system/scheduler get $schedulerByName policy] = {"read";"write";"test"}' <<< "$code"
+}
+
 container_compatibility_consumer_contract() {
   local script=$1
   rg -Fq ':global FoxOSContainerCompatVersion' "$script" \
@@ -1205,16 +1214,30 @@ rest_address_model() {
 
 scheduler_contract() {
   local script=$1
-  rg -Fq '[/system/scheduler get $' "$script" \
-    && rg -Fq ' interval] ' "$script" \
-    && rg -Fq '"0s"' "$script" \
-    && rg -Fq ' policy] ' "$script" \
-    && rg -Fq '"read,write,test"' "$script"
+  local code
+  code=$(awk '$0 !~ /^[[:space:]]*#/' "$script")
+  rg -q '/system/scheduler get \$[A-Za-z][A-Za-z0-9]* interval\][[:space:]]*(==|=|!=)[[:space:]]*0s' <<< "$code" \
+    && rg -q '/system/scheduler get \$[A-Za-z][A-Za-z0-9]* policy\][[:space:]]*(==|=|!=)[[:space:]]*\{"read";"write";"test"\}' <<< "$code" \
+    && ! rg -q '/system/scheduler get \$[A-Za-z][A-Za-z0-9]* interval\][[:space:]]*(==|=|!=)[[:space:]]*"0s"' <<< "$code" \
+    && ! rg -q '/system/scheduler get \$[A-Za-z][A-Za-z0-9]* policy\][[:space:]]*(==|=|!=)[[:space:]]*"read,write,test"' <<< "$code"
 }
 
 system_script_policy_contract() {
   local script=$1
-  rg -q '/system/script get \$[A-Za-z][A-Za-z0-9]* policy\] (==|=|!=) "read,write,test"' "$script"
+  local code
+  code=$(awk '$0 !~ /^[[:space:]]*#/' "$script")
+  rg -q '/system/script get \$[A-Za-z][A-Za-z0-9]* policy\][[:space:]]*(==|=|!=)[[:space:]]*\{"read";"write";"test"\}' <<< "$code" \
+    && ! rg -q '/system/script get \$[A-Za-z][A-Za-z0-9]* policy\][[:space:]]*(==|=|!=)[[:space:]]*"read,write,test"' <<< "$code"
+}
+
+start_policy_digest_contract() {
+  local script=$1
+  local expected=$2
+  local material policy_reads scalar_reads
+  material=$(awk '$0 !~ /^[[:space:]]*#/ && $0 ~ /^[[:space:]]*:(local|set)[[:space:]]+material/ { print }' "$script")
+  policy_reads=$({ rg -o '/system/(script|scheduler) get \$[A-Za-z][A-Za-z0-9]* policy\]' <<< "$material" || true; } | wc -l | tr -d ' ')
+  scalar_reads=$({ rg -o '\[:tostr \[/system/(script|scheduler) get \$[A-Za-z][A-Za-z0-9]* policy\]\]' <<< "$material" || true; } | wc -l | tr -d ' ')
+  [[ "$policy_reads" == "$expected" && "$scalar_reads" == "$expected" ]]
 }
 
 lifecycle_start_sequence_contract() {
@@ -1236,14 +1259,14 @@ lifecycle_start_sequence_contract() {
     && rg -Fq ':local startScriptByOwner [/system/script find where comment="foxos:start-sequence"]' "$script" \
     && rg -Fq '[/system/script get $startScriptByName .id] != [/system/script get $startScriptByOwner .id]' "$script" \
     && rg -Fq '[/system/script get $startScriptByName source] != $expectedStartSource' "$script" \
-    && rg -Fq '[/system/script get $startScriptByName policy] != "read,write,test"' "$script" \
+    && rg -Fq '[/system/script get $startScriptByName policy] != {"read";"write";"test"}' "$script" \
     && rg -q '\|start-script=" \. \[/system/script get \$startScriptByName \.id\]' "$script" \
     && rg -Fq ":local $scheduler_owner_var [/system/scheduler find where comment=\"foxos:start-sequence\"]" "$script" \
     && rg -Fq "[/system/scheduler get \$$scheduler_name_var .id] != [/system/scheduler get \$$scheduler_owner_var .id]" "$script" \
     && rg -Fq "[/system/scheduler get \$$scheduler_name_var on-event] != \"foxos-start-sequence\"" "$script" \
     && rg -Fq "[/system/scheduler get \$$scheduler_name_var start-time] != \"startup\"" "$script" \
-    && rg -Fq "[/system/scheduler get \$$scheduler_name_var interval] != \"0s\"" "$script" \
-    && rg -Fq "[/system/scheduler get \$$scheduler_name_var policy] != \"read,write,test\"" "$script" \
+    && rg -Fq "[/system/scheduler get \$$scheduler_name_var interval] != 0s" "$script" \
+    && rg -Fq "[/system/scheduler get \$$scheduler_name_var policy] != {\"read\";\"write\";\"test\"}" "$script" \
     && rg -q '(disabled\] != false|Disabled != false)' "$script" \
     && rg -q '(disabled\] != "no"|Disabled != "no")' "$script" \
     && rg -q '\|(start-scheduler|scheduler)=" \. \[/system/scheduler get \$[A-Za-z][A-Za-z0-9]* \.id\]' "$script"
@@ -1335,6 +1358,9 @@ if ! install_env_native_handle_contract "$rsc_root/foxos-install-inspect.rsc"; t
 fi
 if ! install_start_native_handle_contract "$rsc_root/foxos-install-inspect.rsc"; then
   report "first-install start script or scheduler identity uses unsupported RouterOS .id readback instead of native handles"
+fi
+if ! install_start_native_value_contract "$rsc_root/foxos-install-inspect.rsc"; then
+  report "first-install start script or scheduler does not use exact native success comparisons"
 fi
 if rg -n -g '*.rsc' -g '!load-site-config.rsc' -g '!chr-envlists-smoke.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (root-dir|running|stopped)\]' "$rsc_root"; then
   report "container path or state bypasses the loader-owned compatibility contract"
@@ -1750,7 +1776,19 @@ for scheduler_script in foxos-install-inspect.rsc foxos-full-install.rsc foxos-v
 done
 for policy_script in foxos-install-inspect.rsc foxos-full-install.rsc foxos-verify.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc upgrade-inspect.rsc upgrade-promote-inspect.rsc rollback-inspect.rsc upgrade-cleanup-inspect.rsc; do
   if ! system_script_policy_contract "$rsc_root/$policy_script"; then
-    report "$policy_script does not require the owned system script policy to equal read,write,test"
+    report "$policy_script does not compare the owned system script policy as a native RouterOS array"
+  fi
+done
+for policy_digest_case in \
+  'foxos-install-inspect.rsc|1' \
+  'foxos-uninstall-inspect.rsc|1' \
+  'upgrade-inspect.rsc|2' \
+  'upgrade-promote-inspect.rsc|2' \
+  'rollback-inspect.rsc|2' \
+  'upgrade-cleanup-inspect.rsc|2'; do
+  IFS='|' read -r policy_digest_script expected_policy_digests <<< "$policy_digest_case"
+  if ! start_policy_digest_contract "$rsc_root/$policy_digest_script" "$expected_policy_digests"; then
+    report "$policy_digest_script does not scalarize native policy arrays before digest concatenation"
   fi
 done
 for script in foxos-install-inspect.rsc foxos-full-install.rsc foxos-verify.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc upgrade-inspect.rsc upgrade-promote-inspect.rsc rollback-inspect.rsc upgrade-cleanup-inspect.rsc; do
@@ -2345,9 +2383,80 @@ sed 's/|FOXOS_INSTALL_MARKER|MOSDNS_AUTO_INIT|"/|FOXOS_INSTALL_MARKER|MOSDNS_AUT
 if mosdns_env_contract "$site_seal_root/lifecycle/mosdns-unknown-allowed.rsc"; then
   report "MosDNS unknown-env failure injection was not rejected by the inspector contract"
 fi
-sed 's/interval] = "0s"/interval] = "1m"/' \
+sed -e 's#\[/system/script get \$startScriptByName policy\] = {"read";"write";"test"}#[/system/script get $startScriptByName policy] = "read,write,test"#' \
+  -e '/:local startScriptByOwner /a\
+# [/system/script get $startScriptByName policy] = {"read";"write";"test"}' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/start-script-policy-string.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/start-script-policy-string.rsc"; then
+  report "start-script policy type failure injection did not mutate the inspector"
+elif system_script_policy_contract "$site_seal_root/lifecycle/start-script-policy-string.rsc"; then
+  report "system-script policy contract accepted a string instead of a native array"
+fi
+sed -e 's#\[/system/scheduler get \$schedulerByName policy\] = {"read";"write";"test"}#[/system/scheduler get $schedulerByName policy] = "read,write,test"#' \
+  -e '/:local schedulerByOwner /a\
+# [/system/scheduler get $schedulerByName policy] = {"read";"write";"test"}' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/scheduler-policy-string.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/scheduler-policy-string.rsc"; then
+  report "scheduler policy type failure injection did not mutate the inspector"
+elif scheduler_contract "$site_seal_root/lifecycle/scheduler-policy-string.rsc"; then
+  report "scheduler contract accepted a policy string instead of a native array"
+fi
+sed -e 's/interval] = 0s/interval] = "0s"/' \
+  -e '/:local schedulerByOwner /a\
+# [/system/scheduler get $schedulerByName interval] = 0s' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/scheduler-interval-string.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/scheduler-interval-string.rsc"; then
+  report "scheduler interval type failure injection did not mutate the inspector"
+elif scheduler_contract "$site_seal_root/lifecycle/scheduler-interval-string.rsc"; then
+  report "scheduler contract accepted an interval string instead of native time"
+fi
+sed 's#\[:tostr \[/system/scheduler get \$schedulerByName policy\]\]#([/system/scheduler get $schedulerByName policy])#' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/scheduler-policy-digest-array.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/scheduler-policy-digest-array.rsc"; then
+  report "scheduler policy digest failure injection did not mutate the inspector"
+elif start_policy_digest_contract "$site_seal_root/lifecycle/scheduler-policy-digest-array.rsc" 1; then
+  report "start policy digest contract accepted raw array concatenation"
+fi
+sed 's#\[/system/script get \$startScriptByName policy\] = {"read";"write";"test"}#[/system/script get $startScriptByName policy] != {"read";"write";"test"}#' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/start-script-policy-wrong-operator.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/start-script-policy-wrong-operator.rsc"; then
+  report "start-script policy operator failure injection did not mutate the inspector"
+elif install_start_native_value_contract "$site_seal_root/lifecycle/start-script-policy-wrong-operator.rsc"; then
+  report "first-install native value contract accepted != for start-script policy"
+fi
+sed 's#\[/system/scheduler get \$schedulerByName interval\] = 0s#[/system/scheduler get $schedulerByName interval] != 0s#' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/scheduler-interval-wrong-operator.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/scheduler-interval-wrong-operator.rsc"; then
+  report "scheduler interval operator failure injection did not mutate the inspector"
+elif install_start_native_value_contract "$site_seal_root/lifecycle/scheduler-interval-wrong-operator.rsc"; then
+  report "first-install native value contract accepted != for scheduler interval"
+fi
+sed 's#\[/system/scheduler get \$schedulerByName policy\] = {"read";"write";"test"}#[/system/scheduler get $schedulerByName policy] != {"read";"write";"test"}#' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/scheduler-policy-wrong-operator.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/scheduler-policy-wrong-operator.rsc"; then
+  report "scheduler policy operator failure injection did not mutate the inspector"
+elif install_start_native_value_contract "$site_seal_root/lifecycle/scheduler-policy-wrong-operator.rsc"; then
+  report "first-install native value contract accepted != for scheduler policy"
+fi
+sed 's#\[:tostr \[/system/script get \$startScriptByName policy\]\]#"read;write;test"#' \
+  "$rsc_root/upgrade-inspect.rsc" > "$site_seal_root/lifecycle/upgrade-start-script-policy-digest-fixed.rsc"
+if cmp -s "$rsc_root/upgrade-inspect.rsc" "$site_seal_root/lifecycle/upgrade-start-script-policy-digest-fixed.rsc"; then
+  report "upgrade start-script policy digest failure injection did not mutate the inspector"
+elif start_policy_digest_contract "$site_seal_root/lifecycle/upgrade-start-script-policy-digest-fixed.rsc" 2; then
+  report "start policy digest contract accepted a fixed start-script policy literal"
+fi
+sed 's#\[:tostr \[/system/scheduler get \$startSchedulerByName policy\]\]#"read;write;test"#' \
+  "$rsc_root/upgrade-inspect.rsc" > "$site_seal_root/lifecycle/upgrade-scheduler-policy-digest-fixed.rsc"
+if cmp -s "$rsc_root/upgrade-inspect.rsc" "$site_seal_root/lifecycle/upgrade-scheduler-policy-digest-fixed.rsc"; then
+  report "upgrade scheduler policy digest failure injection did not mutate the inspector"
+elif start_policy_digest_contract "$site_seal_root/lifecycle/upgrade-scheduler-policy-digest-fixed.rsc" 2; then
+  report "start policy digest contract accepted a fixed scheduler policy literal"
+fi
+sed 's/interval] = 0s/interval] = 1m/' \
   "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/scheduler-interval-1m.rsc"
-if scheduler_contract "$site_seal_root/lifecycle/scheduler-interval-1m.rsc"; then
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/scheduler-interval-1m.rsc"; then
+  report "scheduler interval=1m failure injection did not mutate the inspector"
+elif scheduler_contract "$site_seal_root/lifecycle/scheduler-interval-1m.rsc"; then
   report "scheduler interval=1m failure injection was not rejected"
 fi
 sed 's/name="www" && dynamic=no/name="www"/' \
@@ -2437,7 +2546,7 @@ if cmp -s "$rsc_root/foxos-full-install.rsc" "$site_seal_root/lifecycle/system-s
 elif system_script_policy_contract "$site_seal_root/lifecycle/system-script-policy-missing.rsc"; then
   report "missing system-script policy failure injection was not rejected"
 fi
-sed '/system\/script get/s/"read,write,test"/"read,write,test,sensitive"/' \
+sed '/system\/script get/s/{"read";"write";"test"}/{"read";"write";"test";"sensitive"}/' \
   "$rsc_root/foxos-full-install.rsc" > "$site_seal_root/lifecycle/system-script-policy-extra.rsc"
 if cmp -s "$rsc_root/foxos-full-install.rsc" "$site_seal_root/lifecycle/system-script-policy-extra.rsc"; then
   report "system-script extra-policy failure injection did not mutate full install"

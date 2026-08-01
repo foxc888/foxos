@@ -102,7 +102,7 @@
 :local currentScheduler [/system/scheduler find where name="foxos-start-sequence"]
 :if ([:len $currentScheduler] != [:len $scheduler] || ([:len $scheduler] = 1 && [/system/scheduler get $currentScheduler .id] != [/system/scheduler get $scheduler .id])) do={ :error "冷启动 scheduler ID 在摘要确认后变化" }
 :if ([:len $scheduler] > 0) do={
-  :if ([:len $scheduler] != 1 || [/system/scheduler get $scheduler comment] != "foxos:start-sequence" || [/system/scheduler get $scheduler on-event] != "foxos-start-sequence" || [/system/scheduler get $scheduler start-time] != "startup" || [/system/scheduler get $scheduler interval] != "0s" || [/system/scheduler get $scheduler policy] != "read,write,test") do={ :error "冷启动 scheduler 回读冲突" }
+  :if ([:len $scheduler] != 1 || [/system/scheduler get $scheduler comment] != "foxos:start-sequence" || [/system/scheduler get $scheduler on-event] != "foxos-start-sequence" || [/system/scheduler get $scheduler start-time] != "startup" || [/system/scheduler get $scheduler interval] != 0s || [/system/scheduler get $scheduler policy] != {"read";"write";"test"}) do={ :error "冷启动 scheduler 回读冲突" }
   /system/scheduler set $scheduler disabled=yes
   /system/scheduler remove $scheduler
 }
@@ -245,7 +245,7 @@
 :local currentStartScript [/system/script find where name="foxos-start-sequence"]
 :if ([:len $currentStartScript] != [:len $startScript] || ([:len $startScript] = 1 && [/system/script get $currentStartScript .id] != [/system/script get $startScript .id])) do={ :error "冷启动协调脚本 ID 在摘要确认后变化" }
 :if ([:len $startScript] > 0) do={
-  :if ([:len $startScript] != 1 || [/system/script get $startScript comment] != "foxos:start-sequence" || [/system/script get $startScript source] != $expectedStartSource || [/system/script get $startScript policy] != "read,write,test") do={ :error "冷启动协调脚本回读冲突" }
+  :if ([:len $startScript] != 1 || [/system/script get $startScript comment] != "foxos:start-sequence" || [/system/script get $startScript source] != $expectedStartSource || [/system/script get $startScript policy] != {"read";"write";"test"}) do={ :error "冷启动协调脚本回读冲突" }
   /system/script remove $startScript
 }
 

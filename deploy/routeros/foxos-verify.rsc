@@ -52,8 +52,8 @@
 :local expectedStartSource (":delay 20s; /import file-name=" . $FoxOSSiteStorageRoot . "/load-site-config.rsc; /import file-name=" . $FoxOSSiteStorageRoot . "/foxos-start-all.rsc")
 :local startScript [/system/script find where name="foxos-start-sequence" comment="foxos:start-sequence"]
 :local startScheduler [/system/scheduler find where name="foxos-start-sequence" comment="foxos:start-sequence"]
-:if ([:len $startScript] != 1 || [/system/script get $startScript source] != $expectedStartSource || [/system/script get $startScript policy] != "read,write,test") do={ :error "冷启动协调脚本缺失或内容不匹配" }
-:if ([:len $startScheduler] != 1 || [/system/scheduler get $startScheduler on-event] != "foxos-start-sequence" || [/system/scheduler get $startScheduler start-time] != "startup" || [/system/scheduler get $startScheduler interval] != "0s" || [/system/scheduler get $startScheduler policy] != "read,write,test") do={ :error "冷启动 scheduler 缺失或内容不匹配" }
+:if ([:len $startScript] != 1 || [/system/script get $startScript source] != $expectedStartSource || [/system/script get $startScript policy] != {"read";"write";"test"}) do={ :error "冷启动协调脚本缺失或内容不匹配" }
+:if ([:len $startScheduler] != 1 || [/system/scheduler get $startScheduler on-event] != "foxos-start-sequence" || [/system/scheduler get $startScheduler start-time] != "startup" || [/system/scheduler get $startScheduler interval] != 0s || [/system/scheduler get $startScheduler policy] != {"read";"write";"test"}) do={ :error "冷启动 scheduler 缺失或内容不匹配" }
 
 :local bootEnabled false
 :onerror bootError in={

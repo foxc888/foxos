@@ -344,7 +344,7 @@
 :local startScriptByName [/system/script find where name="foxos-start-sequence"]
 :local startScriptByOwner [/system/script find where comment="foxos:start-sequence"]
 :if ([:len $startScriptByName] > 0 || [:len $startScriptByOwner] > 0) do={
-  :if ([:len $startScriptByName] = 1 && [:len $startScriptByOwner] = 1 && $startScriptByName = $startScriptByOwner && $existingInstall && [/system/script get $startScriptByName source] = $expectedStartSource && [/system/script get $startScriptByName policy] = "read,write,test") do={
+  :if ([:len $startScriptByName] = 1 && [:len $startScriptByOwner] = 1 && $startScriptByName = $startScriptByOwner && $existingInstall && [/system/script get $startScriptByName source] = $expectedStartSource && [/system/script get $startScriptByName policy] = {"read";"write";"test"}) do={
     :set startScriptState "REUSE"
   } else={
     :set startScriptState "FAIL"
@@ -358,9 +358,9 @@
 :local schedulerByName [/system/scheduler find where name="foxos-start-sequence"]
 :local schedulerByOwner [/system/scheduler find where comment="foxos:start-sequence"]
 :if ([:len $schedulerByName] > 0 || [:len $schedulerByOwner] > 0) do={
-  :if ([:len $schedulerByName] = 1 && [:len $schedulerByOwner] = 1 && $schedulerByName = $schedulerByOwner && $existingInstall && [/system/scheduler get $schedulerByName on-event] = "foxos-start-sequence" && [/system/scheduler get $schedulerByName start-time] = "startup" && [/system/scheduler get $schedulerByName interval] = "0s" && [/system/scheduler get $schedulerByName policy] = "read,write,test") do={
+  :if ([:len $schedulerByName] = 1 && [:len $schedulerByOwner] = 1 && $schedulerByName = $schedulerByOwner && $existingInstall && [/system/scheduler get $schedulerByName on-event] = "foxos-start-sequence" && [/system/scheduler get $schedulerByName start-time] = "startup" && [/system/scheduler get $schedulerByName interval] = 0s && [/system/scheduler get $schedulerByName policy] = {"read";"write";"test"}) do={
     :set schedulerState "REUSE"
-    :set material ($material . "|scheduler-disabled=" . [/system/scheduler get $schedulerByName disabled] . ":interval=" . [/system/scheduler get $schedulerByName interval] . ":policy=" . [/system/scheduler get $schedulerByName policy])
+    :set material ($material . "|scheduler-disabled=" . [:tostr [/system/scheduler get $schedulerByName disabled]] . ":interval=" . [:tostr [/system/scheduler get $schedulerByName interval]] . ":policy=" . [:tostr [/system/scheduler get $schedulerByName policy]])
   } else={
     :set schedulerState "FAIL"
     :set failed true
