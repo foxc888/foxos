@@ -928,6 +928,18 @@ install_env_native_handle_contract() {
   ! rg -q '/container/envs get[[:space:]]+\$[A-Za-z][A-Za-z0-9]*[[:space:]]+(?:\.id|value-name[[:space:]]*=[[:space:]]*\.id)[[:space:]]*\]' "$script"
 }
 
+install_start_id_readback_forbidden() {
+  local script=$1
+  ! rg -q '/system/(script|scheduler)(?:/get|[[:space:]]+get)[^#]*(?:[[:space:]]+\.id|[[:space:]]+value-name[[:space:]]*=[[:space:]]*\.id)[[:space:]]*\]' "$script"
+}
+
+install_start_native_handle_contract() {
+  local script=$1
+  install_start_id_readback_forbidden "$script" \
+    && rg -Fq '$startScriptByName = $startScriptByOwner' "$script" \
+    && rg -Fq '$schedulerByName = $schedulerByOwner' "$script"
+}
+
 container_compatibility_consumer_contract() {
   local script=$1
   rg -Fq ':global FoxOSContainerCompatVersion' "$script" \
@@ -1320,6 +1332,9 @@ if ! mount_native_handle_contract "$rsc_root"; then
 fi
 if ! install_env_native_handle_contract "$rsc_root/foxos-install-inspect.rsc"; then
   report "first-install env identity uses unsupported RouterOS .id readback instead of native handles"
+fi
+if ! install_start_native_handle_contract "$rsc_root/foxos-install-inspect.rsc"; then
+  report "first-install start script or scheduler identity uses unsupported RouterOS .id readback instead of native handles"
 fi
 if rg -n -g '*.rsc' -g '!load-site-config.rsc' -g '!chr-envlists-smoke.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (root-dir|running|stopped)\]' "$rsc_root"; then
   report "container path or state bypasses the loader-owned compatibility contract"
@@ -2071,6 +2086,22 @@ if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/insta
   report "install env-handle failure injection did not mutate the inspector"
 elif install_env_native_handle_contract "$site_seal_root/lifecycle/install-env-id-readback.rsc"; then
   report "env native-handle contract accepted install .id readback"
+fi
+sed '/:local startScriptByOwner /a\
+  :local forbiddenStartScriptID [/system/script   get $startScriptByName .id]' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/install-start-script-id-readback.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/install-start-script-id-readback.rsc"; then
+  report "install start-script handle failure injection did not mutate the inspector"
+elif install_start_id_readback_forbidden "$site_seal_root/lifecycle/install-start-script-id-readback.rsc"; then
+  report "start-script native-handle contract accepted install .id readback"
+fi
+sed '/:local schedulerByOwner /a\
+  :local forbiddenSchedulerID [/system/scheduler/get [/system/scheduler find where name="foxos-start-sequence"] value-name=.id]' \
+  "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/install-scheduler-id-readback.rsc"
+if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/install-scheduler-id-readback.rsc"; then
+  report "install scheduler handle failure injection did not mutate the inspector"
+elif install_start_id_readback_forbidden "$site_seal_root/lifecycle/install-scheduler-id-readback.rsc"; then
+  report "scheduler native-handle contract accepted install value-name=.id readback"
 fi
 sed '/FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR"/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-confirmation-missing.rsc"
