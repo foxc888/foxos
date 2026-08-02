@@ -322,6 +322,7 @@ jobs:
           printf '%s' "$routeros_password" > "$secret_root/routeros-password"
           printf '%s' "$mihomo_secret" > "$secret_root/mihomo-secret"
           chmod 0444 "$secret_root"/*
+          chmod 0705 "$secret_root"
           docker rm --force foxos-production-smoke >/dev/null 2>&1 || true
           trap 'docker rm --force foxos-production-smoke >/dev/null 2>&1 || true; rm -rf -- "$secret_root"' EXIT
           docker run --detach --name foxos-production-smoke \
