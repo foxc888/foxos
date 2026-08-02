@@ -10,7 +10,7 @@ if ((EUID != 0)); then
   exit 2
 fi
 
-for command in go ip curl setcap setpriv ping awk grep wc tr head; do
+for command in go ip curl setcap setpriv ping awk grep wc tr head unshare mount nsenter findmnt sed; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'network namespace test requires %s\n' "$command" >&2
     exit 2
@@ -26,6 +26,10 @@ client_ns="fxc-$suffix"
 foxos_ns="fxf-$suffix"
 wan_ns="fxw-$suffix"
 server_pid=""
+api_token=nsApi_7vQ4mK9xP2cR8tW5yH3dF6jL1sB0uE9aC2gZ4n
+confirmation_key=nsConfirm_3pT8wY1kH6rD9sF2mV5xC7qL0bN4jG8u
+routeros_password=nsRouter_8rW2mJ5cT9yK4pL7sD1fH6vQ3xN0bE
+mihomo_secret=nsMihomo_6qC9tR2wY5kP8dF1hJ4mV7xB3sL0nG
 
 cleanup() {
   if [[ -n "$server_pid" ]]; then
@@ -43,7 +47,11 @@ trap cleanup EXIT
 fail() {
   printf 'network namespace test failed: %s\n' "$1" >&2
   if [[ -s "$work_root/foxos.log" ]]; then
-    tail -80 "$work_root/foxos.log" >&2
+    tail -80 "$work_root/foxos.log" | sed \
+      -e "s/${api_token}/[REDACTED]/g" \
+      -e "s/${confirmation_key}/[REDACTED]/g" \
+      -e "s/${routeros_password}/[REDACTED]/g" \
+      -e "s/${mihomo_secret}/[REDACTED]/g" >&2
   fi
   exit 1
 }
@@ -93,20 +101,32 @@ binary="$work_root/foxos"
 static_dir="$work_root/web"
 data_dir="$work_root/data"
 tls_dir="$data_dir/tls"
-mkdir -p "$static_dir" "$data_dir" "$work_root/backups"
+secret_dir="$work_root/secrets"
+mkdir -p "$static_dir" "$data_dir" "$work_root/backups" "$secret_dir"
+printf '%s' "$api_token" > "$secret_dir/api-token"
+printf '%s' "$confirmation_key" > "$secret_dir/confirmation-key"
+printf '%s' "$routeros_password" > "$secret_dir/routeros-password"
+printf '%s' "$mihomo_secret" > "$secret_dir/mihomo-secret"
+chmod 0600 "$secret_dir"/*
 [[ -s "$repo_root/web/dist/index.html" ]] || fail "web/dist is missing; build the production frontend before namespace acceptance"
 cp -a "$repo_root/web/dist/." "$static_dir/"
 (cd "$repo_root" && CGO_ENABLED=0 go build -trimpath -o "$binary" ./cmd/server)
 chown -R 65534:65534 "$work_root"
 setcap cap_net_bind_service=+ep "$binary"
 
-api_token=nsApi_7vQ4mK9xP2cR8tW5yH3dF6jL1sB0uE9aC2gZ4n
-confirmation_key=nsConfirm_3pT8wY1kH6rD9sF2mV5xC7qL0bN4jG8u
-ip netns exec "$foxos_ns" setpriv --reuid=65534 --regid=65534 --clear-groups \
-  env \
+ip netns exec "$foxos_ns" unshare --mount /bin/sh -c '
+  set -eu
+  secret_source=$1
+  shift
+  mount --make-rprivate /
+  mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+  mkdir -p /run/secrets/foxos
+  mount --bind "$secret_source" /run/secrets/foxos
+  mount -o remount,bind,ro /run/secrets/foxos
+  exec "$@"
+' foxos-secret-mount "$secret_dir" \
+  setpriv --reuid=65534 --regid=65534 --clear-groups env \
   FOXOS_ENV=production \
-  FOXOS_API_TOKEN="$api_token" \
-  FOXOS_CONFIRMATION_KEY="$confirmation_key" \
   FOXOS_BACKUP_DIR="$work_root/backups" \
   FOXOS_UPGRADE_STATE_PATH="$data_dir/upgrade-checkpoint.json" \
   FOXOS_SITE_MANAGEMENT_BRIDGE=lab-lan \
@@ -139,6 +159,19 @@ kill -0 "$server_pid" 2>/dev/null || fail "FoxOS exited before acceptance"
 
 uid=$(awk '/^Uid:/ {print $2}' "/proc/$server_pid/status")
 [[ "$uid" != "0" ]] || fail "FoxOS is running as root"
+if tr '\0' '\n' < "/proc/$server_pid/environ" | grep -Eq '^FOXOS_(API_TOKEN|CONFIRMATION_KEY|ROUTEROS_PASSWORD|MIHOMO_SECRET)='; then
+  fail "production process environment contains a forbidden secret key"
+fi
+mount_options=$(nsenter --target "$server_pid" --mount findmnt -no OPTIONS /run/secrets/foxos)
+grep -Eq '(^|,)ro(,|$)' <<<"$mount_options" || fail "production secret mount is not read-only"
+for secret_value in "$api_token" "$confirmation_key" "$routeros_password" "$mihomo_secret"; do
+  if grep -Fq "$secret_value" "$work_root/foxos.log"; then
+    fail "production log contains a secret value"
+  fi
+done
+if grep -Eq 'FOXOS_(API_TOKEN|CONFIRMATION_KEY|ROUTEROS_PASSWORD|MIHOMO_SECRET)' "$work_root/foxos.log"; then
+  fail "production log contains a secret key name"
+fi
 
 curl_from_client() {
   ip netns exec "$client_ns" curl --noproxy '*' -fsS \

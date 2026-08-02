@@ -144,6 +144,19 @@ func NewApplyIntegrityKey(rootKey []byte) ([]byte, error) {
 	return mac.Sum(nil), nil
 }
 
+func (a *Applier) PrepareStorage() error {
+	if a == nil {
+		return errors.New("Mihomo applier is required")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, backupDir, err := a.paths()
+	if err != nil {
+		return err
+	}
+	return prepareWritableDirectory(backupDir)
+}
+
 func (a *Applier) Apply(ctx context.Context, body []byte) (ApplyResult, error) {
 	operation, err := operationFromContext(ctx, "mihomo.direct", "", "")
 	if err != nil {
@@ -902,4 +915,34 @@ func requireRealDirectory(path string) error {
 		return errors.New("Mihomo configuration directory must not be a symlink")
 	}
 	return nil
+}
+
+func prepareWritableDirectory(path string) error {
+	if err := requireRealDirectory(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if err := requireRealDirectory(path); err != nil {
+		return err
+	}
+	probe, err := os.CreateTemp(path, ".foxos-storage-probe-*")
+	if err != nil {
+		return err
+	}
+	probePath := probe.Name()
+	if err := probe.Chmod(0o600); err != nil {
+		_ = probe.Close()
+		_ = os.Remove(probePath)
+		return err
+	}
+	if err := probe.Close(); err != nil {
+		_ = os.Remove(probePath)
+		return err
+	}
+	if err := os.Remove(probePath); err != nil {
+		return err
+	}
+	return syncDirectory(path)
 }

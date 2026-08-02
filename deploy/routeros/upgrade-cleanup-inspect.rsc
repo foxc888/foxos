@@ -18,6 +18,14 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSSecretContractVersion
+:global FoxOSSecretHostDirectory
+:global FoxOSSecretContainerDirectory
+:global FoxOSSecretMountName
+:global FoxOSReadonlyMountMode
+:global FoxOSAdminMountLists
+:global FoxOSSecretFileNames
+:global FoxOSSecretEvidence
 :global FoxOSUpgradeCleanupInspectVerbose
 :global FoxOSUpgradeCleanupCurrentDigest
 :global FoxOSUpgradeCleanupActiveID
@@ -25,10 +33,11 @@
 :global FoxOSUpgradeCleanupRollbackMarker
 :local releaseID "__FOXOS_RELEASE_ID__"
 :if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "upgrade-cleanup-inspect.rsc 未绑定有效 release ID" }
-:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || $FoxOSContainerCompatVersion != 2 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 2 || $FoxOSContainerCompatVersion != 2 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
   :error "必须先使用根目录不可变 loader 验证 manifest v2"
 }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSSecretContractVersion != 1 || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets") || $FoxOSSecretContainerDirectory != "/run/secrets/foxos" || $FoxOSSecretMountName != "foxos-secrets" || $FoxOSReadonlyMountMode != "ro") do={ :error "secret-file compatibility contract is unavailable" }
 
 :set FoxOSUpgradeCleanupCurrentDigest ""
 :set FoxOSUpgradeCleanupActiveID ""
@@ -59,10 +68,10 @@
 :local retirementBoot [/container get $retirement start-on-boot]
 :local activeLogging [/container get $active logging]
 :local retirementLogging [/container get $retirement logging]
-:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($activeBoot != false && $activeBoot != "no") || ($activeLogging != false && $activeLogging != "no") || [$FoxOSContainerState $active] != "running") do={
+:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != $FoxOSAdminMountLists || ($activeBoot != false && $activeBoot != "no") || ($activeLogging != false && $activeLogging != "no") || [$FoxOSContainerState $active] != "running") do={
   :error "cleanup active 槽位完整身份契约不匹配或未运行"
 }
-:if (!($retirementName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $retirement] != ($FoxOSSiteStorageRoot . "/containers/" . $retirementName) || [/container get $retirement interface] != "veth-foxos" || [/container get $retirement envlists] != "foxos-env" || [$FoxOSContainerMountLists $retirement] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($retirementBoot != false && $retirementBoot != "no") || ($retirementLogging != false && $retirementLogging != "no") || [$FoxOSContainerState $retirement] != "stopped") do={
+:if (!($retirementName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $retirement] != ($FoxOSSiteStorageRoot . "/containers/" . $retirementName) || [/container get $retirement interface] != "veth-foxos" || [/container get $retirement envlists] != "foxos-env" || [$FoxOSContainerMountLists $retirement] != $FoxOSAdminMountLists || ($retirementBoot != false && $retirementBoot != "no") || ($retirementLogging != false && $retirementLogging != "no") || [$FoxOSContainerState $retirement] != "stopped") do={
   :error "待归档 rollback 槽位完整身份契约或 stopped 状态不匹配"
 }
 :local releaseName ("foxos-" . $releaseID)
@@ -80,7 +89,7 @@
   :local adminStatus [$FoxOSContainerState $adminSlot]
   :local adminBoot [/container get $adminSlot start-on-boot]
   :local adminLogging [/container get $adminSlot logging]
-  :if (!($adminName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $adminSlot interface] != "veth-foxos" || [/container get $adminSlot envlists] != "foxos-env" || [$FoxOSContainerMountLists $adminSlot] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $adminSlot] != ($FoxOSSiteStorageRoot . "/containers/" . $adminName) || ($adminStatus != "running" && $adminStatus != "stopped") || ($adminBoot != false && $adminBoot != "no") || ($adminLogging != false && $adminLogging != "no")) do={
+  :if (!($adminName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $adminSlot interface] != "veth-foxos" || [/container get $adminSlot envlists] != "foxos-env" || [$FoxOSContainerMountLists $adminSlot] != $FoxOSAdminMountLists || [$FoxOSContainerRoot $adminSlot] != ($FoxOSSiteStorageRoot . "/containers/" . $adminName) || ($adminStatus != "running" && $adminStatus != "stopped") || ($adminBoot != false && $adminBoot != "no") || ($adminLogging != false && $adminLogging != "no")) do={
     :error ("cleanup 管理槽位完整身份契约不匹配: " . $adminName)
   }
   :if ($adminStatus = "running") do={
@@ -91,7 +100,10 @@
 }
 :if ($runningAdminCount != 1 || $runningAdminID != $active) do={ :error "cleanup 要求 committed active 是唯一 running 管理槽位" }
 
-:local material ("foxos-upgrade-cleanup-v3|release=" . $releaseID . "|site=" . $FoxOSSiteLoadedDigest)
+:local material ("foxos-upgrade-cleanup-v4|release=" . $releaseID . "|site=" . $FoxOSSiteLoadedDigest)
+:foreach secretName in=$FoxOSSecretFileNames do={
+  :set material ($material . "|secret=" . [$FoxOSSecretEvidence $secretName])
+}
 :set material ($material . "|active=" . [:pick $active 0] . ":" . $activeName . ":" . [$FoxOSContainerRoot $active] . ":" . [$FoxOSContainerState $active] . ":" . [/container get $active comment] . ":" . [/container get $active interface] . ":" . [/container get $active envlists] . ":" . [$FoxOSContainerMountLists $active] . ":" . $activeBoot . ":" . $activeLogging)
 :set material ($material . "|rollback=" . [:pick $retirement 0] . ":" . $retirementName . ":" . [$FoxOSContainerRoot $retirement] . ":" . [$FoxOSContainerState $retirement] . ":" . $sourceMarker . ":" . [/container get $retirement interface] . ":" . [/container get $retirement envlists] . ":" . [$FoxOSContainerMountLists $retirement] . ":" . $retirementBoot . ":" . $retirementLogging)
 :set material ($material . $adminSlotMaterial)
@@ -123,6 +135,9 @@
   :set verifiedSharedMounts ($verifiedSharedMounts + 1)
 }
 :if ($verifiedSharedMounts != 3) do={ :error "三个共享挂载未全部通过身份与可写检查" }
+:local secretMount [/container/mounts find where list=$FoxOSSecretMountName]
+:if ([:len $secretMount] != 1 || [$FoxOSMountSource $secretMount] != $FoxOSSecretHostDirectory || [/container/mounts get $secretMount dst] != $FoxOSSecretContainerDirectory || [$FoxOSMountMode $secretMount] != $FoxOSReadonlyMountMode) do={ :error "cleanup secret mount identity or read-only mode does not match" }
+:set material ($material . "|mount=" . $FoxOSSecretMountName . ":" . [:pick $secretMount 0] . ":" . [$FoxOSMountSource $secretMount] . ":" . [/container/mounts get $secretMount dst] . ":" . [$FoxOSMountMode $secretMount])
 
 :local expectedStartSource (":delay 20s; /import file-name=" . $FoxOSSiteStorageRoot . "/load-site-config.rsc; /import file-name=" . $FoxOSSiteStorageRoot . "/foxos-start-all.rsc")
 :local startScriptByName [/system/script find where name="foxos-start-sequence"]

@@ -180,9 +180,14 @@ type Container struct {
 }
 
 func (c *Client) Resource(ctx context.Context) (Resource, error) {
-	var out Resource
-	err := c.get(ctx, "/rest/system/resource", &out)
-	return out, err
+	var records []Resource
+	if err := c.get(ctx, "/rest/system/resource", &records); err != nil {
+		return Resource{}, err
+	}
+	if len(records) != 1 {
+		return Resource{}, fmt.Errorf("RouterOS resource response count %d", len(records))
+	}
+	return records[0], nil
 }
 func (c *Client) Interfaces(ctx context.Context) ([]Interface, error) {
 	var out []Interface

@@ -170,7 +170,9 @@ jobs:
       - name: Validate GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
       - name: Shell syntax
-        run: bash -n scripts/*.sh deploy/routeros/seal-site-config.sh mihomo/config/start.sh
+        run: |
+          bash -n scripts/*.sh deploy/routeros/seal-site-config.sh
+          test ! -e mihomo/config/start.sh
       - name: RouterOS static checks
         run: scripts/check-routeros-scripts.sh
       - name: Sensitive material checks
@@ -236,6 +238,13 @@ jobs:
           docker load --input mihomo-amd64.tar
           docker load --input mosdns-amd64.tar
 
+          for image in "foxos-ci:${GITHUB_SHA}" "foxos-mihomo-ci:${GITHUB_SHA}" "foxos-mosdns-ci:${GITHUB_SHA}"; do
+            if docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | grep -Eq '^FOXOS_(API_TOKEN|CONFIRMATION_KEY|ROUTEROS_PASSWORD|MIHOMO_SECRET)='; then
+              printf 'runtime image %s contains a forbidden production secret environment key\n' "$image" >&2
+              exit 1
+            fi
+          done
+
           docker run --rm \
             --volume "${GITHUB_WORKSPACE}/mihomo/config:/config:ro" \
             --entrypoint /usr/local/bin/mihomo \
@@ -253,6 +262,7 @@ jobs:
             --volume "${GITHUB_WORKSPACE}/mihomo/config:/config:ro" \
             "foxos-mihomo-ci:${GITHUB_SHA}" -t -d /tmp/mihomo -f /config/config.yaml
           docker run --rm "foxos-mihomo-ci:${GITHUB_SHA}" -v | grep -F 'v1.19.29-foxos2'
+          docker image inspect --format '{{json .Config.Cmd}}' "foxos-mihomo-ci:${GITHUB_SHA}" | grep -Fx '["-d","/root/.config/mihomo","-f","/root/.config/mihomo/config.yaml"]'
 
           docker run --rm --entrypoint /usr/bin/mosdns "foxos-mosdns-ci:${GITHUB_SHA}" version | grep -Fx 'v0.6.4-foxos2'
           docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "foxos-mosdns-ci:${GITHUB_SHA}" | grep -Fx 'MOSDNS_AUTO_INIT=0'
@@ -296,6 +306,77 @@ jobs:
           test "$(curl --fail --silent --show-error "http://127.0.0.1:18090${asset_path}" | wc -c)" -gt 1000
           docker image inspect --format '{{.Config.User}}' "foxos-ci:${GITHUB_SHA}" | grep -Fx '10001:10001'
           docker image inspect --format '{{json .Config.Cmd}}' "foxos-ci:${GITHUB_SHA}" | grep -Fx '["-static","/app/web","-database","/data/foxos.db"]'
+      - name: Smoke test production secret-file contract
+        run: |
+          set -Eeuo pipefail
+          secret_root="${RUNNER_TEMP}/foxos-production-secrets"
+          rm -rf -- "$secret_root"
+          mkdir -m 0700 -- "$secret_root"
+          api_token=$(openssl rand -hex 32)
+          confirmation_key=$(openssl rand -hex 32)
+          routeros_password=$(openssl rand -hex 32)
+          mihomo_secret=$(openssl rand -hex 32)
+          printf '%s' "$api_token" > "$secret_root/api-token"
+          printf '%s' "$confirmation_key" > "$secret_root/confirmation-key"
+          printf '%s' "$routeros_password" > "$secret_root/routeros-password"
+          printf '%s' "$mihomo_secret" > "$secret_root/mihomo-secret"
+          chmod 0444 "$secret_root"/*
+          docker rm --force foxos-production-smoke >/dev/null 2>&1 || true
+          trap 'docker rm --force foxos-production-smoke >/dev/null 2>&1 || true; rm -rf -- "$secret_root"' EXIT
+          docker run --detach --name foxos-production-smoke \
+            --publish 127.0.0.1:18443:443 \
+            --mount "type=bind,src=${secret_root},dst=/run/secrets/foxos,readonly" \
+            --env FOXOS_ENV=production \
+            --env FOXOS_BACKUP_DIR=/backups/foxos \
+            --env FOXOS_UPGRADE_STATE_PATH=/data/upgrade-checkpoint.json \
+            --env FOXOS_SITE_MANAGEMENT_BRIDGE=lab-lan \
+            --env FOXOS_SITE_STORAGE_ROOT=lab-storage \
+            --env FOXOS_SITE_NETWORK=10.77.0.0/24 \
+            --env FOXOS_SITE_ROUTER_ADDRESS=10.77.0.1 \
+            --env FOXOS_SITE_MIHOMO_ADDRESS=10.77.0.2 \
+            --env FOXOS_SITE_MOSDNS_ADDRESS=10.77.0.3 \
+            --env FOXOS_SITE_FOXOS_ADDRESS=10.77.0.4 \
+            --env FOXOS_SITE_PUBLIC_HOSTNAME=foxos.home.arpa \
+            --env FOXOS_HTTPS_ENABLED=true \
+            --env FOXOS_TLS_DIR=/data/tls \
+            --env FOXOS_INTERNAL_LISTEN=127.0.0.1:8090 \
+            --env FOXOS_HTTPS_LISTEN=0.0.0.0:443 \
+            --env FOXOS_HTTP_REDIRECT_LISTEN=0.0.0.0:80 \
+            "foxos-ci:${GITHUB_SHA}"
+          for _ in $(seq 1 60); do
+            docker cp foxos-production-smoke:/data/tls/foxos-local-ca.pem "${RUNNER_TEMP}/foxos-production-ca.pem" >/dev/null 2>&1 || true
+            if test -s "${RUNNER_TEMP}/foxos-production-ca.pem" && curl --noproxy '*' --fail --silent --show-error --connect-timeout 1 \
+              --resolve foxos.home.arpa:18443:127.0.0.1 \
+              --cacert "${RUNNER_TEMP}/foxos-production-ca.pem" \
+              https://foxos.home.arpa:18443/api/v1/health/live >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.25
+          done
+          curl --noproxy '*' --fail --silent --show-error \
+            --resolve foxos.home.arpa:18443:127.0.0.1 \
+            --cacert "${RUNNER_TEMP}/foxos-production-ca.pem" \
+            https://foxos.home.arpa:18443/api/v1/health/live | grep -Fq '"status":"ok"'
+          curl --noproxy '*' --fail --silent --show-error \
+            --resolve foxos.home.arpa:18443:127.0.0.1 \
+            --cacert "${RUNNER_TEMP}/foxos-production-ca.pem" \
+            --header "Authorization: Bearer ${api_token}" \
+            'https://foxos.home.arpa:18443/api/v1/audit-events?limit=1' >/dev/null
+          docker container inspect --format '{{range .Mounts}}{{if eq .Destination "/run/secrets/foxos"}}{{.RW}}{{end}}{{end}}' foxos-production-smoke | grep -Fx false
+          if docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' foxos-production-smoke | grep -Eq '^FOXOS_(API_TOKEN|CONFIRMATION_KEY|ROUTEROS_PASSWORD|MIHOMO_SECRET)='; then
+            printf 'production container environment contains a forbidden secret key\n' >&2
+            exit 1
+          fi
+          for secret_value in "$api_token" "$confirmation_key" "$routeros_password" "$mihomo_secret"; do
+            if docker logs foxos-production-smoke 2>&1 | grep -Fq "$secret_value"; then
+              printf 'production container log contains a secret value\n' >&2
+              exit 1
+            fi
+          done
+          if docker logs foxos-production-smoke 2>&1 | grep -Eq 'FOXOS_(API_TOKEN|CONFIRMATION_KEY|ROUTEROS_PASSWORD|MIHOMO_SECRET)'; then
+            printf 'production container log contains a secret key name\n' >&2
+            exit 1
+          fi
       - name: Scan FoxOS image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

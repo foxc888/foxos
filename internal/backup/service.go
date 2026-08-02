@@ -58,6 +58,42 @@ type Preview struct {
 	Digest   string   `json:"digest"`
 }
 
+func (s Service) PrepareStorage() error {
+	base, err := safeBase(s.Directory)
+	if err != nil {
+		return err
+	}
+	parentInfo, err := os.Lstat(filepath.Dir(base))
+	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("backup parent must be a real directory")
+	}
+	if err := os.Mkdir(base, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(base)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("backup path must be a real directory")
+	}
+	probe, err := os.CreateTemp(base, ".foxos-storage-probe-*")
+	if err != nil {
+		return err
+	}
+	probePath := probe.Name()
+	if err := probe.Chmod(0o600); err != nil {
+		_ = probe.Close()
+		_ = os.Remove(probePath)
+		return err
+	}
+	if err := probe.Close(); err != nil {
+		_ = os.Remove(probePath)
+		return err
+	}
+	if err := os.Remove(probePath); err != nil {
+		return err
+	}
+	return syncDirectory(base)
+}
+
 func (s Service) Create(ctx context.Context, label string) (Manifest, error) {
 	return s.CreateOperation(ctx, label, "")
 }

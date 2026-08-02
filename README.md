@@ -91,20 +91,20 @@ go run ./cmd/server -listen 127.0.0.1:8090 -static web/dist -database data/foxos
 
 ## 运行配置
 
-`FOXOS_API_TOKEN` 与 `FOXOS_CONFIRMATION_KEY` 必填、至少 32 字符、不得相同。依赖端点必须是私网或 loopback IP 字面量，禁止 URL 用户信息和开放公网目标。
+四项运行秘密都必须是 `32..4096` 字节、无空白的可打印 ASCII，且彼此不同。`development` 可从对应 `FOXOS_*` 环境变量读取；`production` 只读取 `/run/secrets/foxos/{api-token,confirmation-key,routeros-password,mihomo-secret}`，只要发现任一敏感环境变量（包括空值）就拒绝启动。依赖端点必须是私网或 loopback IP 字面量，禁止 URL 用户信息和开放公网目标。
 
 | 变量 | 全量包值 | 说明 |
 |---|---|---|
 | `FOXOS_ENV` | `production` | 生产模式强制 HTTPS 和持久绝对路径 |
-| `FOXOS_API_TOKEN` | 首次安装随机生成 | 非浏览器 Bearer 与 Web 会话登录使用的管理凭据 |
-| `FOXOS_CONFIRMATION_KEY` | 首次安装随机生成 | 高风险计划签名与 Mihomo 配置/快照 keyed digest |
+| `FOXOS_API_TOKEN` | 仅开发 env；全量包使用 `api-token` 文件 | 非浏览器 Bearer 与 Web 会话登录使用的管理凭据 |
+| `FOXOS_CONFIRMATION_KEY` | 仅开发 env；全量包使用 `confirmation-key` 文件 | 高风险计划签名与 Mihomo 配置/快照 keyed digest |
 | `FOXOS_SITE_*` | 来自 `site-config.rsc` | 管理桥、存储、网段、服务地址和 public hostname，必须全设或全不设 |
 | `FOXOS_ROUTEROS_URL` | 从站点 RouterOS 地址生成 | RouterOS REST 根地址 |
 | `FOXOS_ROUTEROS_USERNAME` | `foxos-service` | 专用服务用户 |
-| `FOXOS_ROUTEROS_PASSWORD` | 首次安装随机生成 | RouterOS 服务密码 |
+| `FOXOS_ROUTEROS_PASSWORD` | 仅开发 env；全量包使用 `routeros-password` 文件 | RouterOS 服务密码 |
 | `FOXOS_MIHOMO_URL` | 从站点 Mihomo 地址生成 `:9090` | Mihomo Controller |
 | `FOXOS_MIHOMO_PROXY_URL` | 从站点 Mihomo 地址生成 `:7890` | 当前策略出口探测代理，不证明透明代理可用 |
-| `FOXOS_MIHOMO_SECRET` | 首次安装随机生成 | Controller Secret |
+| `FOXOS_MIHOMO_SECRET` | 仅开发 env；全量包使用 `mihomo-secret` 文件 | Controller Secret |
 | `FOXOS_MIHOMO_BASE_CONFIG` | `/data/mihomo/base.yaml` | 可信运行基线 |
 | `FOXOS_MIHOMO_LOCAL_CONFIG` | `/data/mihomo/config.yaml` | FoxOS 可写挂载路径 |
 | `FOXOS_MIHOMO_RUNTIME_CONFIG` | `/root/.config/mihomo/config.yaml` | Mihomo 进程内配置路径 |
@@ -158,16 +158,16 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 - FoxOS、Mihomo、MosDNS 三个单层、未压缩 Docker v1 tar，供 RouterOS 本地 `file=` 导入。
 - `mihomo-config/`、`mosdns-config/`、安装/启动/版本化升级/回滚/卸载脚本。
 - 不可变 `site-config.example.rsc`、清单封存工具、只读 doctor/inspector/preflight/plan、可丢弃 CHR container env/mount smoke、`QUICK-INSTALL.md`、`RELEASE-MANIFEST.txt`、组件 `provenance/` 和 `SHA256SUMS`。
-- 首次安装随机凭据；仓库和包内不预置真实 Token、密码或节点链接。
+- 首次安装在设备生成四个固定名称的 secret files；仓库、三张镜像和 bundle 都不包含秘密值、密码或节点链接。
 
 三张 amd64 镜像都由同一次 CI 从固定来源构建并分别扫描，再把这些精确输入交给组包器；仓库不跟踪或隐式回退到预制 Mihomo/MosDNS tar。包内 provenance lock 记录上游版本、提交、源码归档 SHA-256、构建器和安全依赖提升。
 
-脚本语法下限是 RouterOS 7.21，目标完整版本还必须先通过同版本 CHR 的 container 契约门禁，实际证明复数 `envlists`、`mountlists`、命名挂载 source 规范化、`mode=rw` 及 add/get/delete；仓库当前没有可替代该门禁的实体版本验收记录。RouterOS 可能给 mount source 回读增加一个前导 `/`，loader 只规范化这一个已知差异，其他路径漂移仍失败关闭。设备还需要同版本 x86 `container` package、`container=yes`、`scheduler=yes`、站点清单指定的现有管理桥和存储，上传完成后仍至少有 512 MiB 可用空间。外置模式要求唯一 `/disk` 槽位；无 `/disk` 对象的 x86 系统盘可显式使用保留根 `foxos`，其他拼写仍按磁盘槽位失败关闭。启用 device-mode 的 container 或 scheduler 可能要求设备操作者按 MikroTik 官方流程进行物理确认；安装器只读检查，不会自行开启。安装器也不会创建管理桥、磁盘、RouterOS 管理地址或 REST 服务。
+脚本语法下限是 RouterOS 7.21，目标完整版本还必须先通过同版本 CHR 的 container 契约门禁，实际证明复数 `envlists`、`mountlists`、命名挂载 source 规范化、五个 `mode=rw` mount、唯一 `foxos-secrets` 的 `mode=ro`、四文件可读、管理容器无敏感 env/日志值及 add/get/delete 零残留；仓库当前没有可替代该门禁的实体版本验收记录。RouterOS 可能给 mount source 回读增加一个前导 `/`，loader 只规范化这一个已知差异，其他路径漂移仍失败关闭。设备还需要同版本 x86 `container` package、`container=yes`、`scheduler=yes`、站点清单指定的现有管理桥和存储，上传完成后仍至少有 512 MiB 可用空间。外置模式要求唯一 `/disk` 槽位；无 `/disk` 对象的 x86 系统盘可显式使用保留根 `foxos`，其他拼写仍按磁盘槽位失败关闭。启用 device-mode 的 container 或 scheduler 可能要求设备操作者按 MikroTik 官方流程进行物理确认；安装器只读检查，不会自行开启。安装器也不会创建管理桥、磁盘、RouterOS 管理地址或 REST 服务。
 
 安全顺序：
 
 1. 在工作站验证外层 `.sha256` 和包内 `SHA256SUMS`。
-2. 在目标精确版本的可丢弃 x86 CHR 上运行 `chr-envlists-smoke.rsc`；只接受命令元数据、复数 `envlists`/`mountlists`、mount source 原始值与规范值、`mode=rw` 精确回读、零残留和最终 PASS 同时成立的证据。
+2. 在目标精确版本的可丢弃 x86 CHR 上先跑兼容 smoke，再用同 SHA Artifact 验证唯一只读 secret mount、四文件可读、管理容器无敏感 env/日志值与零残留；两层证据和最终 PASS 必须同时成立。
 3. 复制 `site-config.example.rsc` 为唯一的 `site-config.rsc`，编辑审核后运行 `seal-site-config.sh`；该清单及其 `.sha512` 独立于发布包 checksum。
 4. 在任何上传前保存脱敏 export 和 AES 加密 RouterOS binary backup，下载并验证两个副本；逐项确认所有顶层上传目标零碰撞后，才把完整目录、`site-config.rsc` 和 `.sha512` 上传到清单指定的存储根，并通过固定 loader 运行严格只读的 `foxos-doctor.rsc`。
 5. 运行 `foxos-plan.rsc`；loader 验证封存清单，plan 再自动执行只读 preflight 和逐资源 `CREATE/REUSE/FAIL` inspector。
@@ -200,7 +200,7 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 - 出口执行器要求预置且回读验证 FoxOS anchor/路由表/网关；活动 FastTrack 会导致计划失败。Mihomo 两种设备出口目前无论 marker 是否存在都保持不可用。
 - 订阅仅允许 HTTPS 443 且禁止 URL 凭据；默认只允许公共目标。管理员可用 `FOXOS_SUBSCRIPTION_PRIVATE_CIDRS` 精确开放 RFC1918/ULA 网段，但 loopback、link-local、multicast、unspecified 和 metadata 类地址始终拒绝。每次连接和重定向都会重新解析，最多三次重定向、2 MiB、15 秒。
 - RouterOS/Mihomo/MosDNS 配置端点只允许私网或 loopback IP 字面量，并禁用重定向。
-- 持有 `foxos-env` 凭据的 FoxOS 管理容器固定 `logging=no`；RouterOS 会把启用容器日志时的启动环境写入系统日志。Mihomo 与 MosDNS 不继承 FoxOS 凭据，可保留运行日志。
+- `foxos-env` 只含非敏感配置；四项秘密通过唯一只读 mount 提供给 FoxOS 管理容器。管理容器仍固定 `logging=no` 作为纵深防护，不能替代“敏感 env 为零”和“secret mount 只读”。Mihomo 与 MosDNS 不绑定该 mount，可保留运行日志。
 - CSP、HSTS、安全响应头和 API `no-store` 已启用；容器以 UID 10001 运行，仅二进制持有绑定 80/443 所需 capability。
 - FoxOS 对 MosDNS 保持只读；MosDNS 自身未认证的 9099 API 仅监听容器 loopback，未使用的第三方管理 UI 不进入发布包。L2TP 密码不会进入 API、日志或数据库输出。
 - 当前是单一管理 Token 模型：非浏览器使用 Bearer，Web 使用短期服务端会话；没有 JWT、多用户或 RBAC。不要把 443、RouterOS REST、Mihomo Controller/mixed port 暴露到 WAN。8090 仅应存在于 FoxOS loopback。
@@ -211,7 +211,7 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 
 FoxOS 备份包含 SQLite 和已配置的 Mihomo 配置，记录 SHA-256 清单，默认保留最近 20 份。恢复必须先获取预览与一次性确认令牌；恢复后校验 SQLite 与 Mihomo，失败时补偿，并保留任务和审计结果。Mihomo v2 apply journal 不只认证配置身份，还用独立领域 HMAC 覆盖操作身份、目标 digest、期望快照 label、备份路径、阶段和时间等完整恢复 envelope；重启只有在 envelope、SQLite 快照和当前运行配置全部一致时才清理 journal。
 
-RouterOS 升级使用 release ID 绑定的版本化 pending/active/rollback 槽位。promote 前由旧版本创建 SQLite 兼容回滚点；pending 在保留 pending 所有权时启动，只有自动通过 running、live、ready、页面和带认证只读 API 后才切换所有权。每次写入 promoted 前（包括 switched 重试）都会再次执行同等联合验收并回读槽位身份。pending 启动或首次验收失败会请求恢复旧容器；所有权已切换后若最终验收失败或 promoted 响应仍不确定，则保留新 active 和 stopped rollback，禁止自动 abort 或回滚，重新运行版本化 promote plan 收敛。旧二进制启动前按升级检查点恢复兼容数据库。实体流量验收和回滚演练后，必须通过摘要确认的 cleanup 把旧 rollback 归档为 retained，才能开始下一次升级；确认式卸载默认保留所有数据、镜像、配置、root-dir、备份和本地 CA。恢复与升级细节见 [备份恢复](docs/backup-restore.md) 和 [发布文档](docs/release-and-routeros.md)。
+RouterOS 升级使用 release ID 绑定的版本化 pending/active/rollback 槽位。promote 前由旧版本创建 SQLite 兼容回滚点；pending 在保留 pending 所有权时启动，只有自动通过 running、live、ready、页面和带认证只读 API 后才切换所有权。每次写入 promoted 前（包括 switched 重试）都会再次执行同等联合验收并回读槽位身份。pending 启动或首次验收失败会请求恢复旧容器；所有权已切换后若最终验收失败或 promoted 响应仍不确定，则保留新 active 和 stopped rollback，禁止自动 abort 或回滚，重新运行版本化 promote plan 收敛。旧二进制启动前按升级检查点恢复兼容数据库。实体流量验收和回滚演练后，必须通过摘要确认的 cleanup 把旧 rollback 归档为 retained，才能开始下一次升级；确认式卸载保留数据、镜像、配置、root-dir、备份和本地 CA，但会精确删除四个 secret files、空 secret 目录及其只读 mount。恢复与升级细节见 [备份恢复](docs/backup-restore.md) 和 [发布文档](docs/release-and-routeros.md)。
 
 ## 故障排查
 

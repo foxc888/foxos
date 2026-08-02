@@ -171,6 +171,9 @@ func main() {
 			},
 		}
 		mihomoApplier = &mihomo.Applier{ConfigPath: runtimeConfig.Mihomo.LocalConfigPath, BackupDir: runtimeConfig.Mihomo.BackupDir, Runtime: validatedRuntime, IntegrityKey: mihomoApplyIntegrityKey}
+		if err := mihomoApplier.PrepareStorage(); err != nil {
+			log.Fatalf("prepare Mihomo backup storage: %v", err)
+		}
 		configuredMihomoService = &mihomo.Service{Store: store, Applier: mihomoApplier, BaseConfig: baseConfig, DigestKey: []byte(runtimeConfig.ConfirmationKey), ProtectedAddresses: runtimeConfig.Site.ProtectedAddresses()}
 		if recovery.Quiesce {
 			if _, found, err := mihomoApplier.Pending(); err != nil || found {
@@ -199,6 +202,9 @@ func main() {
 	subscriptionFetcher := subscription.Fetcher{UserAgent: "FoxOS subscription updater/1", AllowedPrivate: runtimeConfig.SubscriptionPrivateCIDRs}
 	subscriptionUpdater := subscription.Updater{Sources: store, Nodes: store, Atomic: store, Fetcher: subscriptionFetcher, IdentityHasher: subscriptionIdentityHasher}
 	backupService := backup.Service{Database: store, MihomoPath: runtimeConfig.Mihomo.LocalConfigPath, Directory: runtimeConfig.BackupDir, Retention: 20}
+	if err := backupService.PrepareStorage(); err != nil {
+		log.Fatalf("prepare FoxOS backup storage: %v", err)
+	}
 	if mihomoApplier != nil {
 		backupService.MihomoRestore = func(ctx context.Context, body []byte) error {
 			_, err := mihomoApplier.Apply(ctx, body)
@@ -227,7 +233,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	paths := []string{filepath.Dir(*databasePath)}
+	paths := []string{filepath.Dir(*databasePath), runtimeConfig.BackupDir}
 	dependencies := []api.HealthDependency{
 		{Name: "routeros", Configured: ros != nil, Check: func(ctx context.Context) error { _, err := ros.Resource(ctx); return err }},
 		{Name: "mihomo", Configured: clash != nil, Check: clashCheck(clash)},

@@ -114,6 +114,8 @@ printf '%s\n' \
   "upload-directory: $upgrade_dir_name" \
   "allowed-upgrade-upload: this directory only" \
   "preserve: site-config.rsc, site-config.rsc.sha512, load-site-config.rsc, mihomo-config, mosdns-config, foxos-data, foxos-backups, containers, provenance" \
+  "preserve-secret-contract: foxos-secrets is device-generated, mounted read-only, and never part of an upgrade payload" \
+  "production-secrets: fixed files only; sensitive foxos-env keys are forbidden" \
   "workflow: upgrade-plan.rsc -> upgrade.rsc -> upgrade-promote-plan.rsc -> upgrade-promote.rsc" \
   "rollback: rollback-plan.rsc -> rollback.rsc" \
   "cleanup: upgrade-cleanup-plan.rsc -> upgrade-cleanup-apply.rsc" \
@@ -129,6 +131,17 @@ if LC_ALL=C rg -n -g '*.rsc' '[^\x00-\x7F]' "$stage_root"; then
   die "RouterOS release scripts must be ASCII-only"
 fi
 find "$stage_root" -name '.DS_Store' -delete
+
+[[ ! -e "$stage_root/foxos-secrets" ]] || die "device-generated secret root must not enter the release bundle"
+[[ ! -e "$stage_root/mihomo-config/start.sh" ]] || die "obsolete Mihomo startup wrapper must not enter the release bundle"
+for secret_name in api-token confirmation-key routeros-password mihomo-secret; do
+  if find "$stage_root" -type f -name "$secret_name" -print -quit | grep -q .; then
+    die "production secret file name entered the release bundle: $secret_name"
+  fi
+done
+if rg -n -g '*.rsc' '/container/envs (add|set)[^#]*(FOXOS_API_TOKEN|FOXOS_CONFIRMATION_KEY|FOXOS_ROUTEROS_PASSWORD|FOXOS_MIHOMO_SECRET)' "$stage_root"; then
+  die "production secret env binding entered the release bundle"
+fi
 
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$upgrade_stage" && find . -type f ! -path './SHA256SUMS' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
@@ -165,9 +178,11 @@ printf '%s\n' \
   "site-config: copy the immutable example, edit and seal it, then import only load-site-config.rsc" \
   "upload-root: configured by the sealed site-config.rsc (disk slot, or reserved internal root foxos/)" \
   "credentials: generated on first RouterOS install" \
+  "production-secrets: four device-generated files under foxos-secrets, mounted read-only at /run/secrets/foxos" \
+  "production-secret-env: forbidden; foxos-env contains non-sensitive configuration only" \
   "image-format: single-layer uncompressed Docker archive for RouterOS file import" \
   "upgrade-payload: $upgrade_dir_name (upload only this directory for upgrades)" \
-  "upgrade-preserves: runtime configs, loader, data, backups, root-dirs, and site manifest" \
+  "upgrade-preserves: runtime configs, loader, data, backups, root-dirs, site manifest, and the device-generated secret mount" \
   "image-inputs: explicit FoxOS, Mihomo, and MosDNS archives built by the caller" \
   "component-provenance: provenance/*.lock.json" \
   "release-gate: Core CI and Release workflows scan all three input images with Trivy" \

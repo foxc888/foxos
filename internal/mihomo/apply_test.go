@@ -81,6 +81,58 @@ func TestNewApplyIntegrityKeyRejectsShortRoot(t *testing.T) {
 	}
 }
 
+func TestApplierPrepareStorageCreatesWritableDirectory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	backupDir := filepath.Join(root, "backups")
+	applier := &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: backupDir}
+	if err := applier.PrepareStorage(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(backupDir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("backup directory info=%v err=%v", info, err)
+	}
+	entries, err := os.ReadDir(backupDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("storage probe residue entries=%v err=%v", entries, err)
+	}
+}
+
+func TestApplierPrepareStorageRejectsNonDirectories(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{name: "regular file", setup: func(t *testing.T, path string) {
+			t.Helper()
+			if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "symlink", setup: func(t *testing.T, path string) {
+			t.Helper()
+			target := t.TempDir()
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			backupDir := filepath.Join(root, "backups")
+			test.setup(t, backupDir)
+			applier := &Applier{ConfigPath: filepath.Join(root, "config.yaml"), BackupDir: backupDir}
+			if err := applier.PrepareStorage(); err == nil {
+				t.Fatal("invalid backup directory was accepted")
+			}
+		})
+	}
+}
+
 func TestApplyJournalMACIsKeyedAndDomainSeparated(t *testing.T) {
 	t.Parallel()
 	intent := PendingApply{

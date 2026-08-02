@@ -2,7 +2,7 @@
 
 本包用于备用 RouterOS 或 CHR 验收。仓库已完成自动化、浏览器、静态脚本和 Linux 网络命名空间验证，但尚未执行 CHR 或实体 RouterOS 验收；容器 `running`、CI 绿色或模拟连通都不能记为 RouterOS 部署成功。
 
-当前 RC1 的 `7.21+` 表示脚本语法下限，不表示所有后续版本已经兼容。目标设备的精确版本必须先通过第 1 节的同版本 CHR container 契约门禁，实际证明复数 `envlists`/`mountlists`、命名挂载 source 规范化和 `mode=rw`，才可进入备用设备安装。最短安全路径固定为：下载同一 SHA 制品 -> 工作站两层校验 -> 同版本 CHR 兼容门禁 -> 封存唯一站点清单 -> 加密备份并下载 -> 零碰撞检查 -> 上传 -> 只读 doctor/plan -> 摘要确认 install -> start -> verify。
+当前 RC1 的 `7.21+` 表示脚本语法下限，不表示所有后续版本已经兼容。目标设备的精确版本必须先通过第 1 节的同版本 CHR container 契约门禁，实际证明复数 `envlists`/`mountlists`、命名挂载 source 规范化、五个 `mode=rw` mount、唯一 `mode=ro` secret mount、四文件可读、敏感 env/日志值为零和卸载零残留，才可进入备用设备安装。最短安全路径固定为：下载同一 SHA 制品 -> 工作站两层校验 -> 同版本 CHR 兼容门禁 -> 同 SHA Artifact 生命周期门禁 -> 封存唯一站点清单 -> 加密备份并下载 -> 零碰撞检查 -> 上传 -> 只读 doctor/plan -> 摘要确认 install -> start -> verify。
 
 ## 0. 先审核站点清单
 
@@ -49,7 +49,7 @@ ${EDITOR:-vi} site-config.rsc
 
 FoxOS 只检查 MosDNS TCP 53；MosDNS 9099 API 仅监听容器 loopback，包内不提供其独立管理 UI。
 
-持有 `foxos-env` 凭据的 FoxOS 管理容器固定 `logging=no`。RouterOS 会把启用容器日志时的启动环境写入系统日志；若验收发现任何敏感键名进入新日志，立即停止容器并轮换本次全部凭据。Mihomo 与 MosDNS 不继承 FoxOS 凭据，保留 `logging=yes` 便于诊断。
+`foxos-env` 只保存非敏感配置。首次安装在站点存储根的 `foxos-secrets/` 下生成 `api-token`、`confirmation-key`、`routeros-password`、`mihomo-secret` 四个文件，并通过唯一的 `foxos-secrets` 只读挂载提供给 FoxOS 管理容器。管理容器仍固定 `logging=no` 作为纵深防护；若验收发现敏感键名或值进入新日志，立即停止容器并轮换本次全部秘密。Mihomo 与 MosDNS 不继承这些秘密，保留 `logging=yes` 便于诊断。
 
 可选 DNS 脚本只在精确确认后添加一条 `foxos:dns:admin` A 记录，不启用 DNS，不改 upstream，不改 DHCP。只有原本使用 RouterOS DNS 的客户端才会得到该记录。
 
@@ -77,7 +77,7 @@ FoxOS 只检查 MosDNS TCP 53；MosDNS 9099 API 仅监听容器 loopback，包�
 /import file-name=disk1/chr-envlists-smoke.rsc
 ```
 
-完整准备、证据与失败清理要求见包内 `chr-envlists-smoke.md`。只有目标完整版本的命令元数据与实际回读都接受复数 `envlists`/`mountlists`，mount source 的 raw/normalized 身份一致且命名挂载为 `mode=rw`，残留计数全为零并最终出现 `CHR_ENVLISTS_SMOKE PASS`，该版本才可进入后续首装、升级、回滚和卸载验收。升级 RouterOS patch/minor 后必须重新执行；这个兼容性门禁只能在隔离 CHR 中完成，不能把实体设备作为第一次拼写试验对象。
+完整准备、证据与失败清理要求见包内 `chr-envlists-smoke.md`。基础 smoke 必须证明目标完整版本的命令元数据与实际回读都接受复数 `envlists`/`mountlists`，mount source 的 raw/normalized 身份一致且命名挂载为 `mode=rw`，残留计数全为零并最终出现 `CHR_ENVLISTS_SMOKE PASS`。随后还必须用同 SHA Artifact 在同版本可丢弃 CHR 验证四个固定 secret files、唯一 RO secret mount、管理容器无敏感 env/日志值、升级保留和卸载零残留。两层门禁都通过后，该候选才能进入后续实体首装、升级、回滚和卸载验收。升级 RouterOS patch/minor 后必须重新执行；不能把实体设备作为第一次拼写或生命周期试验对象。
 
 安装器会创建最小 `foxos-service` 账号。RouterOS REST 在管理 LAN 内仍是 HTTP，因此管理 LAN 必须可信且隔离；不得暴露到 WAN。FoxOS 浏览器/API 访问则强制使用本地 CA 保护的 HTTPS。
 
@@ -221,7 +221,7 @@ disk1/QUICK-INSTALL.md
 :if ($uploadCollisions > 0) do={ :error "upload target collision; archive and investigate every existing path before continuing" }
 ```
 
-只有最终输出 `UPLOAD-COLLISIONS total=0` 才能继续。若存在碰撞，单独下载并归档相关普通文件或目录，确认它们不属于既有 FoxOS/其他服务后再制定处理方案；不要删除、改名或直接覆盖。保留的 `foxos-data`、`foxos-backups` 或 FoxOS env 表示这不是空白首装，应转入升级或恢复流程。
+只有最终输出 `UPLOAD-COLLISIONS total=0` 才能继续。若存在碰撞，单独下载并归档相关普通文件或目录，确认它们不属于既有 FoxOS/其他服务后再制定处理方案；不要删除、改名或直接覆盖。保留的 `foxos-data`、`foxos-backups`、`foxos-secrets`、RO secret mount 或 FoxOS env 表示这不是空白首装，应转入升级或恢复流程。
 
 零碰撞后，使用 WinBox 时，内部模式先在 `Files` 中创建或确认空的顶层 `foxos` 目录，外置模式使用清单指定的磁盘目录。打开该存储根，选中解压目录内的全部内容并拖入；不要拖入外层 `foxos-full-amd64-*` 目录。使用命令行时，在已完成两层校验并生成 `site-config.rsc.sha512` 的解压目录执行：
 
@@ -253,7 +253,7 @@ scp -r ./* "admin@${router_address}:${storage_root}/"
 /import file-name=disk1/foxos-plan.rsc
 ```
 
-`foxos-plan.rsc` 会自动重跑 preflight 和共享 inspector。preflight 必须以 `PRECHECK PASSED` 结束；计划逐项列出 `CREATE/REUSE/FAIL`、站点地址、27 键 FoxOS env 安全基线（站点清单显式配置私网订阅 allowlist 时为 28 键）、mount、veth、bridge port、容器、Mihomo secret 文件变更、不触碰项和回滚路径，并输出 `APPROVED PLAN SHA-512`。到此没有写入。
+`foxos-plan.rsc` 会自动重跑 preflight 和共享 inspector。preflight 必须以 `PRECHECK PASSED` 结束；计划逐项列出 `CREATE/REUSE/FAIL`、站点地址、`23/24` 键非敏感 FoxOS env 安全基线（站点清单显式配置私网订阅 allowlist 时为 24 键）、四个 secret files、五个可写 mount、唯一只读 secret mount、veth、bridge port、容器、不触碰项和回滚路径，并输出 `APPROVED PLAN SHA-512`。到此没有写入。
 
 若设备、清单、备份、计划或回滚路径有任何不确定，不执行下一节。
 
@@ -266,7 +266,7 @@ scp -r ./* "admin@${router_address}:${storage_root}/"
 /import file-name=disk1/foxos-full-install.rsc
 ```
 
-不要输入尖括号文本，要原样粘贴计划输出的 128 位摘要；计划后不要改清单或 RouterOS 前态。正式安装器会在首次资源写入前重跑 preflight/inspector 并比较批准摘要、确认摘要和当前摘要，任一不一致都不写入。首次执行随机生成 RouterOS 服务密码、Mihomo Controller Secret、FoxOS API Token 和 confirmation key。重复执行复用有效凭据；缺失的允许项可补齐，未知额外 env、固定值不匹配或同名非 FoxOS 资源会失败关闭。
+不要输入尖括号文本，要原样粘贴计划输出的 128 位摘要；计划后不要改清单或 RouterOS 前态。正式安装器会在首次资源写入前重跑 preflight/inspector 并比较批准摘要、确认摘要和当前摘要，任一不一致都不写入。首次执行在 `foxos-secrets/` 中随机生成 `routeros-password`、`mihomo-secret`、`api-token` 和 `confirmation-key` 四个固定文件；四项都不会写入 `foxos-env`。重复执行只复用完整且有效的四文件集合；complete 安装缺失任一文件、目录存在额外文件、遗留敏感 env、未知额外非敏感 env、固定值不匹配或同名非 FoxOS 资源都会失败关闭，绝不隐式补齐或轮换秘密。
 
 `/container/add file=...` 异步导入。等待三个容器全部 `status=stopped`：
 
@@ -303,13 +303,25 @@ FoxOS 首次启动在 `foxos-data/tls` 生成持久 ECDSA 本地 CA 和 397 天�
 
 `foxos-verify.rsc` 必须同时通过容器 running、live、ready、站点清单、页面和带认证只读 API。它使用 HTTPS 且不会跳过证书验证。该结果只证明 RouterOS 到 FoxOS 管理面，不证明设备流量经过 Mihomo。
 
-验证通过后，在私密 WinBox Terminal 中读取一次管理 Token，立即存入离线密码库，再清理可见终端输出；命令本身不包含 Token：
+验证通过后，只通过 WinBox Files 或工作站 SCP 下载一次精确的 `<storage-root>/foxos-secrets/api-token`。WinBox 下载目标必须是受控工作站上的专用临时文件；命令行可按下例强制本地权限 `0600`：
 
-```routeros
-:put [/container/envs get [find where list="foxos-env" key="FOXOS_API_TOKEN"] value]
+```bash
+router_address="REPLACE_WITH_ROUTEROS_MANAGEMENT_ADDRESS"
+storage_root=disk1
+umask 077
+token_tmp="$(mktemp)"
+scp "admin@${router_address}:${storage_root}/foxos-secrets/api-token" "$token_tmp"
+chmod 0600 "$token_tmp"
 ```
 
-用该 Token 登录 `https://foxos.home.arpa`。不要打印整个 env list，不要把 Token 放入 URL、日志、截图或聊天。
+从该文件导入离线密码库，不要在终端展开内容。确认密码库已保存后立即销毁临时副本：
+
+```bash
+rm -f -- "$token_tmp"
+unset token_tmp
+```
+
+禁止使用 `:put`、`/file get ... contents`、`/container/envs ... value` 或任何终端输出读取秘密。不要把 Token 放入 URL、日志、截图或聊天。用该 Token 登录 `https://foxos.home.arpa`。
 
 ## 7. 可选本地 DNS 与无端口访问
 
@@ -351,7 +363,7 @@ CA 已导入客户端信任库且 DNS 可解析后，访问 `https://foxos.home.
 
 ## 9. 升级、卸载与首次安装回滚
 
-升级时绝对不要把新全量包覆盖到存储根。先在工作站验证新包和 `foxos-upgrade-<release-id>/SHA256SUMS`，只上传整个 `foxos-upgrade-<release-id>/` 子目录；保留现有 `site-config*`、loader、Mihomo/MosDNS 配置、数据、备份、containers 与旧 payload。以下每组命令都必须先审核 plan 输出，再原样粘贴它给出的 128 位摘要；不要输入尖括号文本。自定义存储根时，把命令中的 `disk1` 一并替换。
+升级时绝对不要把新全量包覆盖到存储根。先在工作站验证新包和 `foxos-upgrade-<release-id>/SHA256SUMS`，只上传整个 `foxos-upgrade-<release-id>/` 子目录；保留现有 `site-config*`、loader、Mihomo/MosDNS 配置、数据、备份、containers、旧 payload、`foxos-secrets` 四文件和唯一 RO secret mount。升级 payload 不包含也不轮换秘密。以下每组命令都必须先审核 plan 输出，再原样粘贴它给出的 128 位摘要；不要输入尖括号文本。自定义存储根时，把命令中的 `disk1` 一并替换。
 
 阶段 1 只导入并登记 stopped pending，当前 active 保持运行：
 
@@ -402,14 +414,14 @@ CA 已导入客户端信任库且 DNS 可解析后，访问 `https://foxos.home.
 /import file-name=disk1/uninstall-apply.rsc
 ```
 
-卸载 plan 会先确认 `foxos-backups/mihomo/.foxos-mihomo-apply.json` 不存在；apply 停止全部 owned 容器后、删除 scheduler、容器或 env 前还会再次检查。发现 pending journal 时必须先恢复并清除该操作，不能手工删 journal，也不能删除或轮换 `FOXOS_CONFIRMATION_KEY`。
+卸载 plan 会先确认 `foxos-backups/mihomo/.foxos-mihomo-apply.json` 不存在，并把四个 secret file 的 handle、长度和 SHA-512 evidence 绑定进摘要；apply 停止全部 owned 容器后、删除 scheduler、容器、env 或 secret files 前还会再次检查。发现 pending journal 时必须先恢复并清除该操作，不能手工删 journal，也不能删除或轮换四项秘密。
 
-卸载 apply 只删除摘要中精确 owned 的 RouterOS 容器、veth/bridge port、mount、env、服务用户/组和可选 owned DNS 记录；默认保留数据、配置、镜像、所有版本化 root-dir、备份、站点清单和本地 CA。由于这些持久内容由原 `FOXOS_CONFIRMATION_KEY` 认证，卸载后不能把保留的 `foxos-data` 或 `foxos-backups` 当作全新安装直接覆盖；安装 plan 会失败关闭。要复用保留状态，必须通过审核过的恢复流程还原原密钥；要全新安装，必须先验证备份并把两个保留目录归档到非活动路径。不要手工批量删除未知用户资源，也不要递归删除存储根。
+卸载 apply 只删除摘要中精确 owned 的 RouterOS 容器、veth/bridge port、mount、env、四个 secret files、空 secret 目录、服务用户/组和可选 owned DNS 记录；数据、配置、镜像、所有版本化 root-dir、备份、站点清单和本地 CA 仍保留。由于这些持久内容绑定原四项秘密，卸载后不能把保留的 `foxos-data` 或 `foxos-backups` 当作全新安装直接覆盖；安装 plan 会失败关闭。要复用保留状态，必须从验证过的离线备份恢复原四文件集合，不能只恢复 confirmation key；要全新安装，必须先验证备份并把旧数据、备份归档到非活动路径。不要手工批量删除未知用户资源，也不要递归删除存储根。
 
 首次安装没有容器 rollback 槽，恢复路径按实际前态选择：
 
 1. `foxos-plan.rsc` 或安装器在首个写入前失败：设备未变，不执行 restore；修正前置条件后重新生成 plan。
-2. 安装器已创建 FoxOS-owned 资源，但 RouterOS 管理面仍正常：先运行 `uninstall-plan.rsc`，审核摘要后再执行 `uninstall-apply.rsc`，然后与本次 `before-foxos-<timestamp>.rsc` 做配置 diff；该路径保留文件和持久数据。
+2. 安装器已创建 FoxOS-owned 资源，但 RouterOS 管理面仍正常：先运行 `uninstall-plan.rsc`，审核摘要后再执行 `uninstall-apply.rsc`，然后与本次 `before-foxos-<timestamp>.rsc` 做配置 diff；该路径删除四个 secret files、空 secret 目录和 RO mount，保留其他持久数据。
 3. 设备需要精确回到安装前配置：确认本次 `before-foxos-<timestamp>.backup` 已下载且密码可用，只在同一设备、同一 RouterOS 版本的维护窗口通过 WinBox `Files` 上传备份，再在 `System -> Backup` 选择该文件执行 Restore。binary restore 会覆盖当前配置并重启；恢复后重新检查资源、package、bridge、address、service、container，并保留新的 `hide-sensitive` export 作为恢复证据。不要把 binary backup 恢复到另一台设备或另一 RouterOS 版本。
 
 ## 常见故障

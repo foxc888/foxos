@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -122,26 +124,129 @@ func TestValidateSecretRejectsLowEntropyAndPlaceholders(t *testing.T) {
 }
 
 func TestLoadProductionFailsClosed(t *testing.T) {
+	secretDirectory := t.TempDir()
+	writeSecretFixture(t, secretDirectory, "api-token", testAPIToken)
+	writeSecretFixture(t, secretDirectory, "confirmation-key", testConfirmationKey)
+	writeSecretFixture(t, secretDirectory, "routeros-password", "RouterPass_7vQ4mK9xP2cR8tW5yH3dF6jL")
+	writeSecretFixture(t, secretDirectory, "mihomo-secret", "MihomoSecret_3pT8wY1kH6rD9sF2mV5xC7q")
+	unsetProductionSecretEnvironment(t)
 	t.Setenv("FOXOS_ENV", "production")
-	t.Setenv("FOXOS_API_TOKEN", testAPIToken)
-	t.Setenv("FOXOS_CONFIRMATION_KEY", testConfirmationKey)
 	t.Setenv("FOXOS_BACKUP_DIR", "/data/backups")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+	if _, err := load(secretDirectory); err == nil || !strings.Contains(err.Error(), "HTTPS") {
 		t.Fatalf("production without HTTPS err=%v", err)
 	}
 	t.Setenv("FOXOS_HTTPS_ENABLED", "true")
 	t.Setenv("FOXOS_BACKUP_DIR", "relative/backups")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FOXOS_BACKUP_DIR") {
+	if _, err := load(secretDirectory); err == nil || !strings.Contains(err.Error(), "FOXOS_BACKUP_DIR") {
 		t.Fatalf("production with relative backup path err=%v", err)
 	}
 	t.Setenv("FOXOS_BACKUP_DIR", "/data/backups")
 	t.Setenv("FOXOS_UPGRADE_STATE_PATH", "relative/checkpoint.json")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FOXOS_UPGRADE_STATE_PATH") {
+	if _, err := load(secretDirectory); err == nil || !strings.Contains(err.Error(), "FOXOS_UPGRADE_STATE_PATH") {
 		t.Fatalf("production with relative upgrade path err=%v", err)
 	}
 	t.Setenv("FOXOS_UPGRADE_STATE_PATH", "/data/upgrade-checkpoint.json")
-	if _, err := Load(); err != nil {
+	if _, err := load(secretDirectory); err != nil {
 		t.Fatalf("valid production configuration rejected: %v", err)
+	}
+}
+
+func TestLoadProductionUsesSecretFilesAndRejectsLegacyEnvironment(t *testing.T) {
+	secretDirectory := t.TempDir()
+	writeSecretFixture(t, secretDirectory, "api-token", testAPIToken)
+	writeSecretFixture(t, secretDirectory, "confirmation-key", testConfirmationKey)
+	writeSecretFixture(t, secretDirectory, "routeros-password", "RouterPass_7vQ4mK9xP2cR8tW5yH3dF6jL")
+	writeSecretFixture(t, secretDirectory, "mihomo-secret", "MihomoSecret_3pT8wY1kH6rD9sF2mV5xC7q")
+	unsetProductionSecretEnvironment(t)
+	t.Setenv("FOXOS_ENV", "production")
+	t.Setenv("FOXOS_HTTPS_ENABLED", "true")
+	t.Setenv("FOXOS_BACKUP_DIR", "/data/backups")
+	config, err := load(secretDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.APIToken != testAPIToken || config.ConfirmationKey != testConfirmationKey {
+		t.Fatal("production did not load the fixed secret files")
+	}
+	t.Setenv("FOXOS_API_TOKEN", "")
+	if _, err := load(secretDirectory); err == nil || !strings.Contains(err.Error(), "must not be set in production") {
+		t.Fatalf("empty legacy production secret environment was accepted: %v", err)
+	}
+	t.Setenv("FOXOS_API_TOKEN", testAPIToken)
+	if _, err := load(secretDirectory); err == nil || !strings.Contains(err.Error(), "must not be set in production") || strings.Contains(err.Error(), testAPIToken) {
+		t.Fatalf("legacy production secret error = %v", err)
+	}
+}
+
+func TestReadSecretFileFailsClosed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{name: "missing", setup: func(*testing.T, string) {}},
+		{name: "directory", setup: func(t *testing.T, root string) {
+			t.Helper()
+			if err := os.Mkdir(filepath.Join(root, "api-token"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "symlink", setup: func(t *testing.T, root string) {
+			t.Helper()
+			writeSecretFixture(t, root, "target", testAPIToken)
+			if err := os.Symlink("target", filepath.Join(root, "api-token")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "trailing newline", setup: func(t *testing.T, root string) {
+			t.Helper()
+			writeSecretFixture(t, root, "api-token", testAPIToken+"\n")
+		}},
+		{name: "too short", setup: func(t *testing.T, root string) {
+			t.Helper()
+			writeSecretFixture(t, root, "api-token", "short-printable-secret")
+		}},
+		{name: "oversized", setup: func(t *testing.T, root string) {
+			t.Helper()
+			writeSecretFixture(t, root, "api-token", strings.Repeat("A", 4097))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			test.setup(t, root)
+			if _, err := readSecretFile(root, "api-token"); err == nil {
+				t.Fatal("invalid secret file was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateDistinctSecrets(t *testing.T) {
+	t.Parallel()
+	if err := validateDistinctSecrets(namedSecret{name: "a", value: testAPIToken}, namedSecret{name: "b", value: testAPIToken}); err == nil {
+		t.Fatal("duplicate secret values were accepted")
+	}
+	if err := validateDistinctSecrets(namedSecret{name: "a", value: testAPIToken}, namedSecret{name: "b", value: testConfirmationKey}); err != nil {
+		t.Fatalf("distinct secret values were rejected: %v", err)
+	}
+}
+
+func writeSecretFixture(t *testing.T, directory, name, value string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(directory, name), []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func unsetProductionSecretEnvironment(t *testing.T) {
+	t.Helper()
+	for _, secret := range runtimeSecretFiles {
+		t.Setenv(secret.environment, "")
+		if err := os.Unsetenv(secret.environment); err != nil {
+			t.Fatalf("unset %s: %v", secret.environment, err)
+		}
 	}
 }
 

@@ -13,10 +13,19 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSSecretContractVersion
+:global FoxOSSecretHostDirectory
+:global FoxOSSecretContainerDirectory
+:global FoxOSSecretMountName
+:global FoxOSReadonlyMountMode
+:global FoxOSAdminMountLists
+:global FoxOSSecretFileNames
+:global FoxOSSecretRead
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSSecretContractVersion != 1 || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets") || $FoxOSSecretContainerDirectory != "/run/secrets/foxos" || $FoxOSSecretMountName != "foxos-secrets" || $FoxOSReadonlyMountMode != "ro") do={ :error "secret-file compatibility contract is unavailable" }
 :local storageRoot $FoxOSSiteStorageRoot
 :local promoteTransition [/container find where comment="foxos:transition:promote"]
 :local rollbackTransition [/container find where comment="foxos:transition:rollback"]
@@ -31,7 +40,7 @@
 :foreach adminSlot in=$knownAdminSlots do={
   :local adminName [/container get $adminSlot name]
   :local adminStatus [$FoxOSContainerState $adminSlot]
-  :if (!($adminName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $adminSlot interface] != "veth-foxos" || [/container get $adminSlot envlists] != "foxos-env" || [$FoxOSContainerMountLists $adminSlot] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $adminSlot] != ($storageRoot . "/containers/" . $adminName) || ($adminStatus != "running" && $adminStatus != "stopped") || ([/container get $adminSlot start-on-boot] != false && [/container get $adminSlot start-on-boot] != "no") || ([/container get $adminSlot logging] != false && [/container get $adminSlot logging] != "no")) do={
+  :if (!($adminName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $adminSlot interface] != "veth-foxos" || [/container get $adminSlot envlists] != "foxos-env" || [$FoxOSContainerMountLists $adminSlot] != $FoxOSAdminMountLists || [$FoxOSContainerRoot $adminSlot] != ($storageRoot . "/containers/" . $adminName) || ($adminStatus != "running" && $adminStatus != "stopped") || ([/container get $adminSlot start-on-boot] != false && [/container get $adminSlot start-on-boot] != "no") || ([/container get $adminSlot logging] != false && [/container get $adminSlot logging] != "no")) do={
     :error ("管理容器完整身份契约不匹配: " . $adminName)
   }
 }
@@ -66,6 +75,12 @@
   :set verifiedSharedMounts ($verifiedSharedMounts + 1)
 }
 :if ($verifiedSharedMounts != 3) do={ :error "三个共享挂载未全部通过身份与可写检查" }
+:foreach secretName in=$FoxOSSecretFileNames do={
+  :local secretValue [$FoxOSSecretRead $secretName]
+  :if ([:len $secretValue] < 32) do={ :error ("secret file does not meet the security baseline: " . $secretName) }
+}
+:local secretMount [/container/mounts find where list=$FoxOSSecretMountName]
+:if ([:len $secretMount] != 1 || [$FoxOSMountSource $secretMount] != $FoxOSSecretHostDirectory || [/container/mounts get $secretMount dst] != $FoxOSSecretContainerDirectory || [$FoxOSMountMode $secretMount] != $FoxOSReadonlyMountMode) do={ :error "start secret mount identity or read-only mode does not match" }
 
 # Finish a power-loss interrupted ownership switch before selecting the only
 # container allowed to use the shared veth and SQLite mounts.
@@ -102,7 +117,7 @@
 :local active [/container find where comment="foxos:active"]
 :if ([:len $mihomo] != 1 || [:len $mosdns] != 1 || [:len $active] != 1) do={ :error "三个 FoxOS 容器必须各自唯一" }
 :local activeName [/container get $active name]
-:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [:len [/container find where name=$activeName]] != 1 || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $active] != ($storageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={
+:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [:len [/container find where name=$activeName]] != 1 || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != $FoxOSAdminMountLists || [$FoxOSContainerRoot $active] != ($storageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={
   :error "FoxOS active 容器完整身份契约不匹配，拒绝启动"
 }
 

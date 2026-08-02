@@ -77,12 +77,13 @@ func TestFlatten(t *testing.T) {
 	}
 	var runtimeConfig struct {
 		Entrypoint []string `json:"Entrypoint"`
+		Cmd        []string `json:"Cmd"`
 		Env        []string `json:"Env"`
 	}
 	if err := json.Unmarshal(config["config"], &runtimeConfig); err != nil {
 		t.Fatal(err)
 	}
-	if len(runtimeConfig.Entrypoint) != 1 || runtimeConfig.Entrypoint[0] != "/app" || len(runtimeConfig.Env) != 1 {
+	if len(runtimeConfig.Entrypoint) != 1 || runtimeConfig.Entrypoint[0] != "/app" || runtimeConfig.Cmd != nil || len(runtimeConfig.Env) != 1 {
 		t.Fatalf("runtime config was not preserved: %#v", runtimeConfig)
 	}
 
@@ -178,6 +179,7 @@ func TestFlattenComponentContracts(t *testing.T) {
 		name              string
 		expectedComponent string
 		entrypoint        []string
+		cmd               []string
 		env               []string
 		labels            map[string]string
 		files             []fixtureEntry
@@ -187,16 +189,87 @@ func TestFlattenComponentContracts(t *testing.T) {
 			name:              "valid foxos",
 			expectedComponent: "foxos",
 			entrypoint:        []string{"/app/foxos"},
+			cmd:               []string{"-static", "/app/web", "-database", "/data/foxos.db"},
 			labels:            map[string]string{"io.foxos.component": "foxos", "org.opencontainers.image.title": "foxos"},
 			files: []fixtureEntry{
 				{name: "app/foxos", body: "foxos", mode: 0o755},
 				{name: "usr/local/bin/mihomo", body: "mihomo", mode: 0o755},
+				{name: "run/secrets/foxos", mode: 0o700, typeflag: tar.TypeDir},
 			},
+		},
+		{
+			name:              "valid mihomo",
+			expectedComponent: "mihomo",
+			entrypoint:        []string{"/mihomo"},
+			cmd:               []string{"-d", "/root/.config/mihomo", "-f", "/root/.config/mihomo/config.yaml"},
+			labels:            map[string]string{"io.foxos.component": "mihomo", "org.opencontainers.image.title": "mihomo"},
+			files:             []fixtureEntry{{name: "mihomo", body: "mihomo", mode: 0o755}},
+		},
+		{
+			name:              "mihomo requires production command",
+			expectedComponent: "mihomo",
+			entrypoint:        []string{"/mihomo"},
+			labels:            map[string]string{"io.foxos.component": "mihomo", "org.opencontainers.image.title": "mihomo"},
+			files:             []fixtureEntry{{name: "mihomo", body: "mihomo", mode: 0o755}},
+			wantMessage:       "command",
+		},
+		{
+			name:              "foxos image forbids secret environment",
+			expectedComponent: "foxos",
+			entrypoint:        []string{"/app/foxos"},
+			cmd:               []string{"-static", "/app/web", "-database", "/data/foxos.db"},
+			env:               []string{"FOXOS_API_TOKEN=must-not-ship"},
+			labels:            map[string]string{"io.foxos.component": "foxos", "org.opencontainers.image.title": "foxos"},
+			files: []fixtureEntry{
+				{name: "app/foxos", body: "foxos", mode: 0o755},
+				{name: "usr/local/bin/mihomo", body: "mihomo", mode: 0o755},
+				{name: "run/secrets/foxos", mode: 0o700, typeflag: tar.TypeDir},
+			},
+			wantMessage: "forbidden environment key",
+		},
+		{
+			name:              "foxos image requires an empty secret directory",
+			expectedComponent: "foxos",
+			entrypoint:        []string{"/app/foxos"},
+			cmd:               []string{"-static", "/app/web", "-database", "/data/foxos.db"},
+			labels:            map[string]string{"io.foxos.component": "foxos", "org.opencontainers.image.title": "foxos"},
+			files: []fixtureEntry{
+				{name: "app/foxos", body: "foxos", mode: 0o755},
+				{name: "usr/local/bin/mihomo", body: "mihomo", mode: 0o755},
+				{name: "run/secrets/foxos", mode: 0o700, typeflag: tar.TypeDir},
+				{name: "run/secrets/foxos/api-token", body: strings.Repeat("S", 32), mode: 0o600},
+			},
+			wantMessage: "built-in production secret",
+		},
+		{
+			name:              "mihomo image forbids built-in production secret",
+			expectedComponent: "mihomo",
+			entrypoint:        []string{"/mihomo"},
+			cmd:               []string{"-d", "/root/.config/mihomo", "-f", "/root/.config/mihomo/config.yaml"},
+			labels:            map[string]string{"io.foxos.component": "mihomo", "org.opencontainers.image.title": "mihomo"},
+			files: []fixtureEntry{
+				{name: "mihomo", body: "mihomo", mode: 0o755},
+				{name: "run/secrets/foxos/api-token", body: strings.Repeat("S", 32), mode: 0o600},
+			},
+			wantMessage: "built-in production secret",
+		},
+		{
+			name:              "mosdns image forbids built-in production secret",
+			expectedComponent: "mosdns",
+			entrypoint:        []string{"/usr/bin/mosdns", "start", "-d", "/cus/mosdns", "-c", "/cus/mosdns/config_custom.yaml"},
+			env:               []string{"MOSDNS_AUTO_INIT=0"},
+			labels:            map[string]string{"io.foxos.component": "mosdns", "org.opencontainers.image.title": "mosdns"},
+			files: []fixtureEntry{
+				{name: "usr/bin/mosdns", body: "mosdns", mode: 0o755},
+				{name: "run/secrets/foxos/mihomo-secret", body: strings.Repeat("S", 32), mode: 0o600},
+			},
+			wantMessage: "built-in production secret",
 		},
 		{
 			name:              "mihomo cannot masquerade as foxos",
 			expectedComponent: "foxos",
 			entrypoint:        []string{"/mihomo"},
+			cmd:               []string{"-d", "/root/.config/mihomo", "-f", "/root/.config/mihomo/config.yaml"},
 			labels:            map[string]string{"io.foxos.component": "mihomo", "org.opencontainers.image.title": "mihomo"},
 			files:             []fixtureEntry{{name: "mihomo", body: "mihomo", mode: 0o755}},
 			wantMessage:       "component \"foxos\" entrypoint",
@@ -224,7 +297,7 @@ func TestFlattenComponentContracts(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			input := filepath.Join(t.TempDir(), "input.tar")
-			writeComponentDockerFixture(t, input, tt.entrypoint, tt.env, tt.labels, tt.files)
+			writeComponentDockerFixture(t, input, tt.entrypoint, tt.cmd, tt.env, tt.labels, tt.files)
 			_, err := FlattenComponent(input, filepath.Join(t.TempDir(), "output.tar"), "amd64", tt.expectedComponent)
 			if tt.wantMessage == "" {
 				if err != nil {
@@ -333,13 +406,14 @@ func writeDockerFixture(t *testing.T, destination, architecture string, layers [
 	writeTarFile(t, destination, entries)
 }
 
-func writeComponentDockerFixture(t *testing.T, destination string, entrypoint, env []string, labels map[string]string, files []fixtureEntry) {
+func writeComponentDockerFixture(t *testing.T, destination string, entrypoint, cmd, env []string, labels map[string]string, files []fixtureEntry) {
 	t.Helper()
 	config, err := json.Marshal(map[string]any{
 		"architecture": "amd64",
 		"os":           "linux",
 		"config": map[string]any{
 			"Entrypoint": entrypoint,
+			"Cmd":        cmd,
 			"Env":        env,
 			"Labels":     labels,
 		},

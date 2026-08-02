@@ -36,6 +36,36 @@ func (f *fakeDatabase) RestoreDatabase(_ context.Context, source string) error {
 	return nil
 }
 
+func TestServicePrepareStorageCreatesWritableDirectory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	directory := filepath.Join(root, "foxos")
+	service := Service{Directory: directory}
+	if err := service.PrepareStorage(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("backup directory info=%v err=%v", info, err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("storage probe residue entries=%v err=%v", entries, err)
+	}
+}
+
+func TestServicePrepareStorageRejectsSymlink(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	directory := filepath.Join(root, "foxos")
+	if err := os.Symlink(t.TempDir(), directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Service{Directory: directory}).PrepareStorage(); err == nil {
+		t.Fatal("symlink backup directory was accepted")
+	}
+}
+
 func TestServiceCreateOperationPublishesRecoverableManifest(t *testing.T) {
 	t.Parallel()
 	service := Service{Database: &fakeDatabase{current: []byte("sqlite")}, Directory: t.TempDir()}

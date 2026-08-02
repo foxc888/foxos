@@ -9,9 +9,23 @@
 :global FoxOSContainerState
 :global FoxOSContainerRoot
 :global FoxOSContainerMountLists
+:global FoxOSMountCompatVersion
+:global FoxOSWritableMountMode
+:global FoxOSMountSource
+:global FoxOSMountMode
+:global FoxOSSecretContractVersion
+:global FoxOSSecretHostDirectory
+:global FoxOSSecretContainerDirectory
+:global FoxOSSecretMountName
+:global FoxOSReadonlyMountMode
+:global FoxOSAdminMountLists
+:global FoxOSSecretFileNames
+:global FoxOSSecretRead
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
+:if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSSecretContractVersion != 1 || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets") || $FoxOSSecretContainerDirectory != "/run/secrets/foxos" || $FoxOSSecretMountName != "foxos-secrets" || $FoxOSReadonlyMountMode != "ro") do={ :error "secret-file compatibility contract is unavailable" }
 :local foxosURL ("https://" . $FoxOSSiteFoxOSAddress)
 :local containerDeviceMode [/system/device-mode get container]
 :local schedulerDeviceMode [/system/device-mode get scheduler]
@@ -27,16 +41,21 @@
 :local activeName [/container get $active name]
 :if ([:len $mihomoByName] != 1 || $mihomoByName != $mihomo || [/container get $mihomo interface] != "veth-mihomo" || [/container get $mihomo envlists] != "" || [$FoxOSContainerMountLists $mihomo] != "foxos-mihomo-runtime" || [$FoxOSContainerRoot $mihomo] != ($FoxOSSiteStorageRoot . "/containers/mihomo") || ([/container get $mihomo start-on-boot] != false && [/container get $mihomo start-on-boot] != "no") || ([/container get $mihomo logging] != true && [/container get $mihomo logging] != "yes")) do={ :error "Mihomo 容器完整身份契约不匹配" }
 :if ([:len $mosdnsByName] != 1 || $mosdnsByName != $mosdns || [/container get $mosdns interface] != "veth-mosdns" || [/container get $mosdns envlists] != "foxos-mosdns-env" || [$FoxOSContainerMountLists $mosdns] != "foxos-mosdns-runtime" || [$FoxOSContainerRoot $mosdns] != ($FoxOSSiteStorageRoot . "/containers/mosdns") || ([/container get $mosdns start-on-boot] != false && [/container get $mosdns start-on-boot] != "no") || ([/container get $mosdns logging] != true && [/container get $mosdns logging] != "yes")) do={ :error "MosDNS 容器完整身份契约不匹配" }
-:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [:len [/container find where name=$activeName]] != 1 || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={ :error "FoxOS active 容器完整身份契约不匹配" }
+:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [:len [/container find where name=$activeName]] != 1 || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != $FoxOSAdminMountLists || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={ :error "FoxOS active 容器完整身份契约不匹配" }
+:foreach secretName in=$FoxOSSecretFileNames do={
+  :local secretValue [$FoxOSSecretRead $secretName]
+  :if ([:len $secretValue] < 32) do={ :error ("secret file does not meet the security baseline: " . $secretName) }
+}
+:local secretMount [/container/mounts find where list=$FoxOSSecretMountName]
+:if ([:len $secretMount] != 1 || [$FoxOSMountSource $secretMount] != $FoxOSSecretHostDirectory || [/container/mounts get $secretMount dst] != $FoxOSSecretContainerDirectory || [$FoxOSMountMode $secretMount] != $FoxOSReadonlyMountMode) do={ :error "verify secret mount identity or read-only mode does not match" }
 :foreach containerID in={$mihomo;$mosdns;$active} do={
   :if ([$FoxOSContainerState $containerID] != "running") do={ :error ("容器未处于 running: " . [/container get $containerID name]) }
 }
 :if ([:len [/certificate find where common-name="FoxOS Local CA" trusted=yes]] != 1) do={
   :error "RouterOS 中缺少唯一且 trusted=yes 的 FoxOS Local CA；禁止跳过证书校验"
 }
-:local tokenID [/container/envs find where list="foxos-env" key="FOXOS_API_TOKEN"]
-:if ([:len $tokenID] != 1) do={ :error "FOXOS_API_TOKEN 缺失或不唯一" }
-:local apiToken [/container/envs get $tokenID value]
+:local apiToken [$FoxOSSecretRead "api-token"]
+:if ([:len $apiToken] < 32) do={ :error "api-token secret file does not meet the security baseline" }
 :local authHeader ("Authorization: Bearer " . $apiToken)
 
 :local live [/tool/fetch url=($foxosURL . "/api/v1/health/live") check-certificate=yes-without-crl output=user as-value]

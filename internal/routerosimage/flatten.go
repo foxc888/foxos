@@ -53,30 +53,44 @@ type imageRuntimeConfig struct {
 }
 
 type componentContract struct {
-	title         string
-	entrypoint    []string
-	requiredFiles []string
-	requiredEnv   []string
-	forbiddenEnv  []string
+	title               string
+	entrypoint          []string
+	cmd                 []string
+	requiredFiles       []string
+	requiredDirectories []string
+	requiredEnv         []string
+	forbiddenEnv        []string
+}
+
+var forbiddenSecretEnvironment = []string{
+	"FOXOS_API_TOKEN=",
+	"FOXOS_CONFIRMATION_KEY=",
+	"FOXOS_ROUTEROS_PASSWORD=",
+	"FOXOS_MIHOMO_SECRET=",
 }
 
 var componentContracts = map[string]componentContract{
 	"foxos": {
-		title:         "foxos",
-		entrypoint:    []string{"/app/foxos"},
-		requiredFiles: []string{"app/foxos", "usr/local/bin/mihomo"},
+		title:               "foxos",
+		entrypoint:          []string{"/app/foxos"},
+		cmd:                 []string{"-static", "/app/web", "-database", "/data/foxos.db"},
+		requiredFiles:       []string{"app/foxos", "usr/local/bin/mihomo"},
+		requiredDirectories: []string{"run/secrets/foxos"},
+		forbiddenEnv:        forbiddenSecretEnvironment,
 	},
 	"mihomo": {
 		title:         "mihomo",
 		entrypoint:    []string{"/mihomo"},
+		cmd:           []string{"-d", "/root/.config/mihomo", "-f", "/root/.config/mihomo/config.yaml"},
 		requiredFiles: []string{"mihomo"},
+		forbiddenEnv:  forbiddenSecretEnvironment,
 	},
 	"mosdns": {
 		title:         "mosdns",
 		entrypoint:    []string{"/usr/bin/mosdns", "start", "-d", "/cus/mosdns", "-c", "/cus/mosdns/config_custom.yaml"},
 		requiredFiles: []string{"usr/bin/mosdns"},
 		requiredEnv:   []string{"MOSDNS_AUTO_INIT=0"},
-		forbiddenEnv:  []string{"MOSDNS_CONFIG_INIT_URL="},
+		forbiddenEnv:  append([]string{"MOSDNS_CONFIG_INIT_URL="}, forbiddenSecretEnvironment...),
 	},
 }
 
@@ -248,6 +262,9 @@ func validateComponentConfig(config map[string]json.RawMessage, expectedComponen
 	if !equalStrings(runtime.Entrypoint, contract.entrypoint) {
 		return fmt.Errorf("component %q entrypoint is %q, expected %q", expectedComponent, runtime.Entrypoint, contract.entrypoint)
 	}
+	if !equalStrings(runtime.Cmd, contract.cmd) {
+		return fmt.Errorf("component %q command is %q, expected %q", expectedComponent, runtime.Cmd, contract.cmd)
+	}
 	if runtime.Labels["io.foxos.component"] != expectedComponent {
 		return fmt.Errorf("component %q is missing exact io.foxos.component identity label", expectedComponent)
 	}
@@ -286,6 +303,17 @@ func validateComponentFiles(entries map[string]stagedEntry, expectedComponent st
 		}
 		if !isRegularEntry(entry.header.Typeflag) || entry.header.Mode&0o111 == 0 {
 			return fmt.Errorf("component %q required file /%s is not executable", expectedComponent, name)
+		}
+	}
+	for _, name := range componentContracts[expectedComponent].requiredDirectories {
+		entry, ok := entries[name]
+		if !ok || entry.header.Typeflag != tar.TypeDir {
+			return fmt.Errorf("component %q is missing required directory /%s", expectedComponent, name)
+		}
+	}
+	for name := range entries {
+		if strings.HasPrefix(name, "run/secrets/foxos/") {
+			return fmt.Errorf("component %q must not contain a built-in production secret at /%s", expectedComponent, name)
 		}
 	}
 	return nil

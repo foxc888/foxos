@@ -36,6 +36,7 @@ COPY --from=mihomo-build --chmod=1777 /runtime/tmp /tmp
 COPY --from=mihomo-build /mihomo /mihomo
 VOLUME ["/root/.config/mihomo/"]
 ENTRYPOINT ["/mihomo"]
+CMD ["-d", "/root/.config/mihomo", "-f", "/root/.config/mihomo/config.yaml"]
 
 FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS mosdns-build
 ARG MOSDNS_VERSION=v0.6.4
@@ -106,8 +107,9 @@ LABEL org.opencontainers.image.title="foxos" \
 RUN apk add --no-cache ca-certificates libcap tzdata \
     && addgroup -S -g 10001 foxos \
     && adduser -S -D -H -u 10001 -G foxos foxos \
-    && mkdir -p /app/web /data /backups \
-    && chown -R foxos:foxos /data /backups
+    && mkdir -p /app/web /data /backups /run/secrets/foxos \
+    && chown -R foxos:foxos /data /backups /run/secrets/foxos \
+    && chmod 0700 /run/secrets/foxos
 WORKDIR /app
 COPY --from=server /out/foxos /app/foxos
 COPY --from=web /src/web/dist /app/web

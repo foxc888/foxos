@@ -15,7 +15,7 @@
 :global FoxOSSiteLoadedDigest
 :global FoxOSSiteLoadedConfigPath
 :global FoxOSSiteLoaderVersion
-:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1) do={ :error "先导入不可变的 load-site-config.rsc，禁止直接导入可编辑清单" }
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc，禁止直接导入可编辑清单" }
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
 :local storageMode "disk"

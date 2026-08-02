@@ -31,19 +31,20 @@ func TestBuildRouterOSBundleWithVersionedUpgradePayload(t *testing.T) {
 	mihomoImage := filepath.Join(fixtureRoot, "mihomo-input.tar")
 	mosdnsImage := filepath.Join(fixtureRoot, "mosdns-input.tar")
 	writeComponentDockerFixture(t, foxosImage,
-		[]string{"/app/foxos"}, nil,
+		[]string{"/app/foxos"}, []string{"-static", "/app/web", "-database", "/data/foxos.db"}, nil,
 		map[string]string{"io.foxos.component": "foxos", "org.opencontainers.image.title": "foxos"},
 		[]fixtureEntry{
 			{name: "app/foxos", body: "foxos fixture", mode: 0o755},
 			{name: "usr/local/bin/mihomo", body: "validator fixture", mode: 0o755},
+			{name: "run/secrets/foxos", mode: 0o700, typeflag: tar.TypeDir},
 		})
 	writeComponentDockerFixture(t, mihomoImage,
-		[]string{"/mihomo"}, nil,
+		[]string{"/mihomo"}, []string{"-d", "/root/.config/mihomo", "-f", "/root/.config/mihomo/config.yaml"}, nil,
 		map[string]string{"io.foxos.component": "mihomo", "org.opencontainers.image.title": "mihomo"},
 		[]fixtureEntry{{name: "mihomo", body: "mihomo fixture", mode: 0o755}})
 	writeComponentDockerFixture(t, mosdnsImage,
 		[]string{"/usr/bin/mosdns", "start", "-d", "/cus/mosdns", "-c", "/cus/mosdns/config_custom.yaml"},
-		[]string{"MOSDNS_AUTO_INIT=0"},
+		nil, []string{"MOSDNS_AUTO_INIT=0"},
 		map[string]string{"io.foxos.component": "mosdns", "org.opencontainers.image.title": "mosdns"},
 		[]fixtureEntry{{name: "usr/bin/mosdns", body: "mosdns fixture", mode: 0o755}})
 
@@ -96,6 +97,8 @@ func TestBuildRouterOSBundleWithVersionedUpgradePayload(t *testing.T) {
 		"APPROVED ROLLBACK SHA-512",
 		"APPROVED CLEANUP SHA-512",
 		"upgrade-cleanup-apply.rsc",
+		"foxos-secrets/api-token",
+		"23/24",
 	} {
 		if !strings.Contains(string(quickInstall), required) {
 			t.Errorf("packaged QUICK-INSTALL is missing %q", required)
@@ -103,6 +106,28 @@ func TestBuildRouterOSBundleWithVersionedUpgradePayload(t *testing.T) {
 	}
 	if strings.Contains(string(quickInstall), "../../docs/") {
 		t.Error("packaged QUICK-INSTALL links outside the standalone release bundle")
+	}
+	for _, forbidden := range []string{
+		`:put [/container/envs get [find where list="foxos-env" key="FOXOS_API_TOKEN"] value]`,
+		"27 键 FoxOS env",
+		"28 键",
+	} {
+		if strings.Contains(string(quickInstall), forbidden) {
+			t.Errorf("packaged QUICK-INSTALL contains obsolete secret handling %q", forbidden)
+		}
+	}
+	releaseManifest, err := os.ReadFile(filepath.Join(bundleRoot, "RELEASE-MANIFEST.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"mounted read-only at /run/secrets/foxos",
+		"production-secret-env: forbidden",
+		"device-generated secret mount",
+	} {
+		if !strings.Contains(string(releaseManifest), required) {
+			t.Errorf("release manifest is missing secret contract %q", required)
+		}
 	}
 
 	assertDirectoryEntries(t, bundleRoot, []string{
@@ -176,6 +201,10 @@ func TestBuildRouterOSBundleWithVersionedUpgradePayload(t *testing.T) {
 		}
 		if strings.Contains(string(body), "__FOXOS_RELEASE_ID__") {
 			return fmt.Errorf("unresolved release placeholder in %s", path)
+		}
+		switch entry.Name() {
+		case "api-token", "confirmation-key", "routeros-password", "mihomo-secret":
+			return fmt.Errorf("bundle contains forbidden production secret file name %s", path)
 		}
 		return nil
 	})

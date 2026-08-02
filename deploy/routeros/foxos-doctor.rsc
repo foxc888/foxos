@@ -69,7 +69,7 @@
 :local mosdnsAddress ""
 :local foxosAddress ""
 :local publicHostname ""
-:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1) do={ :set manifestReady false }
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 2) do={ :set manifestReady false }
 :if ($manifestReady) do={
   :set managementBridge $FoxOSSiteManagementBridge
   :set storageRoot $FoxOSSiteStorageRoot

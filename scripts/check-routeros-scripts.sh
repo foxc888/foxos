@@ -536,7 +536,7 @@ foxos_doctor_contract() {
   local invariant
   for invariant in \
     'PASS|doctor|name=foxos-doctor|mode=read-only|scope=host-prerequisites' \
-    ':if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1) do={' \
+    ':if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 2) do={' \
     'NEEDS-ACTION|site-manifest|reason=load-sealed-site-config-first' \
     'PASS|routeros-version|' \
     'PASS|architecture|' \
@@ -868,7 +868,7 @@ container_mount_list_contract() {
 container_mount_readback_contract() {
   local script=$1
   rg -q '\[\$FoxOSMountSource \$[A-Za-z][A-Za-z0-9]*\] (!=|=) \$[A-Za-z][A-Za-z0-9]*' "$script" \
-    && rg -q '\[\$FoxOSMountMode \$[A-Za-z][A-Za-z0-9]*\] (!=|=) \$FoxOSWritableMountMode' "$script"
+    && rg -q '\[\$FoxOSMountMode \$[A-Za-z][A-Za-z0-9]*\] (!=|=) \$(FoxOSWritableMountMode|expectedMode)' "$script"
 }
 
 mount_digest_source_contract() {
@@ -892,8 +892,11 @@ lifecycle_shared_mount_contract() {
     && rg -Fq ':if ([:len $mountID] != 1 || [$FoxOSMountSource $mountID] != $expectedSource || [/container/mounts get $mountID dst] != $expectedDestination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={' "$script" \
     && rg -Fq ':set verifiedSharedMounts ($verifiedSharedMounts + 1)' "$script" \
     && rg -Fq ':if ($verifiedSharedMounts != 3) do={ :error "三个共享挂载未全部通过身份与可写检查" }' "$script" \
+    && rg -Fq ':local secretMount [/container/mounts find where list=$FoxOSSecretMountName]' "$script" \
+    && rg -q '\[:len \$secretMount\] != 1 .*\[\$FoxOSMountSource \$secretMount\] != \$FoxOSSecretHostDirectory .*\[\$FoxOSMountMode \$secretMount\] != \$FoxOSReadonlyMountMode' "$script" \
+    && { rg -Fq ':local secretValue [$FoxOSSecretRead $secretName]' "$script" || rg -Fq ':local apiToken [$FoxOSSecretRead "api-token"]' "$script"; } \
     || return 1
-  completion_line=$( (rg -n -F ':if ($verifiedSharedMounts != 3)' "$script" || true) | head -n1 | cut -d: -f1 )
+  completion_line=$( (rg -n -F ':if ([:len $secretMount] != 1' "$script" || true) | head -n1 | cut -d: -f1 )
   first_mutation=$( (rg -n '/container/(set|start|stop)[[:space:]]' "$script" || true) | head -n1 | cut -d: -f1 )
   [[ -n "$completion_line" && -n "$first_mutation" ]] && ((completion_line < first_mutation))
 }
@@ -901,7 +904,47 @@ lifecycle_shared_mount_contract() {
 full_install_mount_contract() {
   local script=$1
   container_mount_readback_contract "$script" \
-    && rg -q '/container/mounts add list=\$mountName[^#]*mode=\$FoxOSWritableMountMode' "$script"
+    && rg -Fq ':local mountDefinitions {($FoxOSSecretMountName . "|" . $FoxOSSecretHostDirectory . "|" . $FoxOSSecretContainerDirectory . "|" . $FoxOSReadonlyMountMode);' "$script" \
+    && [[ "$(rg -o -F '$FoxOSWritableMountMode)' "$script" | wc -l | tr -d ' ')" -ge 5 ]] \
+    && rg -q '/container/mounts add list=\$mountName[^#]*mode=\$expectedMode' "$script" \
+    && rg -Fq '[$FoxOSMountMode $mountID] != $expectedMode' "$script"
+}
+
+secret_loader_contract() {
+  local script=$1
+  local invariant
+  for invariant in \
+    ':global FoxOSSecretContractVersion 1' \
+    ':global FoxOSSecretHostDirectory ($storageRoot . "/foxos-secrets")' \
+    ':global FoxOSSecretContainerDirectory "/run/secrets/foxos"' \
+    ':global FoxOSSecretMountName "foxos-secrets"' \
+    ':global FoxOSReadonlyMountMode "ro"' \
+    ':global FoxOSAdminMountLists "foxos-secrets,foxos-mihomo-config,foxos-data,foxos-backups"' \
+    ':global FoxOSSensitiveEnvKeys {"FOXOS_API_TOKEN";"FOXOS_CONFIRMATION_KEY";"FOXOS_ROUTEROS_PASSWORD";"FOXOS_MIHOMO_SECRET"}' \
+    ':global FoxOSSecretFileNames {"api-token";"confirmation-key";"routeros-password";"mihomo-secret"}' \
+    ':global FoxOSSecretRead do={' \
+    ':if ($allowed = false) do={ :error "secret file name is outside the fixed contract" }' \
+    '[/container/envs find where list="foxos-env" key=$sensitiveKey]' \
+    ':if ([:len $secretFile] != 1 || [/file get $secretFile type] != "file") do={' \
+    ':if ($secretSize < 32 || $secretSize > 4096) do={' \
+    ':if ([:len $secretValue] != $secretSize) do={' \
+    'secret file contains whitespace or non-printable ASCII' \
+    'the four production secret files must contain distinct values' \
+    ':global FoxOSSecretEvidence do={' \
+    ':return ([:pick $secretFile 0] . ":" . $secretName . ":" . [:len $secretValue] . ":" . [:convert $secretValue transform=sha512 to=hex])'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+}
+
+secret_mount_readback_contract() {
+  local script=$1
+  rg -Fq ':global FoxOSSecretMountName' "$script" || return 1
+  if rg -Fq ':local mountDefinitions {($FoxOSSecretMountName . "|" . $FoxOSSecretHostDirectory . "|" . $FoxOSSecretContainerDirectory . "|" . $FoxOSReadonlyMountMode);' "$script"; then
+    rg -q '\[\$FoxOSMountMode \$mountID\] (!=|=) \$expectedMode' "$script"
+    return
+  fi
+  rg -Fq ':local secretMount [/container/mounts find where list=$FoxOSSecretMountName]' "$script" \
+    && rg -q '\[:len \$secretMount\] != 1 .*\[\$FoxOSMountSource \$secretMount\] != \$FoxOSSecretHostDirectory .*\[\$FoxOSMountMode \$secretMount\] != \$FoxOSReadonlyMountMode' "$script"
 }
 
 container_identity_fields_contract() {
@@ -1038,7 +1081,7 @@ admin_container_logging_contract() {
     fi
     rg -q 'logging=no|logging\] != false|Logging != false' "$root/$script" || return 1
   done
-  rg -Fq 'interface=veth-foxos root-dir=($storageRoot . "/containers/foxos-initial") envlists=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=no' "$root/foxos-full-install.rsc" \
+  rg -Fq 'interface=veth-foxos root-dir=($storageRoot . "/containers/foxos-initial") envlists=foxos-env mountlists=$FoxOSAdminMountLists logging=no' "$root/foxos-full-install.rsc" \
     && rg -Fq '[/container get $foxosContainer logging] != false' "$root/foxos-full-install.rsc" \
     && rg -Fq '[/container get $activeContainer logging] = false' "$root/foxos-install-inspect.rsc" \
     && rg -Fq '[/container get $adminSlot logging] != false' "$root/foxos-start-all.rsc" \
@@ -1075,7 +1118,7 @@ cleanup_inspector_contract() {
     && rg -Fq ':local interfaceAdminSlots [/container find where interface="veth-foxos"]' "$script" \
     && rg -Fq ':if ([:len $knownAdminSlots] != [:len $interfaceAdminSlots])' "$script" \
     && rg -Fq ':if ($runningAdminCount != 1 || $runningAdminID != $active)' "$script" \
-    && rg -Fq 'foxos-upgrade-cleanup-v3|release=' "$script" \
+    && rg -Fq 'foxos-upgrade-cleanup-v4|release=' "$script" \
     && rg -Fq '|site=" . $FoxOSSiteLoadedDigest' "$script" \
     && rg -Fq '|active=" . [:pick $active 0]' "$script" \
     && rg -Fq '|rollback=" . [:pick $retirement 0]' "$script" \
@@ -1135,7 +1178,17 @@ uninstall_snapshot_contract() {
     ':local mihomoConfigMountSnapshot [/container/mounts find where list="foxos-mihomo-config"]' \
     ':local mosdnsRuntimeMountSnapshot [/container/mounts find where list="foxos-mosdns-runtime"]' \
     ':local dataMountSnapshot [/container/mounts find where list="foxos-data"]' \
-    ':local backupsMountSnapshot [/container/mounts find where list="foxos-backups"]'; do
+    ':local backupsMountSnapshot [/container/mounts find where list="foxos-backups"]' \
+    ':local secretMountSnapshot [/container/mounts find where list=$FoxOSSecretMountName]' \
+    ':local secretDirectorySnapshot [/file find where name=$FoxOSSecretHostDirectory]' \
+    ':local apiTokenFileSnapshot [/file find where name=($FoxOSSecretHostDirectory . "/api-token")]' \
+    ':local confirmationKeyFileSnapshot [/file find where name=($FoxOSSecretHostDirectory . "/confirmation-key")]' \
+    ':local routerPasswordFileSnapshot [/file find where name=($FoxOSSecretHostDirectory . "/routeros-password")]' \
+    ':local mihomoSecretFileSnapshot [/file find where name=($FoxOSSecretHostDirectory . "/mihomo-secret")]' \
+    ':set apiTokenEvidenceSnapshot [$FoxOSSecretEvidence "api-token"]' \
+    ':set confirmationKeyEvidenceSnapshot [$FoxOSSecretEvidence "confirmation-key"]' \
+    ':set routerPasswordEvidenceSnapshot [$FoxOSSecretEvidence "routeros-password"]' \
+    ':set mihomoSecretEvidenceSnapshot [$FoxOSSecretEvidence "mihomo-secret"]'; do
     rg -Fq "$declaration" "$script" || return 1
   done
   rg -Fq ':global FoxOSUninstallContainerCount' "$script" \
@@ -1144,15 +1197,16 @@ uninstall_snapshot_contract() {
 
 retained_state_install_contract() {
   local script=$1
-  local env_line data_line backups_line guard_line material_line
+  local env_line data_line backups_line secrets_line guard_line material_line
   env_line=$( (rg -n -F ':local envItems [/container/envs find where list="foxos-env"]' "$script" || true) | head -n1 | cut -d: -f1 )
   data_line=$( (rg -n -F ':local persistedDataRoot [/file find where name=($storageRoot . "/foxos-data")]' "$script" || true) | head -n1 | cut -d: -f1 )
   backups_line=$( (rg -n -F ':local persistedBackupRoot [/file find where name=($storageRoot . "/foxos-backups")]' "$script" || true) | head -n1 | cut -d: -f1 )
-  guard_line=$( (rg -n -F ':if ([:len $envItems] = 0 && ([:len $persistedDataRoot] > 0 || [:len $persistedBackupRoot] > 0)) do={' "$script" || true) | head -n1 | cut -d: -f1 )
-  material_line=$( (rg -n -F ':set material ($material . "|retained-roots=" . [:len $persistedDataRoot] . ":" . [:len $persistedBackupRoot])' "$script" || true) | head -n1 | cut -d: -f1 )
-  [[ -n "$env_line" && -n "$data_line" && -n "$backups_line" && -n "$guard_line" && -n "$material_line" \
-    && "$env_line" -lt "$guard_line" && "$data_line" -lt "$guard_line" && "$backups_line" -lt "$guard_line" && "$guard_line" -lt "$material_line" ]] \
-    && rg -Fq 'FAIL retained foxos-data or foxos-backups exists without foxos-env' "$script"
+  secrets_line=$( (rg -n -F ':local persistedSecretRoot [/file find where name=$FoxOSSecretHostDirectory]' "$script" || true) | head -n1 | cut -d: -f1 )
+  guard_line=$( (rg -n -F ':if ([:len $envItems] = 0 && ([:len $persistedDataRoot] > 0 || [:len $persistedBackupRoot] > 0 || [:len $persistedSecretRoot] > 0)) do={' "$script" || true) | head -n1 | cut -d: -f1 )
+  material_line=$( (rg -n -F ':set material ($material . "|retained-roots=" . [:len $persistedDataRoot] . ":" . [:len $persistedBackupRoot] . ":" . [:len $persistedSecretRoot])' "$script" || true) | head -n1 | cut -d: -f1 )
+  [[ -n "$env_line" && -n "$data_line" && -n "$backups_line" && -n "$secrets_line" && -n "$guard_line" && -n "$material_line" \
+    && "$env_line" -lt "$guard_line" && "$data_line" -lt "$guard_line" && "$backups_line" -lt "$guard_line" && "$secrets_line" -lt "$guard_line" && "$guard_line" -lt "$material_line" ]] \
+    && rg -Fq 'FAIL retained FoxOS data, backups, or secret directory exists without foxos-env' "$script"
 }
 
 pending_journal_uninstall_contract() {
@@ -1175,7 +1229,7 @@ uninstall_predelete_contract() {
   local script=$1
   local last_snapshot inspector_lines inspector_count second_inspector digest_guard first_resource_write binding
   uninstall_snapshot_contract "$script" || return 1
-  last_snapshot=$( (rg -n -F ':local backupsMountSnapshot [/container/mounts find where list="foxos-backups"]' "$script" || true) | head -n1 | cut -d: -f1 )
+  last_snapshot=$( (rg -n -F ':local mihomoSecretFileSnapshot [/file find where name=($FoxOSSecretHostDirectory . "/mihomo-secret")]' "$script" || true) | head -n1 | cut -d: -f1 )
   inspector_lines=$( (rg -n -F '/import file-name=($FoxOSSiteStorageRoot . "/foxos-uninstall-inspect.rsc")' "$script" || true) | cut -d: -f1 )
   inspector_count=$(printf '%s\n' "$inspector_lines" | sed '/^$/d' | wc -l | tr -d ' ')
   second_inspector=$(printf '%s\n' "$inspector_lines" | sed -n '2p')
@@ -1201,6 +1255,11 @@ uninstall_predelete_contract() {
     ':set mountID $mosdnsRuntimeMountSnapshot' \
     ':set mountID $dataMountSnapshot' \
     ':set mountID $backupsMountSnapshot' \
+    ':set mountID $secretMountSnapshot' \
+    ':set secretFileSnapshot $apiTokenFileSnapshot' \
+    ':set secretFileSnapshot $confirmationKeyFileSnapshot' \
+    ':set secretFileSnapshot $routerPasswordFileSnapshot' \
+    ':set secretFileSnapshot $mihomoSecretFileSnapshot' \
     '/system/scheduler remove $scheduler' \
     '/container/remove $containerID' \
     '/ip/dns/static/remove $dnsRecord' \
@@ -1209,6 +1268,8 @@ uninstall_predelete_contract() {
     '/user/remove $serviceUser' \
     '/user/group/remove $serviceGroup' \
     '/container/mounts/remove $mountID' \
+    '/file/remove $secretFileSnapshot' \
+    '/file/remove $secretDirectorySnapshot' \
     '/system/script remove $startScript'; do
     rg -Fq "$binding" "$script" || return 1
   done
@@ -1436,8 +1497,8 @@ done
 if rg -n -g '*.rsc' '/container/mounts (add|find)[^#]*(name=|where name)' "$rsc_root"; then
   report "RouterOS named mounts must use the official list property, not name"
 fi
-if rg -n -g '*.rsc' '/container/mounts (add|get)[^#]*read-only' "$rsc_root"; then
-  report "RouterOS named mounts must use mode=rw and the loader-owned mode getter, not read-only"
+if rg -n -g '*.rsc' '/container/mounts (add|get)[^#]*(read-only=| read-only\])' "$rsc_root"; then
+  report "RouterOS named mounts must use mode=rw/ro and the loader-owned mode getter, not the legacy read-only property"
 fi
 if rg -n -g '*.rsc' -g '!load-site-config.rsc' -g '!chr-envlists-smoke.rsc' '/container/mounts get \$[A-Za-z][A-Za-z0-9]* mode\]' "$rsc_root"; then
   report "deployment scripts bypass the loader-owned mount mode compatibility contract"
@@ -1451,11 +1512,11 @@ for mount_list_script in foxos-full-install.rsc foxos-install-inspect.rsc foxos-
   fi
 done
 if ! full_install_mount_contract "$rsc_root/foxos-full-install.rsc"; then
-  report "full install does not create and read back every named mount as mode=rw"
+  report "full install does not create five writable mounts plus the unique read-only secret mount"
 fi
 for mount_readback_script in foxos-install-inspect.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc upgrade-inspect.rsc upgrade-promote-inspect.rsc rollback-inspect.rsc upgrade-cleanup-inspect.rsc; do
-  if ! container_mount_readback_contract "$rsc_root/$mount_readback_script"; then
-    report "$mount_readback_script does not bind named mounts to normalized source and mode=rw"
+  if ! container_mount_readback_contract "$rsc_root/$mount_readback_script" || ! secret_mount_readback_contract "$rsc_root/$mount_readback_script"; then
+    report "$mount_readback_script does not bind writable mounts and the read-only secret mount to normalized identities"
   fi
 done
 for mount_digest_script in foxos-install-inspect.rsc foxos-uninstall-inspect.rsc upgrade-inspect.rsc upgrade-promote-inspect.rsc rollback-inspect.rsc upgrade-cleanup-inspect.rsc; do
@@ -1478,6 +1539,9 @@ if ! container_compatibility_contract "$rsc_root/load-site-config.rsc"; then
 fi
 if ! mount_compatibility_contract "$rsc_root/load-site-config.rsc"; then
   report "the immutable loader does not own the RouterOS named-mount source and mode compatibility contract"
+fi
+if ! secret_loader_contract "$rsc_root/load-site-config.rsc"; then
+  report "the immutable loader does not own the four-file production secret contract"
 fi
 for compatibility_script in foxos-full-install.rsc foxos-install-inspect.rsc foxos-start-all.rsc foxos-verify.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc upgrade-inspect.rsc upgrade.rsc upgrade-promote-inspect.rsc upgrade-promote.rsc rollback-inspect.rsc rollback.rsc upgrade-cleanup-inspect.rsc upgrade-cleanup-apply.rsc; do
   if ! container_compatibility_consumer_contract "$rsc_root/$compatibility_script"; then
@@ -1507,8 +1571,11 @@ for endpoint in \
     report "missing FoxOS runtime endpoint: $endpoint"
   fi
 done
-if ! rg -Fq '!= $expectedEnvCount' "$rsc_root/foxos-full-install.rsc" || ! rg -Fq 'FOXOS_SUBSCRIPTION_PRIVATE_CIDRS' "$rsc_root/foxos-full-install.rsc"; then
-	report "FoxOS env allowlist does not enforce the 27-key baseline plus the reviewed optional private-subscription key"
+if ! rg -Fq ':local expectedEnvCount 23' "$rsc_root/foxos-full-install.rsc" || ! rg -Fq ':set expectedEnvCount 24' "$rsc_root/foxos-full-install.rsc" || ! rg -Fq '!= $expectedEnvCount' "$rsc_root/foxos-full-install.rsc"; then
+	report "FoxOS env allowlist does not enforce the 23/24-key non-sensitive baseline"
+fi
+if rg -n -g '*.rsc' '/container/envs (add|set)[^#]*(FOXOS_API_TOKEN|FOXOS_CONFIRMATION_KEY|FOXOS_ROUTEROS_PASSWORD|FOXOS_MIHOMO_SECRET)' "$rsc_root"; then
+  report "a production secret is still written into a RouterOS env list"
 fi
 if ! rg -Fq 'address] != $routerCIDR' "$rsc_root/preflight.rsc"; then
   report "preflight does not require the exact RouterOS management prefix"
@@ -1552,14 +1619,14 @@ done
 if rg -n -g '*.rsc' 'http://[^[:space:]"$]+/api/|http://[^[:space:]"$]+:8090' "$rsc_root"; then
   report "FoxOS API access over ordinary LAN HTTP remains in a RouterOS script"
 fi
-if rg -n '^[[:space:]]*(while .*tun0|ip (rule|route))' "$repo_root/mihomo/config/start.sh"; then
-  report "Mihomo startup still invents an unverified transparent data plane"
+if [[ -e "$repo_root/mihomo/config/start.sh" ]]; then
+  report "obsolete Mihomo shell startup wrapper is still present"
 fi
 
 for invariant in \
-  'foxos-mihomo-runtime|mihomo-config|/root/.config/mihomo' \
-  'foxos-mihomo-config|mihomo-config|/data/mihomo' \
-  'foxos-mosdns-runtime|mosdns-config|/cus/mosdns'; do
+  'foxos-mihomo-runtime|" . $storageRoot . "/mihomo-config|/root/.config/mihomo|" . $FoxOSWritableMountMode' \
+  'foxos-mihomo-config|" . $storageRoot . "/mihomo-config|/data/mihomo|" . $FoxOSWritableMountMode' \
+  'foxos-mosdns-runtime|" . $storageRoot . "/mosdns-config|/cus/mosdns|" . $FoxOSWritableMountMode'; do
   if ! rg -Fq "$invariant" "$rsc_root/foxos-full-install.rsc"; then
     report "missing required mount contract: $invariant"
   fi
@@ -1574,13 +1641,13 @@ if rg -Fq '现有 foxos-env 的键数量不是安全基线要求的 12 项' "$rs
   report "the installer rejects recoverable partial FoxOS env creation"
 fi
 for invariant in \
-  'if ([:len $routerPasswordID] = 0)' \
-  'if ([:len $mihomoSecretID] = 0)' \
-  'if ([:len $apiTokenID] = 0)' \
-  'if ([:len $confirmationKeyID] = 0)' \
+  ':local secretDefinitions {"routeros-password|32|32";"mihomo-secret|32|48";"api-token|32|64";"confirmation-key|32|64"}' \
+  'complete install is missing secret file' \
+  ':local secretValue [$FoxOSSecretRead $secretName]' \
+  'generated secret files must contain four distinct values' \
   'foxos-env 包含安全基线之外的键'; do
   if ! rg -Fq "$invariant" "$rsc_root/foxos-full-install.rsc"; then
-    report "missing resumable credential invariant: $invariant"
+    report "missing resumable secret-file invariant: $invariant"
   fi
 done
 for invariant in \
@@ -1602,10 +1669,10 @@ for invariant in \
   fi
 done
 if ! retained_state_install_contract "$rsc_root/foxos-install-inspect.rsc"; then
-  report "install inspector can rotate the confirmation key over retained FoxOS data or backups"
+  report "install inspector can rotate the secret set over retained FoxOS state"
 fi
 if ! pending_journal_uninstall_contract "$rsc_root/foxos-uninstall-inspect.rsc" "$rsc_root/uninstall-apply.rsc"; then
-  report "uninstall does not preserve containers, env and the confirmation key around a pending Mihomo apply journal"
+  report "uninstall does not preserve containers, env and the secret set around a pending Mihomo apply journal"
 fi
 if ! chr_envlists_smoke_contract "$rsc_root/chr-envlists-smoke.rsc"; then
   report "CHR envlists smoke does not preserve confirmation, isolation, readback and zero-residual cleanup contracts"
@@ -1918,7 +1985,7 @@ for invariant in \
   'actualDigest [:convert $configContents transform=sha512 to=hex]' \
   'site-config.rsc 必须且只能包含 11 个指定赋值各一次' \
   'FoxOSSiteLoadedDigest $actualDigest' \
-  'FoxOSSiteLoaderVersion 1'; do
+  'FoxOSSiteLoaderVersion 2'; do
   if ! rg -Fq "$invariant" "$rsc_root/load-site-config.rsc"; then
     report "site loader is missing an assignment-only integrity invariant: $invariant"
   fi
@@ -2711,14 +2778,14 @@ if cmp -s "$rsc_root/foxos-full-install.rsc" "$site_seal_root/lifecycle/containe
 elif container_mount_list_contract "$site_seal_root/lifecycle/container-mount-name.rsc"; then
   report "unsupported container mount name property failure injection was not rejected"
 fi
-sed 's/mode=\$FoxOSWritableMountMode/read-only=no/' \
+sed 's/mode=\$expectedMode/read-only=no/' \
   "$rsc_root/foxos-full-install.rsc" > "$site_seal_root/lifecycle/container-mount-legacy-property.rsc"
 if cmp -s "$rsc_root/foxos-full-install.rsc" "$site_seal_root/lifecycle/container-mount-legacy-property.rsc"; then
   report "mount legacy-property failure injection did not mutate full install"
 elif full_install_mount_contract "$site_seal_root/lifecycle/container-mount-legacy-property.rsc"; then
   report "legacy read-only=no named mount creation was not rejected"
 fi
-sed 's/\[\$FoxOSMountMode \$mountID\] = \$FoxOSWritableMountMode/[$FoxOSMountMode $mountID] = "ro"/g' \
+sed 's/\[\$FoxOSMountMode \$mountID\] = \$expectedMode/[$FoxOSMountMode $mountID] = "invalid"/g' \
   "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/container-mount-readback-weakened.rsc"
 if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/container-mount-readback-weakened.rsc"; then
   report "mount readback failure injection did not mutate install inspector"
@@ -2814,6 +2881,8 @@ if pending_journal_uninstall_contract "$rsc_root/foxos-uninstall-inspect.rsc" "$
 fi
 for snapshot_case in \
   'mihomo-runtime-mount|:local mihomoRuntimeMountSnapshot [/container/mounts find where list="foxos-mihomo-runtime"]|:set mountID $mihomoRuntimeMountSnapshot' \
+  'secret-mount|:local secretMountSnapshot [/container/mounts find where list=$FoxOSSecretMountName]|:set mountID $secretMountSnapshot' \
+  'api-token-file|:local apiTokenFileSnapshot [/file find where name=($FoxOSSecretHostDirectory . "/api-token")]|:set secretFileSnapshot $apiTokenFileSnapshot' \
   'mihomo-port|:local mihomoPortSnapshot [/interface/bridge/port find where interface="veth-mihomo"]|:set portID $mihomoPortSnapshot' \
   'mihomo-veth|:local mihomoVethSnapshot [/interface/veth find where name="veth-mihomo"]|:set vethID $mihomoVethSnapshot'; do
   IFS='|' read -r case_name declaration binding <<< "$snapshot_case"
@@ -2854,7 +2923,7 @@ if uninstall_predelete_contract "$site_seal_root/lifecycle/uninstall-fresh-sched
 fi
 awk '
   { print }
-  /:local backupsMountSnapshot / && !injected {
+  /:local mihomoSecretFileSnapshot / && !injected {
     print "  /system/scheduler set $schedulerSnapshot disabled=yes"
     injected = 1
   }
@@ -2869,7 +2938,7 @@ for early_mutation_case in \
   mutated_script="$site_seal_root/lifecycle/uninstall-$case_name-before-second-digest.rsc"
   awk -v mutation="$mutation" '
     { print }
-    /:local backupsMountSnapshot / && !injected {
+    /:local mihomoSecretFileSnapshot / && !injected {
       print mutation
       injected = 1
     }

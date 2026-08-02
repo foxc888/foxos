@@ -53,6 +53,10 @@ type HTTPS struct {
 }
 
 func Load() (Runtime, error) {
+	return load(productionSecretDirectory)
+}
+
+func load(secretDirectory string) (Runtime, error) {
 	siteConfig, err := site.Load(os.Getenv)
 	if err != nil {
 		return Runtime{}, err
@@ -61,17 +65,37 @@ func Load() (Runtime, error) {
 	if err != nil {
 		return Runtime{}, err
 	}
+	production := strings.EqualFold(strings.TrimSpace(os.Getenv("FOXOS_ENV")), "production")
+	if production {
+		if err := rejectProductionSecretEnvironment(os.LookupEnv); err != nil {
+			return Runtime{}, err
+		}
+	}
 	cfg := Runtime{
-		Production:       strings.EqualFold(strings.TrimSpace(os.Getenv("FOXOS_ENV")), "production"),
-		APIToken:         os.Getenv("FOXOS_API_TOKEN"),
-		ConfirmationKey:  os.Getenv("FOXOS_CONFIRMATION_KEY"),
-		RouterOS:         Endpoint{URL: os.Getenv("FOXOS_ROUTEROS_URL"), Username: os.Getenv("FOXOS_ROUTEROS_USERNAME"), Password: os.Getenv("FOXOS_ROUTEROS_PASSWORD")},
-		Mihomo:           Mihomo{URL: os.Getenv("FOXOS_MIHOMO_URL"), ProxyURL: os.Getenv("FOXOS_MIHOMO_PROXY_URL"), Secret: os.Getenv("FOXOS_MIHOMO_SECRET"), BaseConfigPath: os.Getenv("FOXOS_MIHOMO_BASE_CONFIG"), LocalConfigPath: os.Getenv("FOXOS_MIHOMO_LOCAL_CONFIG"), RuntimeConfigPath: os.Getenv("FOXOS_MIHOMO_RUNTIME_CONFIG"), BackupDir: os.Getenv("FOXOS_MIHOMO_BACKUP_DIR"), ValidatorBinary: os.Getenv("FOXOS_MIHOMO_VALIDATOR_BINARY")},
+		Production:       production,
+		RouterOS:         Endpoint{URL: os.Getenv("FOXOS_ROUTEROS_URL"), Username: os.Getenv("FOXOS_ROUTEROS_USERNAME")},
+		Mihomo:           Mihomo{URL: os.Getenv("FOXOS_MIHOMO_URL"), ProxyURL: os.Getenv("FOXOS_MIHOMO_PROXY_URL"), BaseConfigPath: os.Getenv("FOXOS_MIHOMO_BASE_CONFIG"), LocalConfigPath: os.Getenv("FOXOS_MIHOMO_LOCAL_CONFIG"), RuntimeConfigPath: os.Getenv("FOXOS_MIHOMO_RUNTIME_CONFIG"), BackupDir: os.Getenv("FOXOS_MIHOMO_BACKUP_DIR"), ValidatorBinary: os.Getenv("FOXOS_MIHOMO_VALIDATOR_BINARY")},
 		MosDNSURL:        os.Getenv("FOXOS_MOSDNS_URL"),
 		BackupDir:        os.Getenv("FOXOS_BACKUP_DIR"),
 		UpgradeStatePath: os.Getenv("FOXOS_UPGRADE_STATE_PATH"),
 		Site:             siteConfig,
 		HTTPS:            https,
+	}
+	if cfg.APIToken, err = loadRuntimeSecret(production, "FOXOS_API_TOKEN", "api-token", secretDirectory, os.Getenv); err != nil {
+		return Runtime{}, err
+	}
+	if cfg.ConfirmationKey, err = loadRuntimeSecret(production, "FOXOS_CONFIRMATION_KEY", "confirmation-key", secretDirectory, os.Getenv); err != nil {
+		return Runtime{}, err
+	}
+	if production || cfg.RouterOS.URL != "" {
+		if cfg.RouterOS.Password, err = loadRuntimeSecret(production, "FOXOS_ROUTEROS_PASSWORD", "routeros-password", secretDirectory, os.Getenv); err != nil {
+			return Runtime{}, err
+		}
+	}
+	if production || cfg.Mihomo.URL != "" {
+		if cfg.Mihomo.Secret, err = loadRuntimeSecret(production, "FOXOS_MIHOMO_SECRET", "mihomo-secret", secretDirectory, os.Getenv); err != nil {
+			return Runtime{}, err
+		}
 	}
 	environment := strings.ToLower(strings.TrimSpace(os.Getenv("FOXOS_ENV")))
 	if environment == "" {
@@ -102,11 +126,13 @@ func Load() (Runtime, error) {
 	if err := validateSecret("FOXOS_CONFIRMATION_KEY", cfg.ConfirmationKey, 32); err != nil {
 		return Runtime{}, err
 	}
-	if cfg.APIToken == cfg.ConfirmationKey {
-		return Runtime{}, errors.New("FOXOS_API_TOKEN and FOXOS_CONFIRMATION_KEY must differ")
-	}
-	if strings.TrimSpace(cfg.APIToken) != cfg.APIToken || strings.TrimSpace(cfg.ConfirmationKey) != cfg.ConfirmationKey {
-		return Runtime{}, errors.New("FoxOS secrets must not contain surrounding whitespace")
+	if err := validateDistinctSecrets(
+		namedSecret{name: "FOXOS_API_TOKEN", value: cfg.APIToken},
+		namedSecret{name: "FOXOS_CONFIRMATION_KEY", value: cfg.ConfirmationKey},
+		namedSecret{name: "FOXOS_ROUTEROS_PASSWORD", value: cfg.RouterOS.Password},
+		namedSecret{name: "FOXOS_MIHOMO_SECRET", value: cfg.Mihomo.Secret},
+	); err != nil {
+		return Runtime{}, err
 	}
 	if err := validateOptionalEndpoint(cfg.RouterOS.URL); err != nil {
 		return Runtime{}, errors.New("invalid FOXOS_ROUTEROS_URL")
@@ -117,8 +143,8 @@ func Load() (Runtime, error) {
 	if cfg.RouterOS.URL != "" && strings.EqualFold(cfg.RouterOS.Username, "admin") {
 		return Runtime{}, errors.New("FOXOS_ROUTEROS_USERNAME must use a dedicated least-privilege account")
 	}
-	if cfg.RouterOS.URL != "" {
-		if err := validateSecret("FOXOS_ROUTEROS_PASSWORD", cfg.RouterOS.Password, 16); err != nil {
+	if production || cfg.RouterOS.URL != "" {
+		if err := validateSecret("FOXOS_ROUTEROS_PASSWORD", cfg.RouterOS.Password, 32); err != nil {
 			return Runtime{}, err
 		}
 	}
@@ -128,7 +154,7 @@ func Load() (Runtime, error) {
 	if err := validateOptionalEndpoint(cfg.Mihomo.URL); err != nil {
 		return Runtime{}, errors.New("invalid FOXOS_MIHOMO_URL")
 	}
-	if cfg.Mihomo.URL != "" {
+	if production || cfg.Mihomo.URL != "" {
 		if err := validateSecret("FOXOS_MIHOMO_SECRET", cfg.Mihomo.Secret, 32); err != nil {
 			return Runtime{}, err
 		}
@@ -173,8 +199,8 @@ func validateSecret(name, value string, minimum int) error {
 	}
 	unique := make(map[byte]struct{}, 16)
 	for index := 0; index < len(value); index++ {
-		if value[index] < 0x21 || value[index] == 0x7f {
-			return errors.New(name + " contains control or whitespace characters")
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return errors.New(name + " contains non-printable, non-ASCII, or whitespace characters")
 		}
 		unique[value[index]] = struct{}{}
 	}

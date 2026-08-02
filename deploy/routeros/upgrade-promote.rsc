@@ -12,6 +12,13 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSSecretContractVersion
+:global FoxOSSecretHostDirectory
+:global FoxOSSecretContainerDirectory
+:global FoxOSSecretMountName
+:global FoxOSReadonlyMountMode
+:global FoxOSAdminMountLists
+:global FoxOSSecretRead
 :global FoxOSUpgradePromoteInspectVerbose false
 :global FoxOSUpgradePromoteCurrentDigest
 :global FoxOSUpgradePromoteApprovedDigest
@@ -24,6 +31,7 @@
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSSecretContractVersion != 1 || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets") || $FoxOSSecretContainerDirectory != "/run/secrets/foxos" || $FoxOSSecretMountName != "foxos-secrets" || $FoxOSReadonlyMountMode != "ro") do={ :error "secret-file compatibility contract is unavailable" }
 :local releaseID "__FOXOS_RELEASE_ID__"
 :if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "upgrade-promote.rsc 未绑定有效 release ID" }
 :local payloadRoot ($FoxOSSiteStorageRoot . "/foxos-upgrade-" . $releaseID)
@@ -71,10 +79,8 @@
 :if (($plannedState = "pending" && $promotionAlreadySwitched) || ($plannedState = "switched" && $promotionAlreadySwitched = false)) do={
   :error "promote 模式在确认后变化；重新运行 upgrade-promote-plan.rsc"
 }
-:local tokenID [/container/envs find where list="foxos-env" key="FOXOS_API_TOKEN"]
-:if ([:len $tokenID] != 1) do={ :error "FOXOS_API_TOKEN 缺失或不唯一" }
-:local apiToken [/container/envs get $tokenID value]
-:if ([:len $apiToken] < 32) do={ :error "FOXOS_API_TOKEN 不符合安全基线" }
+:local apiToken [$FoxOSSecretRead "api-token"]
+:if ([:len $apiToken] < 32) do={ :error "api-token secret file does not meet the security baseline" }
 :local operationID $releaseID
 :local authHeader ("Authorization: Bearer " . $apiToken)
 :local jsonHeaders ($authHeader . ",Content-Type: application/json")
@@ -94,6 +100,8 @@
   :set verifiedSharedMounts ($verifiedSharedMounts + 1)
 }
 :if ($verifiedSharedMounts != 3) do={ :error "三个共享挂载未全部通过身份与可写检查" }
+:local secretMount [/container/mounts find where list=$FoxOSSecretMountName]
+:if ([:len $secretMount] != 1 || [$FoxOSMountSource $secretMount] != $FoxOSSecretHostDirectory || [/container/mounts get $secretMount dst] != $FoxOSSecretContainerDirectory || [$FoxOSMountMode $secretMount] != $FoxOSReadonlyMountMode) do={ :error "promote secret mount identity or read-only mode does not match" }
 
 :if ($promotionAlreadySwitched = false) do={
 :if ([:len $active] != 1) do={ :error "必须且只能存在一个 foxos:active 容器" }
@@ -101,10 +109,10 @@
 :if ([:len $rollback] > 0) do={ :error "已有 foxos:rollback，拒绝覆盖" }
 :if ($active = $pending) do={ :error "active 与 pending 槽位 ID 冲突" }
 :local activeName [/container get $active name]
-:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no") || [$FoxOSContainerState $active] != "running") do={
+:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != $FoxOSAdminMountLists || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no") || [$FoxOSContainerState $active] != "running") do={
   :error "active 槽位完整身份契约不匹配"
 }
-:if ([/container get $pending name] != $pendingName || [$FoxOSContainerRoot $pending] != $pendingRoot || [/container get $pending interface] != "veth-foxos" || [/container get $pending envlists] != "foxos-env" || [$FoxOSContainerMountLists $pending] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $pending start-on-boot] != false && [/container get $pending start-on-boot] != "no") || ([/container get $pending logging] != false && [/container get $pending logging] != "no")) do={
+:if ([/container get $pending name] != $pendingName || [$FoxOSContainerRoot $pending] != $pendingRoot || [/container get $pending interface] != "veth-foxos" || [/container get $pending envlists] != "foxos-env" || [$FoxOSContainerMountLists $pending] != $FoxOSAdminMountLists || ([/container get $pending start-on-boot] != false && [/container get $pending start-on-boot] != "no") || ([/container get $pending logging] != false && [/container get $pending logging] != "no")) do={
   :error "pending 槽位与当前发布包的 release ID 或挂载契约不匹配"
 }
 :if ([$FoxOSContainerState $pending] != "stopped") do={
@@ -362,7 +370,7 @@
   :error "pending 验收失败；abort 已确认，但旧 active 未恢复 ready，必须人工检查"
 }
 
-:if ([/container get $pending comment] != "foxos:pending" || [/container get $active comment] != "foxos:active" || [$FoxOSContainerState $pending] != "running" || [$FoxOSContainerState $active] != "stopped" || [/container get $pending name] != $pendingName || [$FoxOSContainerRoot $pending] != $pendingRoot || [/container get $active name] != $activeName || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || [/container get $pending interface] != "veth-foxos" || [/container get $active interface] != "veth-foxos" || [/container get $pending envlists] != "foxos-env" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $pending] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $pending start-on-boot] != false && [/container get $pending start-on-boot] != "no") || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $pending logging] != false && [/container get $pending logging] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={
+:if ([/container get $pending comment] != "foxos:pending" || [/container get $active comment] != "foxos:active" || [$FoxOSContainerState $pending] != "running" || [$FoxOSContainerState $active] != "stopped" || [/container get $pending name] != $pendingName || [$FoxOSContainerRoot $pending] != $pendingRoot || [/container get $active name] != $activeName || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || [/container get $pending interface] != "veth-foxos" || [/container get $active interface] != "veth-foxos" || [/container get $pending envlists] != "foxos-env" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $pending] != $FoxOSAdminMountLists || [$FoxOSContainerMountLists $active] != $FoxOSAdminMountLists || ([/container get $pending start-on-boot] != false && [/container get $pending start-on-boot] != "no") || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $pending logging] != false && [/container get $pending logging] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={
   :error "ownership switch 前槽位身份或状态发生变化"
 }
 :local ownershipSwitched false
@@ -384,11 +392,11 @@
 }
 }
 
-:if ([:len $pending] != 1 || [:len $active] != 1 || $pending = $active || [/container get $pending comment] != "foxos:active" || [/container get $pending name] != $pendingName || [$FoxOSContainerRoot $pending] != $pendingRoot || [/container get $pending interface] != "veth-foxos" || [/container get $pending envlists] != "foxos-env" || [$FoxOSContainerMountLists $pending] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $pending start-on-boot] != false && [/container get $pending start-on-boot] != "no") || ([/container get $pending logging] != false && [/container get $pending logging] != "no")) do={
+:if ([:len $pending] != 1 || [:len $active] != 1 || $pending = $active || [/container get $pending comment] != "foxos:active" || [/container get $pending name] != $pendingName || [$FoxOSContainerRoot $pending] != $pendingRoot || [/container get $pending interface] != "veth-foxos" || [/container get $pending envlists] != "foxos-env" || [$FoxOSContainerMountLists $pending] != $FoxOSAdminMountLists || ([/container get $pending start-on-boot] != false && [/container get $pending start-on-boot] != "no") || ([/container get $pending logging] != false && [/container get $pending logging] != "no")) do={
   :error "promote 后 active 槽位完整身份回读失败"
 }
 :local rollbackName [/container get $active name]
-:if ([/container get $active comment] != "foxos:rollback" || !($rollbackName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $rollbackName) || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={
+:if ([/container get $active comment] != "foxos:rollback" || !($rollbackName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $rollbackName) || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != $FoxOSAdminMountLists || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={
   :error "promote 后 rollback 槽位完整身份回读失败"
 }
 

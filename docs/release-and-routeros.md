@@ -67,12 +67,12 @@ foxos-full-amd64-<release-id>.tar.gz.sha256
 - 不可变拓扑模板 `site-config.example.rsc` 和 `seal-site-config.sh`；包内没有可直接执行的站点清单。
 - 只读 preflight/共享 inspector/plan、唯一 `foxos-full-install.rsc` 正式入口、HTTPS verify、受控 DNS plan/apply。
 - `foxos-upgrade-<release-id>/`：唯一 FoxOS 镜像、独立 checksum、pending/promote/rollback 的 inspector、plan 和确认式 apply，以及确认式 rollback 归档。首次安装也从该版本化目录导入 FoxOS 镜像。
-- 根目录中的确认式卸载脚本；运行态配置、loader、站点清单、数据和备份不进入版本化升级 payload。
+- 根目录中的确认式卸载脚本；运行态配置、loader、站点清单、数据、备份和设备生成的 `foxos-secrets` 不进入版本化升级 payload。
 - `QUICK-INSTALL.md`、`RELEASE-MANIFEST.txt`、`SHA256SUMS`。
 
-组包拒绝填充的 Mihomo Secret、私钥、节点链接、凭据 URL 和常见敏感字段。MosDNS 9099 API 必须绑定容器 loopback，未使用的第三方管理 UI 不允许进入包。外层另生成 `.sha256`。
+组包拒绝 `foxos-secrets` 目录、四个生产 secret basename、旧敏感 env 绑定、填充的 Mihomo Secret、私钥、节点链接、凭据 URL 和常见敏感字段。MosDNS 9099 API 必须绑定容器 loopback，未使用的第三方管理 UI 不允许进入包。外层另生成 `.sha256`。
 
-持有 `foxos-env` 的 FoxOS 管理槽位必须固定 `logging=no`，因为 RouterOS 的容器启动日志会记录启用日志容器的环境。Mihomo 与 MosDNS 不继承 FoxOS 凭据，可保持 `logging=yes`。静态门禁同时约束首次安装、升级、promote、rollback、cleanup 和卸载身份回读，禁止生命周期脚本重新接受管理槽位 `logging=yes`。
+`foxos-env` 只含非敏感配置。四项生产秘密由设备生成到 `foxos-secrets/{api-token,confirmation-key,routeros-password,mihomo-secret}`，仅通过 `mode=ro` 的 `/run/secrets/foxos` 挂载提供给 FoxOS 管理槽位。管理槽位仍固定 `logging=no` 作为纵深防护；Mihomo 与 MosDNS 不绑定该 mount，可保持 `logging=yes`。静态门禁同时约束首次安装、升级、promote、rollback、cleanup 和卸载身份回读，禁止生命周期脚本重新接受敏感 env、可写 secret mount 或管理槽位 `logging=yes`。
 
 组包脚本要求调用方显式提供 `FOXOS_IMAGE`、`MIHOMO_IMAGE`、`MOSDNS_IMAGE`，不会读取仓库中的历史二进制。Core CI 与 Release workflow 只在三张输入镜像完成各自 Trivy 门禁后调用组包器。
 
@@ -82,7 +82,7 @@ foxos-full-amd64-<release-id>.tar.gz.sha256
 
 完整命令见 [QUICK-INSTALL](../deploy/routeros/QUICK-INSTALL.md)。不可跳过：
 
-1. RouterOS 7.21 是脚本语法下限，目标完整版本已通过同版本 CHR `envlists`/`mountlists`、命名挂载 `mode=rw` add/get/delete 门禁；设备为标准 `architecture-name=x86` 或单独验收的非标准 `x86_64`，使用同版本 container package、`container=yes` 与 `scheduler=yes`。两项 device-mode 更新都可能要求设备操作者按官方流程物理确认。
+1. RouterOS 7.21 是脚本语法下限，目标完整版本已通过同版本 CHR `envlists`/`mountlists`、命名挂载 `mode=rw` add/get/delete 兼容门禁；同 SHA Artifact 还必须验证唯一 `mode=ro` secret mount、四文件可读、敏感 env/日志值为零和卸载零残留。设备为标准 `architecture-name=x86` 或单独验收的非标准 `x86_64`，使用同版本 container package、`container=yes` 与 `scheduler=yes`。两项 device-mode 更新都可能要求设备操作者按官方流程物理确认。
 2. 清单指定的管理桥、存储、RouterOS 地址和受限 REST 已存在；存储是唯一 `/disk` 槽位或精确内部保留根 `foxos`。
 3. 工作站验证外层与包内 checksum，从模板生成并独立封存站点清单，但尚不上传。
 4. 在任何上传前保存脱敏 RouterOS export 与带唯一离线密码、`aes-sha256` 的 binary backup，下载两个副本；确认所有顶层上传目标零碰撞后才上传，并通过固定 loader 运行只读 doctor。
@@ -90,16 +90,16 @@ foxos-full-amd64-<release-id>.tar.gz.sha256
 6. 操作者把该摘要原样设为确认值后才运行 `foxos-full-install.rsc`；执行器在第一次资源写入前重跑全部检查，前态变化即拒绝。
 7. 等异步镜像导入完成，再运行可重入 start 脚本；后序启动失败会停止本次已启动的前序容器，`running` 仍不是 ready，autostart 保持关闭。
 8. 导入并核对 `foxos-local-ca.pem`，设为 trusted；`foxos-verify.rsc` 自动验证 live、ready、站点、页面和带认证只读 API，全部通过后才启用 owned 顺序启动 scheduler。三个容器始终保持 `start-on-boot=no`。
-9. 只从 `foxos-env` 读取一次随机 API Token，保存到离线密码库并登录 HTTPS 管理页。
+9. 通过 WinBox Files 或工作站 SCP 下载精确的 `<storage>/foxos-secrets/api-token` 到权限 `0600` 的临时文件，从文件导入离线密码库后销毁副本，再登录 HTTPS 管理页；禁止 `/file get ... contents`、env value 和终端打印。
 10. 需要 hostname 时单独执行 DNS plan/精确确认/apply；脚本不启用或接管 DNS/DHCP。
 
-FoxOS 完整 env allowlist 基线是 27 键：安装 marker、`FOXOS_ENV=production`、四个随机/凭据字段、RouterOS/Mihomo/MosDNS 端点和路径、升级检查点、八个 `FOXOS_SITE_*` 字段、`FOXOS_HTTPS_ENABLED=true`。站点清单显式配置私网订阅 allowlist 时增加 `FOXOS_SUBSCRIPTION_PRIVATE_CIDRS`，共 28 键。重复安装可补齐缺项，但未知额外键或固定值不一致会失败关闭。
+FoxOS 非敏感 env allowlist 基线是 `23/24` 键：安装 marker、`FOXOS_ENV=production`、RouterOS/Mihomo/MosDNS 端点和路径、升级检查点、八个 `FOXOS_SITE_*` 字段、`FOXOS_HTTPS_ENABLED=true`，以及可选的 `FOXOS_SUBSCRIPTION_PRIVATE_CIDRS`。四项秘密不计入 env；发现任一遗留敏感 env（包括空值）、未知额外键或固定值不一致都会失败关闭。四个固定 secret files 都要求 `32..4096` 字节、无空白的可打印 ASCII，且四值互异。
 
-当前生命周期脚本统一使用 `envlists=` 与 `mountlists=` 引用命名列表，并通过 loader-owned getter 规范化 RouterOS 可能添加的一个 mount source 前导 `/`，再把命名挂载精确约束为规范 source 与 `mode=rw`。FoxOS 的版本下限是 RouterOS 7.21，静态门禁会拒绝单数 `envlist`、旧 `read-only` 属性、直接读取 raw source、直接绕过 getter 或混用拼写。
+当前生命周期脚本统一使用 `envlists=` 与 `mountlists=` 引用命名列表，并通过 loader-owned getter 规范化 RouterOS 可能添加的一个 mount source 前导 `/`。五个运行态挂载精确约束为规范 source 与 `mode=rw`；唯一 `foxos-secrets` 挂载精确约束为 `/run/secrets/foxos` 与 `mode=ro`。管理槽位的 mountlists 固定为 `foxos-secrets,foxos-mihomo-config,foxos-data,foxos-backups`。FoxOS 的版本下限是 RouterOS 7.21，静态门禁会拒绝单数 `envlist`、旧 `read-only` 属性、直接读取 raw source、直接绕过 getter 或混用拼写。
 
 MikroTik 当前 Container 官方页面在 2026-07-28 回读时仍把容器环境列表属性记录为单数 `envlist`，页面示例也使用单数；但是官方 `container-7.21.npk`、`container-7.21.3.npk`、`container-7.21.5.npk` 的 console/WebFig 命令元数据均暴露复数 `envlists`。三份审计输入的 SHA-256 分别为 `f51c93fe9331f2460171cbdc359339704ef1f763cb295190155dab4353961d16`、`c427ffd3a5a757116b4b5ed8ec6a5533f3a6eaa8afa6ad5adc2f22a124901f66`、`823c2386f6bd4657f7eae1b50f1f0ce167b9a945e0f95953e1182a9d73340e9b`。FoxOS 以目标版本包内的命令元数据为静态实现依据，但这仍不等于真实 RouterOS 已验收。
 
-因此 CHR 发布门禁仍必须在目标完整版本上保存 `/container/add` 与 `/container/mounts/add` 的 `/console/inspect` 原始输出，并在隔离、可丢弃的测试配置中完成最小 env、RW mount、VETH、container add/get/delete 回读，确认实际接受复数 `envlists`/`mountlists`，mount source 的 raw/normalized 身份一致且 `mode=rw`。现有静态元数据证据只覆盖若干 7.21.x package 的 `envlists`，没有证明那些版本的 mount 属性，也不能外推到后续 minor；该门禁未通过前，不能把 RouterOS 首装、升级、回滚或卸载标记为已验收。
+因此 CHR 发布门禁仍必须在目标完整版本上保存 `/container/add` 与 `/container/mounts/add` 的 `/console/inspect` 原始输出，并在隔离、可丢弃的测试配置中先完成最小 env、RW mount、VETH、container add/get/delete 回读，再用同 SHA Artifact 验证完整 secret 文件集、唯一 RO mount、管理容器无敏感 env/日志值和卸载零残留。现有静态元数据证据只覆盖命令契约，不能外推到后续 minor，也不能替代该候选 Artifact 的生命周期证据；门禁未通过前，不能把 RouterOS 首装、升级、回滚或卸载标记为已验收。
 
 ## HTTPS 与 CA
 
@@ -177,7 +177,7 @@ plan 只读绑定 release ID、active/image 对象 ID、root-dir、状态、veth
 /import file-name=disk1/foxos-upgrade-<release-id>/rollback.rsc
 ```
 
-plan 只读绑定当前 release 的 active、唯一 rollback、对象 ID、root-dir、状态、veth、mount、Token 摘要和站点摘要。apply 在首次 stop 前二次回读摘要与 snapshot，只操作这两个槽位。旧槽在保留 rollback owner 且 `start-on-boot=no` 时启动，旧二进制先按升级检查点恢复兼容 SQLite；只有 live、ready、页面和带认证只读 API 都通过后才切换 owner。旧槽失败会请求恢复原 active；两者都失败时保留证据并要求人工恢复。成功后新版本槽为 stopped `foxos:rollback-complete`，用同一 payload 的 cleanup 归档，再以新 release ID 前进。
+plan 只读绑定当前 release 的 active、唯一 rollback、对象 ID、root-dir、状态、veth、mount、四个 secret file 的 handle/长度/SHA-512 evidence 和站点摘要。apply 在首次 stop 前二次回读摘要与 snapshot，只操作这两个槽位。旧槽在保留 rollback owner 且 `start-on-boot=no` 时启动，旧二进制先按升级检查点恢复兼容 SQLite；只有 live、ready、页面和带认证只读 API 都通过后才切换 owner。旧槽失败会请求恢复原 active；两者都失败时保留证据并要求人工恢复。成功后新版本槽为 stopped `foxos:rollback-complete`，用同一 payload 的 cleanup 归档，再以新 release ID 前进。
 
 首次安装没有容器 rollback 槽。失败时停止三个精确 FoxOS owner 的容器，保留数据和镜像，并在明确维护窗口恢复安装前 RouterOS binary backup。
 
@@ -190,7 +190,7 @@ plan 只读绑定当前 release 的 active、唯一 rollback、对象 ID、root-
 /import file-name=disk1/uninstall-apply.rsc
 ```
 
-plan 只读核对所有 FoxOS container comment、env marker、mount、veth/bridge port、服务用户/组和可选 owned DNS 记录，并在 Mihomo pending apply journal 存在时失败关闭。apply 会重新生成同一摘要，只有前态和确认都一致时才停止这些资源；所有容器停止后还会再次确认 journal 不存在，才删除 scheduler、容器、env 和确认密钥。它默认保留站点存储中的 `foxos-data`、`foxos-backups`、Mihomo/MosDNS 配置、三张镜像、所有版本化 root-dir、站点清单、RouterOS backups 和本地 CA。保留状态仍绑定原 `FOXOS_CONFIRMATION_KEY`，因此卸载后直接按全新安装覆盖会被拒绝；复用状态必须恢复原密钥，全新安装则先验证备份并把旧数据/备份归档到非活动路径。后续永久清除必须另行审核路径，不能把存储根或未知文件交给递归删除。
+plan 只读核对所有 FoxOS container comment、env marker、mount、四个 secret files、veth/bridge port、服务用户/组和可选 owned DNS 记录，并在 Mihomo pending apply journal 存在时失败关闭。apply 会重新生成同一摘要，只有前态和确认都一致时才停止这些资源；所有容器停止后还会再次确认 journal 不存在，才删除 scheduler、容器、env、四个 secret files、空 secret 目录及其只读 mount。它保留站点存储中的 `foxos-data`、`foxos-backups`、Mihomo/MosDNS 配置、三张镜像、所有版本化 root-dir、站点清单、RouterOS backups 和本地 CA。保留状态仍绑定原四项秘密；复用状态必须从验证过的离线备份恢复原四文件集合，不能只恢复 confirmation key。全新安装则先验证备份并把旧数据/备份归档到非活动路径。后续永久清除必须另行审核路径，不能把存储根或未知文件交给递归删除。
 
 ## 故障排查
 

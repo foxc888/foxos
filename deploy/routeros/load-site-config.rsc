@@ -303,5 +303,71 @@
   :if ($mountMode = "ro" || $mountMode = "ro,noexec" || $mountMode = "rw" || $mountMode = "rw,noexec") do={ :return $mountMode }
   :return "invalid"
 }
-:set FoxOSSiteLoaderVersion 1
+
+# Production credentials have one loader-owned contract: four printable ASCII
+# scalar files under a single read-only mount. Lifecycle scripts consume these
+# helpers instead of reading sensitive values from /container/envs.
+:global FoxOSSecretContractVersion 1
+:global FoxOSSecretHostDirectory ($storageRoot . "/foxos-secrets")
+:global FoxOSSecretContainerDirectory "/run/secrets/foxos"
+:global FoxOSSecretMountName "foxos-secrets"
+:global FoxOSReadonlyMountMode "ro"
+:global FoxOSAdminMountLists "foxos-secrets,foxos-mihomo-config,foxos-data,foxos-backups"
+:global FoxOSSensitiveEnvKeys {"FOXOS_API_TOKEN";"FOXOS_CONFIRMATION_KEY";"FOXOS_ROUTEROS_PASSWORD";"FOXOS_MIHOMO_SECRET"}
+:global FoxOSSecretFileNames {"api-token";"confirmation-key";"routeros-password";"mihomo-secret"}
+:global FoxOSSecretRead do={
+  :global FoxOSSecretHostDirectory
+  :global FoxOSSensitiveEnvKeys
+  :global FoxOSSecretFileNames
+  :local secretName $1
+  :local allowed false
+  :foreach allowedName in=$FoxOSSecretFileNames do={
+    :if ($secretName = $allowedName) do={ :set allowed true }
+  }
+  :if ($allowed = false) do={ :error "secret file name is outside the fixed contract" }
+  :foreach sensitiveKey in=$FoxOSSensitiveEnvKeys do={
+    :if ([:len [/container/envs find where list="foxos-env" key=$sensitiveKey]] > 0) do={
+      :error ("legacy sensitive env is forbidden: " . $sensitiveKey)
+    }
+  }
+  :local apiToken ""
+  :local confirmationKey ""
+  :local routerPassword ""
+  :local mihomoSecret ""
+  :local requestedValue ""
+  :foreach currentName in=$FoxOSSecretFileNames do={
+    :local secretPath ($FoxOSSecretHostDirectory . "/" . $currentName)
+    :local secretFile [/file find where name=$secretPath]
+    :if ([:len $secretFile] != 1 || [/file get $secretFile type] != "file") do={
+      :error ("secret file is missing, non-regular, or not unique: " . $currentName)
+    }
+    :local secretSize [/file get $secretFile size]
+    :if ($secretSize < 32 || $secretSize > 4096) do={ :error ("secret file size is invalid: " . $currentName) }
+    :local secretValue [/file get $secretFile contents]
+    :if ([:len $secretValue] != $secretSize) do={ :error ("secret file readback is incomplete: " . $currentName) }
+    :for index from=0 to=([:len $secretValue] - 1) do={
+      :local character [:pick $secretValue $index ($index + 1)]
+      :if (!($character ~ "^[!-~]\$")) do={ :error ("secret file contains whitespace or non-printable ASCII: " . $currentName) }
+    }
+    :if ($currentName = "api-token") do={ :set apiToken $secretValue }
+    :if ($currentName = "confirmation-key") do={ :set confirmationKey $secretValue }
+    :if ($currentName = "routeros-password") do={ :set routerPassword $secretValue }
+    :if ($currentName = "mihomo-secret") do={ :set mihomoSecret $secretValue }
+    :if ($currentName = $secretName) do={ :set requestedValue $secretValue }
+  }
+  :if ($apiToken = $confirmationKey || $apiToken = $routerPassword || $apiToken = $mihomoSecret || $confirmationKey = $routerPassword || $confirmationKey = $mihomoSecret || $routerPassword = $mihomoSecret) do={
+    :error "the four production secret files must contain distinct values"
+  }
+  :return $requestedValue
+}
+:global FoxOSSecretEvidence do={
+  :global FoxOSSecretHostDirectory
+  :global FoxOSSecretRead
+  :local secretName $1
+  :local secretValue [$FoxOSSecretRead $secretName]
+  :local secretPath ($FoxOSSecretHostDirectory . "/" . $secretName)
+  :local secretFile [/file find where name=$secretPath]
+  :return ([:pick $secretFile 0] . ":" . $secretName . ":" . [:len $secretValue] . ":" . [:convert $secretValue transform=sha512 to=hex])
+}
+:set FoxOSSiteLoaderVersion 2
 :put ("SITE CONFIG LOADED: SHA-512=" . $FoxOSSiteLoadedDigest . " storage=" . $FoxOSSiteStorageRoot)

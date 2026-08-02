@@ -23,6 +23,16 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSSecretContractVersion
+:global FoxOSSecretHostDirectory
+:global FoxOSSecretContainerDirectory
+:global FoxOSSecretMountName
+:global FoxOSReadonlyMountMode
+:global FoxOSAdminMountLists
+:global FoxOSSensitiveEnvKeys
+:global FoxOSSecretFileNames
+:global FoxOSSecretRead
+:global FoxOSSecretEvidence
 :global FoxOSInstallInspectVerbose false
 :global FoxOSInstallCurrentDigest
 :global FoxOSInstallApprovedDigest
@@ -31,6 +41,7 @@
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSSecretContractVersion != 1 || $FoxOSReadonlyMountMode != "ro" || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets")) do={ :error "secret-file compatibility contract is unavailable" }
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
 :local storageMode "disk"
@@ -71,7 +82,7 @@
 :set FoxOSInstallConfirmation ""
 
 :put "=== FoxOS exact change plan (write phase) ==="
-:put "Create or reuse only: foxos-rest, foxos-service, foxos-env, foxos-* mounts, foxos:* veth/bridge ports/containers."
+:put "Create or reuse only: foxos-rest, foxos-service, non-sensitive foxos-env, four secret files, foxos-* mounts, foxos:* veth/bridge ports/containers."
 :put ("Create or reuse addresses: " . $mihomoAddress . ", " . $mosdnsAddress . ", " . $foxosAddress . " on " . $managementBridge . ".")
 :put "No DNS, DHCP, default route, NAT, Mangle, or existing firewall changes."
 :put ("Storage: mode=" . $storageMode . " root=" . $storageRoot . ".")
@@ -174,63 +185,77 @@
 :local randomCharacters "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 :local envMarker [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER"]
 :local existingInstall false
+:local installMarkerValue ""
 :local foxosRouterPassword ""
 :local foxosMihomoSecret ""
 :local foxosApiToken ""
 :local foxosConfirmationKey ""
+:foreach sensitiveKey in=$FoxOSSensitiveEnvKeys do={
+  :if ([:len [/container/envs find where list="foxos-env" key=$sensitiveKey]] > 0) do={
+    :error ("legacy sensitive env is forbidden; rotate credentials and use secret files: " . $sensitiveKey)
+  }
+}
 :if ([:len $envMarker] > 1) do={ :error "FOXOS_INSTALL_MARKER 不唯一，拒绝继续" }
 :if ([:len $envMarker] = 0 && [:len [/user/group find where name="foxos-rest"]] > 0) do={
   :error "同名 foxos-rest 用户组已存在且没有 FoxOS 安装标记，拒绝在写入前继续"
 }
 :if ([:len $envMarker] = 1) do={
-  :local markerValue [/container/envs get $envMarker value]
-  :if ($markerValue != "foxos:applying" && $markerValue != "foxos:complete") do={ :error "FOXOS_INSTALL_MARKER 状态无效" }
+  :set installMarkerValue [/container/envs get $envMarker value]
+  :if ($installMarkerValue != "foxos:applying" && $installMarkerValue != "foxos:complete") do={ :error "FOXOS_INSTALL_MARKER 状态无效" }
   :set existingInstall true
 } else={
   :if ([:len [/container/envs find where list="foxos-env"]] > 0) do={
     :error "同名 foxos-env 已存在但没有 FoxOS applying/complete 标记，拒绝覆盖"
   }
   /container/envs add list=foxos-env key=FOXOS_INSTALL_MARKER value="foxos:applying"
+  :set installMarkerValue "foxos:applying"
 }
 
-:local routerPasswordID [/container/envs find where list="foxos-env" key="FOXOS_ROUTEROS_PASSWORD"]
-:if ([:len $routerPasswordID] > 1) do={ :error "FOXOS_ROUTEROS_PASSWORD 不唯一" }
-:if ([:len $routerPasswordID] = 0) do={
-  :set foxosRouterPassword [:rndstr from=$randomCharacters length=32]
-  /container/envs add list=foxos-env key=FOXOS_ROUTEROS_PASSWORD value=$foxosRouterPassword
-} else={
-  :set foxosRouterPassword [/container/envs get $routerPasswordID value]
-  :if ([:len $foxosRouterPassword] < 32) do={ :error "现有 RouterOS 服务密码不足 32 字符，拒绝自动覆盖" }
+:local secretDirectory [/file find where name=$FoxOSSecretHostDirectory]
+:if ([:len $secretDirectory] = 0) do={
+  :if ($installMarkerValue = "foxos:complete") do={ :error "complete install is missing the secret directory; refuse implicit credential rotation" }
+  /file add name=$FoxOSSecretHostDirectory type=directory
 }
+:set secretDirectory [/file find where name=$FoxOSSecretHostDirectory]
+:if ([:len $secretDirectory] != 1 || [/file get $secretDirectory type] != "directory") do={ :error "secret directory creation or readback failed" }
 
-:local mihomoSecretID [/container/envs find where list="foxos-env" key="FOXOS_MIHOMO_SECRET"]
-:if ([:len $mihomoSecretID] > 1) do={ :error "FOXOS_MIHOMO_SECRET 不唯一" }
-:if ([:len $mihomoSecretID] = 0) do={
-  :set foxosMihomoSecret [:rndstr from=$randomCharacters length=48]
-  /container/envs add list=foxos-env key=FOXOS_MIHOMO_SECRET value=$foxosMihomoSecret
-} else={
-  :set foxosMihomoSecret [/container/envs get $mihomoSecretID value]
-  :if ([:len $foxosMihomoSecret] < 32) do={ :error "现有 Mihomo Secret 不足 32 字符，拒绝自动覆盖" }
+:local secretDefinitions {"routeros-password|32|32";"mihomo-secret|32|48";"api-token|32|64";"confirmation-key|32|64"}
+:foreach definition in=$secretDefinitions do={
+  :local firstSeparator [:find $definition "|"]
+  :local secondSeparator [:find $definition "|" ($firstSeparator + 1)]
+  :local secretName [:pick $definition 0 $firstSeparator]
+  :local minimumLength [:tonum [:pick $definition ($firstSeparator + 1) $secondSeparator]]
+  :local generatedLength [:tonum [:pick $definition ($secondSeparator + 1) [:len $definition]]]
+  :local secretPath ($FoxOSSecretHostDirectory . "/" . $secretName)
+  :local secretFile [/file find where name=$secretPath]
+  :if ([:len $secretFile] = 0) do={
+    :if ($installMarkerValue = "foxos:complete") do={ :error ("complete install is missing secret file: " . $secretName) }
+    /file add name=$secretPath type=file
+  }
+  :set secretFile [/file find where name=$secretPath]
+  :if ([:len $secretFile] != 1 || [/file get $secretFile type] != "file") do={ :error ("secret file creation or identity readback failed: " . $secretName) }
+  :if ([/file get $secretFile size] = 0) do={
+    :if ($installMarkerValue = "foxos:complete") do={ :error ("complete install has an empty secret file: " . $secretName) }
+    :local generatedValue [:rndstr from=$randomCharacters length=$generatedLength]
+    /file set $secretFile contents=$generatedValue
+  }
 }
-
-:local apiTokenID [/container/envs find where list="foxos-env" key="FOXOS_API_TOKEN"]
-:if ([:len $apiTokenID] > 1) do={ :error "FOXOS_API_TOKEN 不唯一" }
-:if ([:len $apiTokenID] = 0) do={
-  :set foxosApiToken [:rndstr from=$randomCharacters length=64]
-  /container/envs add list=foxos-env key=FOXOS_API_TOKEN value=$foxosApiToken
-} else={
-  :set foxosApiToken [/container/envs get $apiTokenID value]
-  :if ([:len $foxosApiToken] < 32) do={ :error "现有 FoxOS API Token 不足 32 字符，拒绝自动覆盖" }
+:foreach definition in=$secretDefinitions do={
+  :local firstSeparator [:find $definition "|"]
+  :local secondSeparator [:find $definition "|" ($firstSeparator + 1)]
+  :local secretName [:pick $definition 0 $firstSeparator]
+  :local minimumLength [:tonum [:pick $definition ($firstSeparator + 1) $secondSeparator]]
+  :local secretValue [$FoxOSSecretRead $secretName]
+  :if ([:len $secretValue] < $minimumLength) do={ :error ("secret file does not meet the minimum length: " . $secretName) }
+  :local secretEvidence [$FoxOSSecretEvidence $secretName]
+  :if ([:len $secretEvidence] < 1) do={ :error ("secret file evidence generation failed: " . $secretName) }
+  :if ($secretName = "routeros-password") do={ :set foxosRouterPassword $secretValue }
+  :if ($secretName = "mihomo-secret") do={ :set foxosMihomoSecret $secretValue }
+  :if ($secretName = "api-token") do={ :set foxosApiToken $secretValue }
+  :if ($secretName = "confirmation-key") do={ :set foxosConfirmationKey $secretValue }
 }
-
-:local confirmationKeyID [/container/envs find where list="foxos-env" key="FOXOS_CONFIRMATION_KEY"]
-:if ([:len $confirmationKeyID] > 1) do={ :error "FOXOS_CONFIRMATION_KEY 不唯一" }
-:if ([:len $confirmationKeyID] = 0) do={
-  :set foxosConfirmationKey [:rndstr from=$randomCharacters length=64]
-  /container/envs add list=foxos-env key=FOXOS_CONFIRMATION_KEY value=$foxosConfirmationKey
-} else={
-  :set foxosConfirmationKey [/container/envs get $confirmationKeyID value]
-  :if ([:len $foxosConfirmationKey] < 32) do={ :error "现有确认密钥不足 32 字符，拒绝自动覆盖" }
+:if ($foxosRouterPassword = $foxosMihomoSecret || $foxosRouterPassword = $foxosApiToken || $foxosRouterPassword = $foxosConfirmationKey || $foxosMihomoSecret = $foxosApiToken || $foxosMihomoSecret = $foxosConfirmationKey || $foxosApiToken = $foxosConfirmationKey) do={
+  :error "generated secret files must contain four distinct values"
 }
 
 :local fixedEnvDefinitions {"FOXOS_ENV|production";("FOXOS_ROUTEROS_URL|http://" . $routerAddress);"FOXOS_ROUTEROS_USERNAME|foxos-service";("FOXOS_MIHOMO_URL|http://" . $mihomoIP . ":9090");("FOXOS_MIHOMO_PROXY_URL|http://" . $mihomoIP . ":7890");"FOXOS_MIHOMO_BASE_CONFIG|/data/mihomo/base.yaml";"FOXOS_MIHOMO_LOCAL_CONFIG|/data/mihomo/config.yaml";"FOXOS_MIHOMO_RUNTIME_CONFIG|/root/.config/mihomo/config.yaml";"FOXOS_MIHOMO_BACKUP_DIR|/backups/mihomo";"FOXOS_MIHOMO_VALIDATOR_BINARY|/usr/local/bin/mihomo";("FOXOS_MOSDNS_URL|http://" . $mosdnsIP . ":53");"FOXOS_BACKUP_DIR|/backups/foxos";"FOXOS_UPGRADE_STATE_PATH|/data/upgrade-checkpoint.json";("FOXOS_SITE_MANAGEMENT_BRIDGE|" . $managementBridge);("FOXOS_SITE_STORAGE_ROOT|" . $storageRoot);("FOXOS_SITE_NETWORK|" . $siteNetwork);("FOXOS_SITE_ROUTER_ADDRESS|" . $routerAddress);("FOXOS_SITE_MIHOMO_ADDRESS|" . $mihomoIP);("FOXOS_SITE_MOSDNS_ADDRESS|" . $mosdnsIP);("FOXOS_SITE_FOXOS_ADDRESS|" . $foxosIP);("FOXOS_SITE_PUBLIC_HOSTNAME|" . $publicHostname);"FOXOS_HTTPS_ENABLED|true"}
@@ -248,11 +273,11 @@
     }
   }
 }
-:local expectedEnvCount 27
+:local expectedEnvCount 23
 :local privateCIDRID [/container/envs find where list="foxos-env" key="FOXOS_SUBSCRIPTION_PRIVATE_CIDRS"]
 :if ([:len $privateCIDRID] > 1) do={ :error "FOXOS_SUBSCRIPTION_PRIVATE_CIDRS 不唯一" }
 :if ([:len $subscriptionPrivateCIDRs] > 0) do={
-  :set expectedEnvCount 28
+  :set expectedEnvCount 24
   :if ([:len $privateCIDRID] = 0) do={
     /container/envs add list=foxos-env key=FOXOS_SUBSCRIPTION_PRIVATE_CIDRS value=$subscriptionPrivateCIDRs
   } else={
@@ -318,22 +343,23 @@
   }
 }
 
-:local mountDefinitions {"foxos-mihomo-runtime|mihomo-config|/root/.config/mihomo";"foxos-mihomo-config|mihomo-config|/data/mihomo";"foxos-mosdns-runtime|mosdns-config|/cus/mosdns";"foxos-data|foxos-data|/data";"foxos-backups|foxos-backups|/backups"}
+:local mountDefinitions {($FoxOSSecretMountName . "|" . $FoxOSSecretHostDirectory . "|" . $FoxOSSecretContainerDirectory . "|" . $FoxOSReadonlyMountMode);("foxos-mihomo-runtime|" . $storageRoot . "/mihomo-config|/root/.config/mihomo|" . $FoxOSWritableMountMode);("foxos-mihomo-config|" . $storageRoot . "/mihomo-config|/data/mihomo|" . $FoxOSWritableMountMode);("foxos-mosdns-runtime|" . $storageRoot . "/mosdns-config|/cus/mosdns|" . $FoxOSWritableMountMode);("foxos-data|" . $storageRoot . "/foxos-data|/data|" . $FoxOSWritableMountMode);("foxos-backups|" . $storageRoot . "/foxos-backups|/backups|" . $FoxOSWritableMountMode)}
 :foreach definition in=$mountDefinitions do={
   :local first [:find $definition "|"]
   :local second [:find $definition "|" ($first + 1)]
+  :local third [:find $definition "|" ($second + 1)]
   :local mountName [:pick $definition 0 $first]
-  :local sourceName [:pick $definition ($first + 1) $second]
-  :local destination [:pick $definition ($second + 1) [:len $definition]]
+  :local sourcePath [:pick $definition ($first + 1) $second]
+  :local destination [:pick $definition ($second + 1) $third]
+  :local expectedMode [:pick $definition ($third + 1) [:len $definition]]
   :local mountID [/container/mounts find where list=$mountName]
-  :local sourcePath ($storageRoot . "/" . $sourceName)
   :if ([:len $mountID] = 0) do={
-    /container/mounts add list=$mountName src=$sourcePath dst=$destination mode=$FoxOSWritableMountMode
+    /container/mounts add list=$mountName src=$sourcePath dst=$destination mode=$expectedMode
   } else={
     :if ([:len $mountID] != 1) do={ :error ("挂载名不唯一: " . $mountName) }
   }
   :set mountID [/container/mounts find where list=$mountName]
-  :if ([:len $mountID] != 1 || [$FoxOSMountSource $mountID] != $sourcePath || [/container/mounts get $mountID dst] != $destination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={
+  :if ([:len $mountID] != 1 || [$FoxOSMountSource $mountID] != $sourcePath || [/container/mounts get $mountID dst] != $destination || [$FoxOSMountMode $mountID] != $expectedMode) do={
     :error ("挂载内容或读写属性不匹配，拒绝继续: " . $mountName)
   }
 }
@@ -424,12 +450,12 @@
 :local foxosByName [/container find where name="foxos-initial"]
 :if ([:len $foxosContainer] = 0) do={
   :if ([:len $foxosByName] > 0) do={ :error "foxos-initial 同名容器没有 FoxOS 所有权标记" }
-  /container/add name=foxos-initial file=$foxosImagePath interface=veth-foxos root-dir=($storageRoot . "/containers/foxos-initial") envlists=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=no start-on-boot=no comment="foxos:active"
+  /container/add name=foxos-initial file=$foxosImagePath interface=veth-foxos root-dir=($storageRoot . "/containers/foxos-initial") envlists=foxos-env mountlists=$FoxOSAdminMountLists logging=no start-on-boot=no comment="foxos:active"
 }
 :set foxosContainer [/container find where comment="foxos:active"]
 :local activeName ""
 :if ([:len $foxosContainer] = 1) do={ :set activeName [/container get $foxosContainer name] }
-:if ([:len $foxosContainer] != 1 || !($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $foxosContainer interface] != "veth-foxos" || [/container get $foxosContainer envlists] != "foxos-env" || [$FoxOSContainerMountLists $foxosContainer] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $foxosContainer] != ($storageRoot . "/containers/" . $activeName) || ([/container get $foxosContainer start-on-boot] != false && [/container get $foxosContainer start-on-boot] != "no") || ([/container get $foxosContainer logging] != false && [/container get $foxosContainer logging] != "no")) do={
+:if ([:len $foxosContainer] != 1 || !($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $foxosContainer interface] != "veth-foxos" || [/container get $foxosContainer envlists] != "foxos-env" || [$FoxOSContainerMountLists $foxosContainer] != $FoxOSAdminMountLists || [$FoxOSContainerRoot $foxosContainer] != ($storageRoot . "/containers/" . $activeName) || ([/container get $foxosContainer start-on-boot] != false && [/container get $foxosContainer start-on-boot] != "no") || ([/container get $foxosContainer logging] != false && [/container get $foxosContainer logging] != "no")) do={
   :error "FoxOS active 容器身份契约不匹配"
 }
 
@@ -453,7 +479,7 @@
 
 :put "FoxOS 全栈资源已创建或复用，镜像导入为异步操作。"
 :put ("等待 Mihomo、MosDNS、FoxOS 三个容器均为 status=stopped，再执行 /import file-name=" . $storageRoot . "/foxos-start-all.rsc。")
-:put "安装完成后凭据只从 env list 读取一次并保存到离线密码库。"
+:put "安装完成后四项凭据仅保存在只读 secret files；不输出内容，也不写入 foxos-env。"
 :local finalMosDNSMarker [/container/envs find where list="foxos-mosdns-env" key="FOXOS_INSTALL_MARKER"]
 :if ([:len $finalMosDNSMarker] != 1) do={ :error "MosDNS 安装状态标记回读失败" }
 /container/envs set $finalMosDNSMarker value="foxos:mosdns:complete"

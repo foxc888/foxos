@@ -14,6 +14,15 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSSecretContractVersion
+:global FoxOSSecretHostDirectory
+:global FoxOSSecretContainerDirectory
+:global FoxOSSecretMountName
+:global FoxOSReadonlyMountMode
+:global FoxOSAdminMountLists
+:global FoxOSSecretFileNames
+:global FoxOSSecretRead
+:global FoxOSSecretEvidence
 :global FoxOSRollbackInspectVerbose
 :global FoxOSRollbackCurrentDigest
 :global FoxOSRollbackActiveID
@@ -22,12 +31,13 @@
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSSecretContractVersion != 1 || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets") || $FoxOSSecretContainerDirectory != "/run/secrets/foxos" || $FoxOSSecretMountName != "foxos-secrets" || $FoxOSReadonlyMountMode != "ro") do={ :error "secret-file compatibility contract is unavailable" }
 
 :local releaseID "__FOXOS_RELEASE_ID__"
 :if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "rollback-inspect.rsc 未绑定有效 release ID" }
 :local activeNameExpected ("foxos-" . $releaseID)
 :local activeRootExpected ($FoxOSSiteStorageRoot . "/containers/" . $activeNameExpected)
-:local material ("foxos-rollback-v2|" . $releaseID . "|" . $FoxOSSiteStorageRoot . "|" . $FoxOSSiteFoxOSAddress)
+:local material ("foxos-rollback-v3|" . $releaseID . "|" . $FoxOSSiteStorageRoot . "|" . $FoxOSSiteFoxOSAddress)
 :set FoxOSRollbackCurrentDigest ""
 :set FoxOSRollbackActiveID ""
 :set FoxOSRollbackSlotID ""
@@ -51,20 +61,19 @@
 :local rollbackBoot [/container get $rollback start-on-boot]
 :local activeLogging [/container get $active logging]
 :local rollbackLogging [/container get $rollback logging]
-:if ($activeName != $activeNameExpected || [$FoxOSContainerRoot $active] != $activeRootExpected || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($activeBoot != false && $activeBoot != "no") || ($activeLogging != false && $activeLogging != "no") || ($activeStatus != "running" && $activeStatus != "stopped")) do={ :error "active 槽位不是此版本化 payload 对应的完整 release 身份" }
-:if (!($rollbackName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $rollback] != ($FoxOSSiteStorageRoot . "/containers/" . $rollbackName) || [/container get $rollback interface] != "veth-foxos" || [/container get $rollback envlists] != "foxos-env" || [$FoxOSContainerMountLists $rollback] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($rollbackBoot != false && $rollbackBoot != "no") || ($rollbackLogging != false && $rollbackLogging != "no") || [$FoxOSContainerState $rollback] != "stopped") do={ :error "rollback 槽位完整身份或停止状态不匹配" }
+:if ($activeName != $activeNameExpected || [$FoxOSContainerRoot $active] != $activeRootExpected || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != $FoxOSAdminMountLists || ($activeBoot != false && $activeBoot != "no") || ($activeLogging != false && $activeLogging != "no") || ($activeStatus != "running" && $activeStatus != "stopped")) do={ :error "active 槽位不是此版本化 payload 对应的完整 release 身份" }
+:if (!($rollbackName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $rollback] != ($FoxOSSiteStorageRoot . "/containers/" . $rollbackName) || [/container get $rollback interface] != "veth-foxos" || [/container get $rollback envlists] != "foxos-env" || [$FoxOSContainerMountLists $rollback] != $FoxOSAdminMountLists || ($rollbackBoot != false && $rollbackBoot != "no") || ($rollbackLogging != false && $rollbackLogging != "no") || [$FoxOSContainerState $rollback] != "stopped") do={ :error "rollback 槽位完整身份或停止状态不匹配" }
 :set material ($material . "|active=" . [:pick $active 0] . ":" . $activeName . ":" . [$FoxOSContainerRoot $active] . ":" . $activeStatus . ":" . [/container get $active interface] . ":" . [/container get $active envlists] . ":" . [$FoxOSContainerMountLists $active] . ":" . $activeBoot . ":" . $activeLogging)
 :set material ($material . "|rollback=" . [:pick $rollback 0] . ":" . $rollbackName . ":" . [$FoxOSContainerRoot $rollback] . ":" . [$FoxOSContainerState $rollback] . ":" . [/container get $rollback interface] . ":" . [/container get $rollback envlists] . ":" . [$FoxOSContainerMountLists $rollback] . ":" . $rollbackBoot . ":" . $rollbackLogging)
 
 :local installMarkers [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER"]
 :if ([:len $installMarkers] != 1 || [/container/envs get $installMarkers value] != "foxos:complete") do={ :error "foxos-env 必须处于唯一 foxos:complete 状态" }
 :set material ($material . "|marker=" . [/container/envs get $installMarkers .id] . ":" . [/container/envs get $installMarkers value])
-:local tokenID [/container/envs find where list="foxos-env" key="FOXOS_API_TOKEN"]
-:if ([:len $tokenID] != 1) do={ :error "FOXOS_API_TOKEN 缺失或不唯一" }
-:local apiToken [/container/envs get $tokenID value]
-:if ([:len $apiToken] < 32) do={ :error "FOXOS_API_TOKEN 不符合安全基线" }
-:local tokenDigest [:convert $apiToken transform=sha512 to=hex]
-:set material ($material . "|token=" . [/container/envs get $tokenID .id] . ":" . $tokenDigest)
+:local apiToken [$FoxOSSecretRead "api-token"]
+:if ([:len $apiToken] < 32) do={ :error "api-token secret file does not meet the security baseline" }
+:foreach secretName in=$FoxOSSecretFileNames do={
+  :set material ($material . "|secret=" . [$FoxOSSecretEvidence $secretName])
+}
 
 :local foxosVeth [/interface/veth find where name="veth-foxos"]
 :local expectedFoxOSCIDR ($FoxOSSiteFoxOSAddress . "/" . $FoxOSSitePrefixLength)
@@ -101,6 +110,9 @@
   :set material ($material . "|mount=" . [:pick $mountID 0] . ":" . $mountName . ":" . [$FoxOSMountSource $mountID] . ":" . [/container/mounts get $mountID dst] . ":" . [$FoxOSMountMode $mountID])
 }
 :if ($verifiedSharedMounts != 3) do={ :error "三个共享挂载未全部通过身份与可写检查" }
+:local secretMount [/container/mounts find where list=$FoxOSSecretMountName]
+:if ([:len $secretMount] != 1 || [$FoxOSMountSource $secretMount] != $FoxOSSecretHostDirectory || [/container/mounts get $secretMount dst] != $FoxOSSecretContainerDirectory || [$FoxOSMountMode $secretMount] != $FoxOSReadonlyMountMode) do={ :error "rollback secret mount identity or read-only mode does not match" }
+:set material ($material . "|mount=" . [:pick $secretMount 0] . ":" . $FoxOSSecretMountName . ":" . [$FoxOSMountSource $secretMount] . ":" . [/container/mounts get $secretMount dst] . ":" . [$FoxOSMountMode $secretMount])
 
 :local digest [:convert $material transform=sha512 to=hex]
 :if ([:len $digest] != 128) do={ :error "无法生成 rollback 摘要" }

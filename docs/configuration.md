@@ -1,21 +1,23 @@
 # FoxOS 运行配置
 
-FoxOS 只从进程环境读取凭据、站点和依赖端点。真实 Token、密码、节点链接、证书私钥和 RouterOS 导出不得进入仓库、镜像、日志或截图。
+FoxOS 的非敏感配置从进程环境读取。`development` 可从对应 `FOXOS_*` 环境变量读取四项运行秘密；`production` 只读取固定的 `/run/secrets/foxos/*` 文件，并在发现任一敏感环境变量（包括空值）时拒绝启动。真实 Token、密码、节点链接、证书私钥和 RouterOS 导出不得进入仓库、镜像、bundle、日志或截图。
 
-## 必填密钥
+## 运行秘密
 
-| 变量 | 约束 |
-|---|---|
-| `FOXOS_API_TOKEN` | 至少 32 字符，无首尾空白 |
-| `FOXOS_CONFIRMATION_KEY` | 至少 32 字符，无首尾空白，必须与 API Token 不同 |
+| 用途 | 生产文件 | 开发环境变量 |
+|---|---|---|
+| API Token | `/run/secrets/foxos/api-token` | `FOXOS_API_TOKEN` |
+| 确认密钥 | `/run/secrets/foxos/confirmation-key` | `FOXOS_CONFIRMATION_KEY` |
+| RouterOS 服务密码 | `/run/secrets/foxos/routeros-password` | `FOXOS_ROUTEROS_PASSWORD` |
+| Mihomo Controller Secret | `/run/secrets/foxos/mihomo-secret` | `FOXOS_MIHOMO_SECRET` |
 
-API Token 用于非浏览器 Bearer 认证，并由 Web UI 在同源登录时一次性换取浏览器会话；确认密钥用于签署高风险计划，并通过带领域前缀的 HMAC-SHA256 保护对外可见的 Mihomo 配置/快照 digest，避免节点密码或 UUID 被裸摘要用于离线猜测。服务还从确认密钥派生独立的 Mihomo apply 完整性密钥：配置内容 HMAC 与 journal envelope HMAC 使用不同领域，后者覆盖所有恢复决策字段，包括操作身份、目标 digest、期望 snapshot label、备份路径、阶段和创建时间。任一必填密钥缺失或不合格时服务拒绝启动。不要在 Mihomo 任务运行中或 pending journal 存在时轮换确认密钥；轮换会使旧确认令牌、运行中任务 digest、旧发布快照和未完成恢复 envelope 无法验证，必须先完成/回滚 pending 操作，再在维护窗口重新预览并发布配置生成新快照。
+四个值都必须是 `32..4096` 字节、无空白的可打印 ASCII，且彼此不同。生产 secret 目录只能包含表中四个固定文件；任一文件缺失、重复、无效或出现额外文件时都失败关闭。API Token 用于非浏览器 Bearer 认证，并由 Web UI 在同源登录时一次性换取浏览器会话；确认密钥用于签署高风险计划，并通过带领域前缀的 HMAC-SHA256 保护对外可见的 Mihomo 配置/快照 digest，避免节点密码或 UUID 被裸摘要用于离线猜测。服务还从确认密钥派生独立的 Mihomo apply 完整性密钥：配置内容 HMAC 与 journal envelope HMAC 使用不同领域，后者覆盖所有恢复决策字段，包括操作身份、目标 digest、期望 snapshot label、备份路径、阶段和创建时间。任一必填秘密缺失或不合格时服务拒绝启动。不要在 Mihomo 任务运行中或 pending journal 存在时轮换确认密钥；轮换会使旧确认令牌、运行中任务 digest、旧发布快照和未完成恢复 envelope 无法验证，必须先完成/回滚 pending 操作，再在维护窗口重新预览并发布配置生成新快照。
 
 `FOXOS_ENV` 只接受 `development` 或 `production`。未设置时仅允许 HTTP 绑定 loopback；正式包固定为 `production`，并强制启用 HTTPS、使用持久绝对 backup/TLS 路径和非临时 SQLite 文件；不满足时启动失败。
 
 ## 站点清单
 
-RouterOS 全量包提供不可变 `site-config.example.rsc`；操作者复制为唯一 `site-config.rsc`，编辑后用 `seal-site-config.sh` 生成独立 SHA-512。可编辑清单不得直接 import；固定的 `load-site-config.rsc` 会先校验摘要与 11 项赋值白名单，preflight 再核对当前内容与 loader 证明，然后由安装器生成以下环境。八项 `FOXOS_SITE_*` 必须全设或全不设；全不设只用于本地开发并采用默认样例。
+RouterOS 全量包提供不可变 `site-config.example.rsc`；操作者复制为唯一 `site-config.rsc`，编辑后用 `seal-site-config.sh` 生成独立 SHA-512。可编辑清单不得直接 import；固定的 `load-site-config.rsc` 会先校验摘要与 11 项赋值白名单，preflight 再核对当前内容与 loader 证明，然后由安装器生成以下非敏感环境。八项 `FOXOS_SITE_*` 必须全设或全不设；全不设只用于本地开发并采用默认样例。
 
 | 变量 | 默认样例 |
 |---|---|
@@ -36,7 +38,7 @@ RouterOS 全量包提供不可变 `site-config.example.rsc`；操作者复制为
 |---|---|
 | `FOXOS_ROUTEROS_URL` | `http://<site-router-address>` |
 | `FOXOS_ROUTEROS_USERNAME` | `foxos-service` |
-| `FOXOS_ROUTEROS_PASSWORD` | 首次安装随机生成 |
+| `FOXOS_ROUTEROS_PASSWORD` | `/run/secrets/foxos/routeros-password`；仅开发模式使用同名 env |
 
 URL 为空时 RouterOS 显示 `configured=false, online=false`，所有 RouterOS 写入不可用。配置 URL 后用户名和密码都必填。
 
@@ -46,7 +48,7 @@ URL 为空时 RouterOS 显示 `configured=false, online=false`，所有 RouterOS
 |---|---|---|
 | `FOXOS_MIHOMO_URL` | `http://<site-mihomo-address>:9090` | Controller |
 | `FOXOS_MIHOMO_PROXY_URL` | `http://<site-mihomo-address>:7890` | 当前策略 mixed-port 出口探测 |
-| `FOXOS_MIHOMO_SECRET` | 首次安装随机生成 | 32 到 4096 字符 |
+| `FOXOS_MIHOMO_SECRET` | `/run/secrets/foxos/mihomo-secret`；仅开发模式使用同名 env | 32 到 4096 字节 |
 | `FOXOS_MIHOMO_BASE_CONFIG` | `/data/mihomo/base.yaml` | 可信运行基线 |
 | `FOXOS_MIHOMO_LOCAL_CONFIG` | `/data/mihomo/config.yaml` | FoxOS 可写路径 |
 | `FOXOS_MIHOMO_RUNTIME_CONFIG` | `/root/.config/mihomo/config.yaml` | Controller reload 路径 |
@@ -92,7 +94,7 @@ RouterOS、Mihomo、Mihomo proxy 和 MosDNS URL：
 
 订阅抓取默认只允许 HTTPS 443 公共目标。`FOXOS_SUBSCRIPTION_PRIVATE_CIDRS` 可设置最多 32 个逗号分隔、无空格、canonical 的 RFC1918 或 IPv6 ULA 前缀；它只开放明确网段，不能开放 loopback、link-local、multicast、unspecified 或 metadata 类地址。连接与每次重定向都会重新解析并重新检查，以拒绝 DNS rebinding。
 
-全量 RouterOS 安装器维护精确 27 键 `foxos-env` 基线；站点清单配置非空私网订阅 allowlist 时为 28 键。已有 marker 的安装可补齐缺项，但未知额外键或固定值不一致会失败关闭，不自动覆盖。
+全量 RouterOS 安装器维护精确 `23/24` 键非敏感 `foxos-env` 基线：站点清单未配置私网订阅 allowlist 时为 23 键，配置非空 allowlist 时为 24 键。production 中四个敏感环境变量必须为零绑定；已有 marker 的安装可补齐非敏感缺项，但未知额外键、敏感键或固定值不一致会失败关闭，不自动覆盖。
 
 ## 浏览器 Token
 

@@ -19,7 +19,7 @@ func TestReadOverviewAndDevices(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/rest/system/resource":
-			_ = json.NewEncoder(w).Encode(Resource{Version: "7.15.2", Architecture: "x86_64", CPULoad: "12"})
+			_ = json.NewEncoder(w).Encode([]Resource{{Version: "7.15.2", Architecture: "x86_64", CPULoad: "12"}})
 		case "/rest/interface":
 			_ = json.NewEncoder(w).Encode([]Interface{{ID: "*1", Name: "ether1", Running: "true"}})
 		case "/rest/ip/dhcp-server/lease":
@@ -52,6 +52,34 @@ func TestReadOverviewAndDevices(t *testing.T) {
 	l2tp, err := client.L2TPClients(context.Background())
 	if err != nil || len(l2tp) != 1 || l2tp[0].Name != "JP" {
 		t.Fatalf("l2tp=%+v err=%v", l2tp, err)
+	}
+}
+
+func TestResourceRequiresExactlyOneRecord(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		records []Resource
+	}{
+		{name: "empty response", records: []Resource{}},
+		{name: "multiple records", records: []Resource{{Version: "7.23.2"}, {Version: "7.23.2"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(test.records)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, "foxos", "secret")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Resource(t.Context()); err == nil || !strings.Contains(err.Error(), "response count") {
+				t.Fatalf("Resource() error = %v, want response count error", err)
+			}
+		})
 	}
 }
 

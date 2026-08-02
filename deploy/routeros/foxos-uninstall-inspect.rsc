@@ -19,6 +19,15 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSSecretContractVersion
+:global FoxOSSecretHostDirectory
+:global FoxOSSecretContainerDirectory
+:global FoxOSSecretMountName
+:global FoxOSReadonlyMountMode
+:global FoxOSAdminMountLists
+:global FoxOSSensitiveEnvKeys
+:global FoxOSSecretFileNames
+:global FoxOSSecretEvidence
 :global FoxOSUninstallInspectVerbose
 :global FoxOSUninstallCurrentDigest
 :global FoxOSUninstallContainerCount
@@ -26,10 +35,11 @@
 :global FoxOSUninstallRemainingCount
 :if ($FoxOSSiteManifestVersion != 2 || $FoxOSContainerCompatVersion != 2) do={ :error "site manifest and container compatibility contract are required" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSSecretContractVersion != 1 || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets") || $FoxOSSecretContainerDirectory != "/run/secrets/foxos" || $FoxOSSecretMountName != "foxos-secrets" || $FoxOSReadonlyMountMode != "ro") do={ :error "secret-file compatibility contract is unavailable" }
 
 :local failed false
 :local remaining 0
-:local material ("foxos-uninstall-v2|" . $FoxOSSiteManagementBridge . "|" . $FoxOSSiteStorageRoot . "|" . $FoxOSSiteFoxOSAddress . "|" . $FoxOSSitePublicHostname)
+:local material ("foxos-uninstall-v3|" . $FoxOSSiteManagementBridge . "|" . $FoxOSSiteStorageRoot . "|" . $FoxOSSiteFoxOSAddress . "|" . $FoxOSSitePublicHostname)
 :set FoxOSUninstallCurrentDigest ""
 :set FoxOSUninstallRemainingCount 0
 :local pendingMihomoApplyJournal [/file find where name=($FoxOSSiteStorageRoot . "/foxos-backups/mihomo/.foxos-mihomo-apply.json")]
@@ -72,7 +82,7 @@
     :if ($owner = "foxos:transition:rollback") do={ :set rollbackTransitionCount ($rollbackTransitionCount + 1) }
     :if ($owner = "foxos:transition:rollback:previous") do={ :set rollbackPreviousCount ($rollbackPreviousCount + 1) }
     :local adminName [/container get $containerID name]
-    :if ($adminName ~ "^foxos-[A-Za-z0-9._-]+\$" && [/container get $containerID interface] = "veth-foxos" && [/container get $containerID envlists] = "foxos-env" && [$FoxOSContainerMountLists $containerID] = "foxos-mihomo-config,foxos-data,foxos-backups" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/" . $adminName)) do={ :set accepted true }
+    :if ($adminName ~ "^foxos-[A-Za-z0-9._-]+\$" && [/container get $containerID interface] = "veth-foxos" && [/container get $containerID envlists] = "foxos-env" && [$FoxOSContainerMountLists $containerID] = $FoxOSAdminMountLists && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/" . $adminName)) do={ :set accepted true }
   }
   :local status [$FoxOSContainerState $containerID]
   :if ($status != "running" && $status != "stopped") do={ :set accepted false }
@@ -131,8 +141,13 @@
   }
 }
 
-:local allowedEnvKeys "|FOXOS_INSTALL_MARKER|FOXOS_ENV|FOXOS_ROUTEROS_URL|FOXOS_ROUTEROS_USERNAME|FOXOS_ROUTEROS_PASSWORD|FOXOS_MIHOMO_URL|FOXOS_MIHOMO_PROXY_URL|FOXOS_MIHOMO_SECRET|FOXOS_MIHOMO_BASE_CONFIG|FOXOS_MIHOMO_LOCAL_CONFIG|FOXOS_MIHOMO_RUNTIME_CONFIG|FOXOS_MIHOMO_BACKUP_DIR|FOXOS_MIHOMO_VALIDATOR_BINARY|FOXOS_MOSDNS_URL|FOXOS_API_TOKEN|FOXOS_CONFIRMATION_KEY|FOXOS_BACKUP_DIR|FOXOS_UPGRADE_STATE_PATH|FOXOS_SITE_MANAGEMENT_BRIDGE|FOXOS_SITE_STORAGE_ROOT|FOXOS_SITE_NETWORK|FOXOS_SITE_ROUTER_ADDRESS|FOXOS_SITE_MIHOMO_ADDRESS|FOXOS_SITE_MOSDNS_ADDRESS|FOXOS_SITE_FOXOS_ADDRESS|FOXOS_SITE_PUBLIC_HOSTNAME|FOXOS_HTTPS_ENABLED|FOXOS_SUBSCRIPTION_PRIVATE_CIDRS|"
+:local allowedEnvKeys "|FOXOS_INSTALL_MARKER|FOXOS_ENV|FOXOS_ROUTEROS_URL|FOXOS_ROUTEROS_USERNAME|FOXOS_MIHOMO_URL|FOXOS_MIHOMO_PROXY_URL|FOXOS_MIHOMO_BASE_CONFIG|FOXOS_MIHOMO_LOCAL_CONFIG|FOXOS_MIHOMO_RUNTIME_CONFIG|FOXOS_MIHOMO_BACKUP_DIR|FOXOS_MIHOMO_VALIDATOR_BINARY|FOXOS_MOSDNS_URL|FOXOS_BACKUP_DIR|FOXOS_UPGRADE_STATE_PATH|FOXOS_SITE_MANAGEMENT_BRIDGE|FOXOS_SITE_STORAGE_ROOT|FOXOS_SITE_NETWORK|FOXOS_SITE_ROUTER_ADDRESS|FOXOS_SITE_MIHOMO_ADDRESS|FOXOS_SITE_MOSDNS_ADDRESS|FOXOS_SITE_FOXOS_ADDRESS|FOXOS_SITE_PUBLIC_HOSTNAME|FOXOS_HTTPS_ENABLED|FOXOS_SUBSCRIPTION_PRIVATE_CIDRS|"
 :local envItems [/container/envs find where list="foxos-env"]
+:foreach sensitiveKey in=$FoxOSSensitiveEnvKeys do={
+  :local sensitiveEnv [/container/envs find where list="foxos-env" key=$sensitiveKey]
+  :set material ($material . "|forbidden-env:" . $sensitiveKey . "=" . [:len $sensitiveEnv])
+  :if ([:len $sensitiveEnv] > 0) do={ :set failed true }
+}
 :if ([:len $envItems] = 0) do={
   :set material ($material . "|env:DONE")
   :if ($FoxOSUninstallInspectVerbose) do={ :put "DONE env/foxos-env" }
@@ -147,6 +162,36 @@
     :set remaining ($remaining + 1)
   }
   :if ($FoxOSUninstallInspectVerbose) do={ :put ("REMOVE env/foxos-env entries=" . [:len $envItems]) }
+}
+
+:local secretDirectory [/file find where name=$FoxOSSecretHostDirectory]
+:if ([:len $secretDirectory] = 0) do={
+  :local orphanedSecretFiles 0
+  :foreach secretName in=$FoxOSSecretFileNames do={
+    :set orphanedSecretFiles ($orphanedSecretFiles + [:len [/file find where name=($FoxOSSecretHostDirectory . "/" . $secretName)]])
+  }
+  :if ($orphanedSecretFiles > 0) do={ :set failed true }
+  :set material ($material . "|secret-root:DONE")
+  :if ($FoxOSUninstallInspectVerbose) do={ :put "DONE file/foxos-secrets" }
+} else={
+  :if ([:len $secretDirectory] != 1 || [/file get $secretDirectory type] != "directory") do={ :set failed true }
+  :local knownSecretFiles 0
+  :foreach secretName in=$FoxOSSecretFileNames do={
+    :local secretFile [/file find where name=($FoxOSSecretHostDirectory . "/" . $secretName)]
+    :if ([:len $secretFile] != 1) do={
+      :set failed true
+    } else={
+      :set knownSecretFiles ($knownSecretFiles + 1)
+      :set remaining ($remaining + 1)
+      :set material ($material . "|secret-file:REMOVE:" . [$FoxOSSecretEvidence $secretName])
+      :if ($FoxOSUninstallInspectVerbose) do={ :put ("REMOVE secret-file/" . $secretName) }
+    }
+  }
+  :local secretChildren [/file find where name~("^" . $FoxOSSecretHostDirectory . "/")]
+  :if ([:len $secretChildren] != $knownSecretFiles || $knownSecretFiles != 4) do={ :set failed true }
+  :set remaining ($remaining + 1)
+  :set material ($material . "|secret-root:REMOVE:" . [:pick $secretDirectory 0] . ":children=" . [:len $secretChildren])
+  :if ($FoxOSUninstallInspectVerbose) do={ :put "REMOVE file/foxos-secrets after its four files" }
 }
 
 :local mosdnsEnvItems [/container/envs find where list="foxos-mosdns-env"]
@@ -190,19 +235,21 @@
   :if ($FoxOSUninstallInspectVerbose) do={ :put "DONE user-group/foxos-rest" }
 }
 
-:local mountDefinitions {"foxos-mihomo-runtime|mihomo-config|/root/.config/mihomo";"foxos-mihomo-config|mihomo-config|/data/mihomo";"foxos-mosdns-runtime|mosdns-config|/cus/mosdns";"foxos-data|foxos-data|/data";"foxos-backups|foxos-backups|/backups"}
+:local mountDefinitions {($FoxOSSecretMountName . "|" . $FoxOSSecretHostDirectory . "|" . $FoxOSSecretContainerDirectory . "|" . $FoxOSReadonlyMountMode);("foxos-mihomo-runtime|" . $FoxOSSiteStorageRoot . "/mihomo-config|/root/.config/mihomo|" . $FoxOSWritableMountMode);("foxos-mihomo-config|" . $FoxOSSiteStorageRoot . "/mihomo-config|/data/mihomo|" . $FoxOSWritableMountMode);("foxos-mosdns-runtime|" . $FoxOSSiteStorageRoot . "/mosdns-config|/cus/mosdns|" . $FoxOSWritableMountMode);("foxos-data|" . $FoxOSSiteStorageRoot . "/foxos-data|/data|" . $FoxOSWritableMountMode);("foxos-backups|" . $FoxOSSiteStorageRoot . "/foxos-backups|/backups|" . $FoxOSWritableMountMode)}
 :foreach definition in=$mountDefinitions do={
   :local p1 [:find $definition "|"]
   :local p2 [:find $definition "|" ($p1 + 1)]
+  :local p3 [:find $definition "|" ($p2 + 1)]
   :local mountName [:pick $definition 0 $p1]
-  :local sourcePath ($FoxOSSiteStorageRoot . "/" . [:pick $definition ($p1 + 1) $p2])
-  :local destination [:pick $definition ($p2 + 1) [:len $definition]]
+  :local sourcePath [:pick $definition ($p1 + 1) $p2]
+  :local destination [:pick $definition ($p2 + 1) $p3]
+  :local expectedMode [:pick $definition ($p3 + 1) [:len $definition]]
   :local mountID [/container/mounts find where list=$mountName]
   :if ([:len $mountID] = 0) do={
     :set material ($material . "|mount:" . $mountName . ":DONE")
     :if ($FoxOSUninstallInspectVerbose) do={ :put ("DONE mount/" . $mountName) }
   } else={
-    :if ([:len $mountID] != 1 || [$FoxOSMountSource $mountID] != $sourcePath || [/container/mounts get $mountID dst] != $destination || [$FoxOSMountMode $mountID] != $FoxOSWritableMountMode) do={ :set failed true }
+    :if ([:len $mountID] != 1 || [$FoxOSMountSource $mountID] != $sourcePath || [/container/mounts get $mountID dst] != $destination || [$FoxOSMountMode $mountID] != $expectedMode) do={ :set failed true }
     :set remaining ($remaining + 1)
     :set material ($material . "|mount:" . $mountName . ":REMOVE:" . [:pick $mountID 0] . ":" . [$FoxOSMountSource $mountID] . ":" . [/container/mounts get $mountID dst] . ":" . [$FoxOSMountMode $mountID])
     :if ($FoxOSUninstallInspectVerbose) do={ :put ("REMOVE mount/" . $mountName) }

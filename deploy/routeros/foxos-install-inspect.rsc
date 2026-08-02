@@ -20,10 +20,21 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSSecretContractVersion
+:global FoxOSSecretHostDirectory
+:global FoxOSSecretContainerDirectory
+:global FoxOSSecretMountName
+:global FoxOSReadonlyMountMode
+:global FoxOSAdminMountLists
+:global FoxOSSensitiveEnvKeys
+:global FoxOSSecretFileNames
+:global FoxOSSecretRead
+:global FoxOSSecretEvidence
 :global FoxOSInstallInspectVerbose
 :global FoxOSInstallCurrentDigest
 :if ($FoxOSSiteManifestVersion != 2 || $FoxOSContainerCompatVersion != 2) do={ :error "site-config.rsc manifest version 2 and container compatibility contract are required" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSSecretContractVersion != 1 || $FoxOSReadonlyMountMode != "ro" || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets")) do={ :error "secret-file compatibility contract is unavailable" }
 
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
@@ -37,19 +48,20 @@
 :local foxosIP $FoxOSSiteFoxOSAddress
 :local subscriptionPrivateCIDRs $FoxOSSiteSubscriptionPrivateCIDRs
 :local failed false
-:local material ("foxos-install-v3|" . $releaseID . "|" . $managementBridge . "|" . $storageRoot . "|" . $FoxOSSiteNetwork . "|" . $prefixLength . "|" . $routerAddress . "|" . $mihomoIP . "|" . $mosdnsIP . "|" . $foxosIP . "|" . $FoxOSSitePublicHostname . "|" . $subscriptionPrivateCIDRs)
+:local material ("foxos-install-v4|" . $releaseID . "|" . $managementBridge . "|" . $storageRoot . "|" . $FoxOSSiteNetwork . "|" . $prefixLength . "|" . $routerAddress . "|" . $mihomoIP . "|" . $mosdnsIP . "|" . $foxosIP . "|" . $FoxOSSitePublicHostname . "|" . $subscriptionPrivateCIDRs)
 :set FoxOSInstallCurrentDigest ""
 
 :local envState "CREATE"
 :local envItems [/container/envs find where list="foxos-env"]
 :local persistedDataRoot [/file find where name=($storageRoot . "/foxos-data")]
 :local persistedBackupRoot [/file find where name=($storageRoot . "/foxos-backups")]
-:if ([:len $envItems] = 0 && ([:len $persistedDataRoot] > 0 || [:len $persistedBackupRoot] > 0)) do={
+:local persistedSecretRoot [/file find where name=$FoxOSSecretHostDirectory]
+:if ([:len $envItems] = 0 && ([:len $persistedDataRoot] > 0 || [:len $persistedBackupRoot] > 0 || [:len $persistedSecretRoot] > 0)) do={
   :set envState "FAIL"
   :set failed true
-  :if ($FoxOSInstallInspectVerbose) do={ :put "FAIL retained foxos-data or foxos-backups exists without foxos-env; restore the original confirmation key or archive the retained state before a fresh install" }
+  :if ($FoxOSInstallInspectVerbose) do={ :put "FAIL retained FoxOS data, backups, or secret directory exists without foxos-env; restore the original secret set or archive the retained state before a fresh install" }
 }
-:set material ($material . "|retained-roots=" . [:len $persistedDataRoot] . ":" . [:len $persistedBackupRoot])
+:set material ($material . "|retained-roots=" . [:len $persistedDataRoot] . ":" . [:len $persistedBackupRoot] . ":" . [:len $persistedSecretRoot])
 :local envMarkers [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER"]
 :local existingInstall false
 :local completeInstall false
@@ -58,6 +70,11 @@
 :local foxosApiToken ""
 :local foxosConfirmationKey ""
 :local mihomoSecretPresent false
+:foreach sensitiveKey in=$FoxOSSensitiveEnvKeys do={
+  :local sensitiveEnv [/container/envs find where list="foxos-env" key=$sensitiveKey]
+  :set material ($material . "|forbidden-env:" . $sensitiveKey . "=" . [:len $sensitiveEnv])
+  :if ([:len $sensitiveEnv] > 0) do={ :set envState "FAIL"; :set failed true }
+}
 :if ([:len $envItems] > 0) do={
   :if ([:len $envMarkers] != 1) do={
     :set envState "FAIL"
@@ -81,7 +98,7 @@
 }
 
 :if ($existingInstall) do={
-  :local allowedEnvKeys "|FOXOS_INSTALL_MARKER|FOXOS_ENV|FOXOS_ROUTEROS_URL|FOXOS_ROUTEROS_USERNAME|FOXOS_ROUTEROS_PASSWORD|FOXOS_MIHOMO_URL|FOXOS_MIHOMO_PROXY_URL|FOXOS_MIHOMO_SECRET|FOXOS_MIHOMO_BASE_CONFIG|FOXOS_MIHOMO_LOCAL_CONFIG|FOXOS_MIHOMO_RUNTIME_CONFIG|FOXOS_MIHOMO_BACKUP_DIR|FOXOS_MIHOMO_VALIDATOR_BINARY|FOXOS_MOSDNS_URL|FOXOS_API_TOKEN|FOXOS_CONFIRMATION_KEY|FOXOS_BACKUP_DIR|FOXOS_UPGRADE_STATE_PATH|FOXOS_SITE_MANAGEMENT_BRIDGE|FOXOS_SITE_STORAGE_ROOT|FOXOS_SITE_NETWORK|FOXOS_SITE_ROUTER_ADDRESS|FOXOS_SITE_MIHOMO_ADDRESS|FOXOS_SITE_MOSDNS_ADDRESS|FOXOS_SITE_FOXOS_ADDRESS|FOXOS_SITE_PUBLIC_HOSTNAME|FOXOS_HTTPS_ENABLED|FOXOS_SUBSCRIPTION_PRIVATE_CIDRS|"
+  :local allowedEnvKeys "|FOXOS_INSTALL_MARKER|FOXOS_ENV|FOXOS_ROUTEROS_URL|FOXOS_ROUTEROS_USERNAME|FOXOS_MIHOMO_URL|FOXOS_MIHOMO_PROXY_URL|FOXOS_MIHOMO_BASE_CONFIG|FOXOS_MIHOMO_LOCAL_CONFIG|FOXOS_MIHOMO_RUNTIME_CONFIG|FOXOS_MIHOMO_BACKUP_DIR|FOXOS_MIHOMO_VALIDATOR_BINARY|FOXOS_MOSDNS_URL|FOXOS_BACKUP_DIR|FOXOS_UPGRADE_STATE_PATH|FOXOS_SITE_MANAGEMENT_BRIDGE|FOXOS_SITE_STORAGE_ROOT|FOXOS_SITE_NETWORK|FOXOS_SITE_ROUTER_ADDRESS|FOXOS_SITE_MIHOMO_ADDRESS|FOXOS_SITE_MOSDNS_ADDRESS|FOXOS_SITE_FOXOS_ADDRESS|FOXOS_SITE_PUBLIC_HOSTNAME|FOXOS_HTTPS_ENABLED|FOXOS_SUBSCRIPTION_PRIVATE_CIDRS|"
   :foreach envID in=$envItems do={
     :local currentKey [/container/envs get $envID key]
     :if ([:typeof [:find $allowedEnvKeys ("|" . $currentKey . "|")]] = "nil") do={
@@ -109,35 +126,10 @@
       }
     }
   }
-  :foreach secretKey in={"FOXOS_ROUTEROS_PASSWORD";"FOXOS_MIHOMO_SECRET";"FOXOS_API_TOKEN";"FOXOS_CONFIRMATION_KEY"} do={
-    :local secretID [/container/envs find where list="foxos-env" key=$secretKey]
-    :if ([:len $secretID] > 1) do={
-      :set envState "FAIL"
-      :set failed true
-    } else={
-      :if ([:len $secretID] = 0) do={
-        :set material ($material . "|secret:" . $secretKey . "=MISSING")
-        :if ($completeInstall) do={ :set envState "FAIL"; :set failed true }
-      } else={
-        :local secretValue [/container/envs get $secretID value]
-        :if ([:len $secretValue] < 32) do={ :set envState "FAIL"; :set failed true }
-        :if ($secretKey = "FOXOS_ROUTEROS_PASSWORD") do={ :set foxosRouterPassword $secretValue }
-        :if ($secretKey = "FOXOS_MIHOMO_SECRET") do={ :set foxosMihomoSecret $secretValue; :set mihomoSecretPresent true }
-        :if ($secretKey = "FOXOS_API_TOKEN") do={ :set foxosApiToken $secretValue }
-        :if ($secretKey = "FOXOS_CONFIRMATION_KEY") do={ :set foxosConfirmationKey $secretValue }
-        :local secretDigest [:convert $secretValue transform=sha512 to=hex]
-        :set material ($material . "|secret:" . $secretKey . "=" . [:pick $secretID 0] . ":" . $secretDigest)
-      }
-    }
-  }
-  :if (([:len $foxosRouterPassword] > 0 && $foxosRouterPassword = $foxosMihomoSecret) || ([:len $foxosRouterPassword] > 0 && $foxosRouterPassword = $foxosApiToken) || ([:len $foxosRouterPassword] > 0 && $foxosRouterPassword = $foxosConfirmationKey) || ([:len $foxosMihomoSecret] > 0 && $foxosMihomoSecret = $foxosApiToken) || ([:len $foxosMihomoSecret] > 0 && $foxosMihomoSecret = $foxosConfirmationKey) || ([:len $foxosApiToken] > 0 && $foxosApiToken = $foxosConfirmationKey)) do={
-    :set envState "FAIL"
-    :set failed true
-  }
   :local privateCIDRID [/container/envs find where list="foxos-env" key="FOXOS_SUBSCRIPTION_PRIVATE_CIDRS"]
-  :local expectedEnvCount 27
+  :local expectedEnvCount 23
   :if ([:len $subscriptionPrivateCIDRs] > 0) do={
-    :set expectedEnvCount 28
+    :set expectedEnvCount 24
     :if ([:len $privateCIDRID] > 1) do={ :set envState "FAIL"; :set failed true }
     :if ([:len $privateCIDRID] = 0 && $completeInstall) do={ :set envState "FAIL"; :set failed true }
     :if ([:len $privateCIDRID] = 1 && [/container/envs get $privateCIDRID value] != $subscriptionPrivateCIDRs) do={ :set envState "FAIL"; :set failed true }
@@ -148,6 +140,42 @@
 }
 :set material ($material . "|foxos-env=" . $envState . ":" . [:len $envItems])
 :if ($FoxOSInstallInspectVerbose) do={ :put ("RESOURCE env/foxos-env " . $envState) }
+
+:local secretState "CREATE"
+:if ([:len $persistedSecretRoot] > 0) do={
+  :if ([:len $persistedSecretRoot] != 1 || [/file get $persistedSecretRoot type] != "directory" || $existingInstall = false) do={
+    :set secretState "FAIL"
+    :set failed true
+  } else={
+    :set secretState "RESUME"
+    :if ($completeInstall) do={ :set secretState "REUSE" }
+  }
+}
+:foreach secretName in=$FoxOSSecretFileNames do={
+  :local secretPath ($FoxOSSecretHostDirectory . "/" . $secretName)
+  :local secretFile [/file find where name=$secretPath]
+  :if ([:len $secretFile] = 0) do={
+    :set material ($material . "|secret-file:" . $secretName . "=MISSING")
+    :if ($completeInstall) do={ :set secretState "FAIL"; :set failed true }
+  } else={
+    :if ([:len $secretFile] != 1 || $existingInstall = false) do={ :set secretState "FAIL"; :set failed true }
+    :if ([:len $secretFile] = 1) do={
+      :local secretValue [$FoxOSSecretRead $secretName]
+      :if ([:len $secretValue] < 32) do={ :set secretState "FAIL"; :set failed true }
+      :if ($secretName = "routeros-password") do={ :set foxosRouterPassword $secretValue }
+      :if ($secretName = "mihomo-secret") do={ :set foxosMihomoSecret $secretValue; :set mihomoSecretPresent true }
+      :if ($secretName = "api-token") do={ :set foxosApiToken $secretValue }
+      :if ($secretName = "confirmation-key") do={ :set foxosConfirmationKey $secretValue }
+      :set material ($material . "|secret-file:" . [$FoxOSSecretEvidence $secretName])
+    }
+  }
+}
+:if (([:len $foxosRouterPassword] > 0 && $foxosRouterPassword = $foxosMihomoSecret) || ([:len $foxosRouterPassword] > 0 && $foxosRouterPassword = $foxosApiToken) || ([:len $foxosRouterPassword] > 0 && $foxosRouterPassword = $foxosConfirmationKey) || ([:len $foxosMihomoSecret] > 0 && $foxosMihomoSecret = $foxosApiToken) || ([:len $foxosMihomoSecret] > 0 && $foxosMihomoSecret = $foxosConfirmationKey) || ([:len $foxosApiToken] > 0 && $foxosApiToken = $foxosConfirmationKey)) do={
+  :set secretState "FAIL"
+  :set failed true
+}
+:set material ($material . "|secret-root=" . $secretState . ":" . [:len $persistedSecretRoot])
+:if ($FoxOSInstallInspectVerbose) do={ :put ("RESOURCE file/foxos-secrets " . $secretState) }
 
 :local mosdnsEnvState "CREATE"
 :local mosdnsEnvItems [/container/envs find where list="foxos-mosdns-env"]
@@ -210,19 +238,20 @@
 :set material ($material . "|user=" . $userState . ":" . [:len $serviceUser])
 :if ($FoxOSInstallInspectVerbose) do={ :put ("RESOURCE user/foxos-service " . $userState) }
 
-:local mountDefinitions {"foxos-mihomo-runtime|mihomo-config|/root/.config/mihomo";"foxos-mihomo-config|mihomo-config|/data/mihomo";"foxos-mosdns-runtime|mosdns-config|/cus/mosdns";"foxos-data|foxos-data|/data";"foxos-backups|foxos-backups|/backups"}
+:local mountDefinitions {($FoxOSSecretMountName . "|" . $FoxOSSecretHostDirectory . "|" . $FoxOSSecretContainerDirectory . "|" . $FoxOSReadonlyMountMode);("foxos-mihomo-runtime|" . $storageRoot . "/mihomo-config|/root/.config/mihomo|" . $FoxOSWritableMountMode);("foxos-mihomo-config|" . $storageRoot . "/mihomo-config|/data/mihomo|" . $FoxOSWritableMountMode);("foxos-mosdns-runtime|" . $storageRoot . "/mosdns-config|/cus/mosdns|" . $FoxOSWritableMountMode);("foxos-data|" . $storageRoot . "/foxos-data|/data|" . $FoxOSWritableMountMode);("foxos-backups|" . $storageRoot . "/foxos-backups|/backups|" . $FoxOSWritableMountMode)}
 :foreach definition in=$mountDefinitions do={
   :local firstSeparator [:find $definition "|"]
   :local secondSeparator [:find $definition "|" ($firstSeparator + 1)]
+  :local thirdSeparator [:find $definition "|" ($secondSeparator + 1)]
   :local mountName [:pick $definition 0 $firstSeparator]
-  :local sourceName [:pick $definition ($firstSeparator + 1) $secondSeparator]
-  :local destination [:pick $definition ($secondSeparator + 1) [:len $definition]]
-  :local sourcePath ($storageRoot . "/" . $sourceName)
+  :local sourcePath [:pick $definition ($firstSeparator + 1) $secondSeparator]
+  :local destination [:pick $definition ($secondSeparator + 1) $thirdSeparator]
+  :local expectedMode [:pick $definition ($thirdSeparator + 1) [:len $definition]]
   :local mountID [/container/mounts find where list=$mountName]
   :local mountState "CREATE"
   :local mountEvidence ""
   :if ([:len $mountID] > 0) do={
-    :if ([:len $mountID] = 1 && [$FoxOSMountSource $mountID] = $sourcePath && [/container/mounts get $mountID dst] = $destination && [$FoxOSMountMode $mountID] = $FoxOSWritableMountMode) do={
+    :if ([:len $mountID] = 1 && [$FoxOSMountSource $mountID] = $sourcePath && [/container/mounts get $mountID dst] = $destination && [$FoxOSMountMode $mountID] = $expectedMode) do={
       :set mountState "REUSE"
     } else={
       :set mountState "FAIL"
@@ -317,7 +346,7 @@
 :if ([:len $activeContainer] > 0 || [:len $initialByName] > 0) do={
   :local activeName ""
   :if ([:len $activeContainer] = 1) do={ :set activeName [/container get $activeContainer name] }
-  :if ([:len $activeContainer] = 1 && $activeName ~ "^foxos-[A-Za-z0-9._-]+\$" && [/container get $activeContainer interface] = "veth-foxos" && [/container get $activeContainer envlists] = "foxos-env" && [$FoxOSContainerMountLists $activeContainer] = "foxos-mihomo-config,foxos-data,foxos-backups" && [$FoxOSContainerRoot $activeContainer] = ($storageRoot . "/containers/" . $activeName) && ([/container get $activeContainer logging] = false || [/container get $activeContainer logging] = "no")) do={
+  :if ([:len $activeContainer] = 1 && $activeName ~ "^foxos-[A-Za-z0-9._-]+\$" && [/container get $activeContainer interface] = "veth-foxos" && [/container get $activeContainer envlists] = "foxos-env" && [$FoxOSContainerMountLists $activeContainer] = $FoxOSAdminMountLists && [$FoxOSContainerRoot $activeContainer] = ($storageRoot . "/containers/" . $activeName) && ([/container get $activeContainer logging] = false || [/container get $activeContainer logging] = "no")) do={
     :local activeStatus [$FoxOSContainerState $activeContainer]
     :if (($activeStatus = "running" || $activeStatus = "stopped") && [/container get $activeContainer start-on-boot] = false) do={
       :set activeState "REUSE"
