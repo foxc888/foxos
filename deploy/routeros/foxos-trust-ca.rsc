@@ -19,7 +19,12 @@
 :local importedNamePrefix "^foxos-local-ca-import.pem_"
 :local canonicalName "foxos-local-ca"
 :local source [/file find where name=$sourcePath]
-:if ([:len $source] != 1 || [/file get $source type] != "file") do={
+:if ([:len $source] != 1) do={
+  :error ("persistent FoxOS CA is missing, ambiguous, or not a regular file: " . $sourcePath)
+}
+:local sourceType [/file get $source type]
+# RouterOS reports extension-aware values such as ".pem file".
+:if (!($sourceType ~ "(^| )file\$")) do={
   :error ("persistent FoxOS CA is missing, ambiguous, or not a regular file: " . $sourcePath)
 }
 :local sourceSize [/file get $source size]
@@ -56,13 +61,13 @@
 :local temporary [/file find where name=$temporaryName]
 :if ([:len $temporary] > 1) do={ :error "temporary FoxOS CA import file is ambiguous" }
 :if ([:len $temporary] = 1) do={
-  :if ([/file get $temporary type] != "file" || [/file get $temporary size] != $sourceSize || [:convert [/file get $temporary contents] transform=sha512 to=hex] != $sourceDigest) do={
+  :if (!([/file get $temporary type] ~ "(^| )file\$") || [/file get $temporary size] != $sourceSize || [:convert [/file get $temporary contents] transform=sha512 to=hex] != $sourceDigest) do={
     :error "temporary FoxOS CA import file collides with different content"
   }
 } else={
   /file copy number=$source name=$temporaryName
   :set temporary [/file find where name=$temporaryName]
-  :if ([:len $temporary] != 1 || [/file get $temporary type] != "file" || [/file get $temporary size] != $sourceSize || [:convert [/file get $temporary contents] transform=sha512 to=hex] != $sourceDigest) do={
+  :if ([:len $temporary] != 1 || !([/file get $temporary type] ~ "(^| )file\$") || [/file get $temporary size] != $sourceSize || [:convert [/file get $temporary contents] transform=sha512 to=hex] != $sourceDigest) do={
     :error "temporary FoxOS CA copy creation or readback failed"
   }
 }
@@ -74,7 +79,7 @@
 
 :local validationError $importErrorMessage
 :local sourceAfter [/file find where name=$sourcePath]
-:if ($validationError = "" && ([:len $sourceAfter] != 1 || $sourceAfter != $source || [/file get $sourceAfter type] != "file" || [/file get $sourceAfter size] != $sourceSize || [:convert [/file get $sourceAfter contents] transform=sha512 to=hex] != $sourceDigest)) do={
+:if ($validationError = "" && ([:len $sourceAfter] != 1 || $sourceAfter != $source || [/file get $sourceAfter type] != $sourceType || [/file get $sourceAfter size] != $sourceSize || [:convert [/file get $sourceAfter contents] transform=sha512 to=hex] != $sourceDigest)) do={
   :set validationError "persistent FoxOS CA changed or was consumed during import"
 }
 :local temporaryAfter [/file find where name=$temporaryName]
@@ -136,7 +141,7 @@
     }
   }
   :set temporaryAfter [/file find where name=$temporaryName]
-  :if ([:len $temporaryAfter] = 1 && [/file get $temporaryAfter type] = "file" && [/file get $temporaryAfter size] = $sourceSize && [:convert [/file get $temporaryAfter contents] transform=sha512 to=hex] = $sourceDigest) do={
+  :if ([:len $temporaryAfter] = 1 && [/file get $temporaryAfter type] ~ "(^| )file\$" && [/file get $temporaryAfter size] = $sourceSize && [:convert [/file get $temporaryAfter contents] transform=sha512 to=hex] = $sourceDigest) do={
     :onerror cleanupFileError in={ /file remove $temporaryAfter } do={ :set cleanupFailed true }
   }
   :if ([:len [/file find where name=$temporaryName]] != 0) do={ :set cleanupFailed true }
@@ -159,7 +164,7 @@
 :if ([:len $finalCA] != 1 || $finalCA != $caAfter || ([/certificate get $finalCA trusted] != true && [/certificate get $finalCA trusted] != "yes") || [/certificate get $finalCA fingerprint] != $fingerprint) do={
   :error "FoxOS CA trusted certificate readback failed"
 }
-:if ([:len $finalSource] != 1 || $finalSource != $source || [/file get $finalSource size] != $sourceSize || [:convert [/file get $finalSource contents] transform=sha512 to=hex] != $sourceDigest || [:len [/file find where name=$temporaryName]] != 0) do={
+:if ([:len $finalSource] != 1 || $finalSource != $source || [/file get $finalSource type] != $sourceType || [/file get $finalSource size] != $sourceSize || [:convert [/file get $finalSource contents] transform=sha512 to=hex] != $sourceDigest || [:len [/file find where name=$temporaryName]] != 0) do={
   :error "FoxOS CA persistent source or temporary-file final readback failed"
 }
 :put ("FOXOS CA TRUST PASS source=" . $sourcePath . " fingerprint=" . $fingerprint . " temporary-residual=0")

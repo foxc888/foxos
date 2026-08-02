@@ -1077,11 +1077,14 @@ routeros_native_handle_contract() {
 foxos_ca_trust_contract() {
   local script=$1
   local invariant copy_line import_line confirmation_line trust_line
+  local temporary_guard_count temporary_after_guard_count
   for invariant in \
     ':global FoxOSCATrustConfirmation' \
     ':set FoxOSCATrustConfirmation ""' \
     ':local sourcePath ($FoxOSSiteStorageRoot . "/foxos-data/tls/foxos-local-ca.pem")' \
     ':local temporaryName "foxos-local-ca-import.pem"' \
+    ':local sourceType [/file get $source type]' \
+    '!($sourceType ~ "(^| )file\$")' \
     '[:find $sourceContents $beginMarker ($firstBegin + [:len $beginMarker])]' \
     ':local certificateBefore [/certificate find]' \
     ':local sourceDigest [:convert $sourceContents transform=sha512 to=hex]' \
@@ -1089,6 +1092,7 @@ foxos_ca_trust_contract() {
     '[:convert [/file get $temporary contents] transform=sha512 to=hex] != $sourceDigest' \
     '/certificate/import file-name=$temporaryName passphrase="" trusted=no' \
     '$sourceAfter != $source' \
+    '[/file get $sourceAfter type] != $sourceType' \
     '[:convert [/file get $sourceAfter contents] transform=sha512 to=hex] != $sourceDigest' \
     ':local certificateAfter [/certificate find]' \
     ':local expectedNewCertificateCount 1' \
@@ -1098,11 +1102,18 @@ foxos_ca_trust_contract() {
     ':local fingerprint [/certificate get $trustedCA fingerprint]' \
     '$confirmation != ("TRUST " . $fingerprint)' \
     '/certificate set $trustedCA trusted=yes' \
+    '[/file get $finalSource type] != $sourceType' \
     'FOXOS CA TRUST PASS'; do
     rg -Fq -- "$invariant" "$script" || return 1
   done
   if rg -q '/certificate/import[^#]*(file-name=\$sourcePath|foxos-data/tls/foxos-local-ca\.pem)' "$script" \
-    || rg -q '/certificate/import[^#]*trusted=yes' "$script"; then
+    || rg -q '/certificate/import[^#]*trusted=yes' "$script" \
+    || rg -q '(\$sourceType|\[/file get \$(source|sourceAfter|finalSource|temporary|temporaryAfter) type\])[[:space:]]*(=|!=)[[:space:]]*"file"' "$script"; then
+    return 1
+  fi
+  temporary_guard_count=$(rg -F --count-matches -- '!([/file get $temporary type] ~ "(^| )file\$")' "$script" || true)
+  temporary_after_guard_count=$(rg -F --count-matches -- '[/file get $temporaryAfter type] ~ "(^| )file\$"' "$script" || true)
+  if [[ "$temporary_guard_count" != 2 || "$temporary_after_guard_count" != 1 ]]; then
     return 1
   fi
   copy_line=$(rg -n -F '/file copy number=$source name=$temporaryName' "$script" | cut -d: -f1)
@@ -1116,12 +1127,15 @@ foxos_ca_trust_contract() {
 foxos_verify_tls_restart_contract() {
   local script=$1
   local invariant
-  if rg -q '/container(?:/set|[[:space:]]+set)[^#]*start-on-boot' "$script"; then
+  if rg -q '/container(?:/set|[[:space:]]+set)[^#]*start-on-boot' "$script" \
+    || rg -q '(\$tlsFileType|\[/file get \$tlsFile type\])[[:space:]]*(=|!=)[[:space:]]*"file"' "$script"; then
     return 1
   fi
   for invariant in \
     '"foxos-local-ca.pem";"foxos-local-ca-key.pem";"foxos.pem";"foxos-key.pem"' \
     'persistent TLS material is missing, ambiguous, or empty' \
+    ':local tlsFileType [/file get $tlsFile type]' \
+    '!($tlsFileType ~ "(^| )file\$")' \
     ':local trustedCA [/certificate find where common-name="FoxOS Local CA"]' \
     '[:len [/certificate get $trustedCA fingerprint]] != 64' \
     'container autostart changed before scheduler enable' \
@@ -2686,10 +2700,41 @@ if cmp -s "$rsc_root/foxos-trust-ca.rsc" "$site_seal_root/lifecycle/ca-certifica
 elif foxos_ca_trust_contract "$site_seal_root/lifecycle/ca-certificate-delta-weakened.rsc"; then
   report "CA trust contract accepted an imported certificate outside the frozen expected delta"
 fi
+awk 'index($0, ":if (!($sourceType ~ ") { print ":if ($sourceType != \"file\") do={"; next } { print }' \
+  "$rsc_root/foxos-trust-ca.rsc" > "$site_seal_root/lifecycle/ca-extension-aware-file-type-missing.rsc"
+if cmp -s "$rsc_root/foxos-trust-ca.rsc" "$site_seal_root/lifecycle/ca-extension-aware-file-type-missing.rsc"; then
+  report "CA extension-aware file-type failure injection did not mutate foxos-trust-ca.rsc"
+elif foxos_ca_trust_contract "$site_seal_root/lifecycle/ca-extension-aware-file-type-missing.rsc"; then
+  report "CA trust contract accepted an exact file type check that rejects RouterOS .pem file values"
+fi
+awk '
+  function replace_literal(line, old, replacement, position) {
+    position = index(line, old)
+    if (position == 0) return line
+    return substr(line, 1, position - 1) replacement substr(line, position + length(old))
+  }
+  {
+    line = replace_literal($0, "!([/file get $temporary type] ~ \"(^| )file\\$\")", "[/file get $temporary type] != \"file\"")
+    line = replace_literal(line, "[/file get $temporaryAfter type] ~ \"(^| )file\\$\"", "[/file get $temporaryAfter type] = \"file\"")
+    print line
+  }
+' "$rsc_root/foxos-trust-ca.rsc" > "$site_seal_root/lifecycle/ca-temporary-extension-aware-file-type-missing.rsc"
+if cmp -s "$rsc_root/foxos-trust-ca.rsc" "$site_seal_root/lifecycle/ca-temporary-extension-aware-file-type-missing.rsc"; then
+  report "CA temporary extension-aware file-type failure injection did not mutate foxos-trust-ca.rsc"
+elif foxos_ca_trust_contract "$site_seal_root/lifecycle/ca-temporary-extension-aware-file-type-missing.rsc"; then
+  report "CA trust contract accepted exact file type checks for temporary RouterOS .pem file values"
+fi
 cp -- "$rsc_root/foxos-verify.rsc" "$site_seal_root/lifecycle/verify-container-restart-added.rsc"
 printf '%s\n' '/container/set [find where comment="foxos:active"] start-on-boot=no' >> "$site_seal_root/lifecycle/verify-container-restart-added.rsc"
 if foxos_verify_tls_restart_contract "$site_seal_root/lifecycle/verify-container-restart-added.rsc"; then
   report "FoxOS verify contract accepted a start-on-boot write that can restart a running container"
+fi
+awk 'index($0, ":if (!($tlsFileType ~ ") { print "  :if ($tlsFileType != \"file\" || [/file get $tlsFile size] = 0) do={"; next } { print }' \
+  "$rsc_root/foxos-verify.rsc" > "$site_seal_root/lifecycle/verify-extension-aware-file-type-missing.rsc"
+if cmp -s "$rsc_root/foxos-verify.rsc" "$site_seal_root/lifecycle/verify-extension-aware-file-type-missing.rsc"; then
+  report "verify extension-aware file-type failure injection did not mutate foxos-verify.rsc"
+elif foxos_verify_tls_restart_contract "$site_seal_root/lifecycle/verify-extension-aware-file-type-missing.rsc"; then
+  report "FoxOS verify accepted an exact file type check that rejects RouterOS .pem file values"
 fi
 
 sed '/:if (\$architecture = "x86" || \$architecture = "x86_64") do={ :set imageArchitecture "amd64" }/d' \

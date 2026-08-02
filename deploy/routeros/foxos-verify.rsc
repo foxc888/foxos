@@ -54,7 +54,11 @@
 :foreach tlsFileName in={"foxos-local-ca.pem";"foxos-local-ca-key.pem";"foxos.pem";"foxos-key.pem"} do={
   :local tlsFilePath ($FoxOSSiteStorageRoot . "/foxos-data/tls/" . $tlsFileName)
   :local tlsFile [/file find where name=$tlsFilePath]
-  :if ([:len $tlsFile] != 1 || [/file get $tlsFile type] != "file" || [/file get $tlsFile size] = 0) do={
+  :if ([:len $tlsFile] != 1) do={
+    :error ("persistent TLS material is missing, ambiguous, or empty: " . $tlsFilePath)
+  }
+  :local tlsFileType [/file get $tlsFile type]
+  :if (!($tlsFileType ~ "(^| )file\$") || [/file get $tlsFile size] = 0) do={
     :error ("persistent TLS material is missing, ambiguous, or empty: " . $tlsFilePath)
   }
 }
