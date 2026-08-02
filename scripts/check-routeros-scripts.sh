@@ -1067,6 +1067,11 @@ mount_native_handle_contract() {
   ! rg -q -g '*.rsc' '/container/mounts get[[:space:]]+\$[A-Za-z][A-Za-z0-9]*[[:space:]]+\.id\]' "$target"
 }
 
+routeros_native_handle_contract() {
+  local target=$1
+  ! rg -q -g '*.rsc' '/[A-Za-z0-9/-]+(?:/get|[[:space:]]+get)[^#]*(?:[[:space:]]+\.id|[[:space:]]+value-name[[:space:]]*=[[:space:]]*\.id)[[:space:]]*\]' "$target"
+}
+
 install_env_native_handle_contract() {
   local script=$1
   ! rg -q '/container/envs get[[:space:]]+\$[A-Za-z][A-Za-z0-9]*[[:space:]]+(?:\.id|value-name[[:space:]]*=[[:space:]]*\.id)[[:space:]]*\]' "$script"
@@ -1168,17 +1173,17 @@ cleanup_inspector_contract() {
     && rg -Fq '|active=" . [:pick $active 0]' "$script" \
     && rg -Fq '|rollback=" . [:pick $retirement 0]' "$script" \
     && rg -Fq '|admin-slot=" . $adminSlot' "$script" \
-    && rg -Fq '|veth=" . [/interface/veth get $foxosVeth .id]' "$script" \
+    && rg -Fq '|veth=" . [:pick $foxosVeth 0]' "$script" \
     && rg -Fq '|mount=" . [:pick $mountID 0]' "$script" \
     && rg -Fq ':local startScriptByName [/system/script find where name="foxos-start-sequence"]' "$script" \
     && rg -Fq ':local startScriptByOwner [/system/script find where comment="foxos:start-sequence"]' "$script" \
-    && rg -Fq '[/system/script get $startScriptByName .id] != [/system/script get $startScriptByOwner .id]' "$script" \
-    && rg -Fq '|start-script=" . [/system/script get $startScriptByName .id]' "$script" \
+    && rg -Fq '$startScriptByName != $startScriptByOwner' "$script" \
+    && rg -Fq '|start-script=" . [:pick $startScriptByName 0]' "$script" \
     && rg -Fq ':local schedulerByName [/system/scheduler find where name="foxos-start-sequence"]' "$script" \
     && rg -Fq ':local schedulerByOwner [/system/scheduler find where comment="foxos:start-sequence"]' "$script" \
-    && rg -Fq '[/system/scheduler get $schedulerByName .id] != [/system/scheduler get $schedulerByOwner .id]' "$script" \
+    && rg -Fq '$schedulerByName != $schedulerByOwner' "$script" \
     && rg -Fq '[/system/scheduler get $schedulerByName disabled] != false' "$script" \
-    && rg -Fq '|scheduler=" . [/system/scheduler get $schedulerByName .id]' "$script" \
+    && rg -Fq '|scheduler=" . [:pick $schedulerByName 0]' "$script" \
     && rg -Fq '[/system/scheduler get $schedulerByName disabled])' "$script" \
     && rg -Fq ':set FoxOSUpgradeCleanupActiveID $active' "$script" \
     && rg -Fq ':set FoxOSUpgradeCleanupRollbackID $retirement' "$script"
@@ -1420,19 +1425,19 @@ lifecycle_start_sequence_contract() {
     && rg -Fq 'load-site-config.rsc; /import file-name=' "$script" \
     && rg -Fq ':local startScriptByName [/system/script find where name="foxos-start-sequence"]' "$script" \
     && rg -Fq ':local startScriptByOwner [/system/script find where comment="foxos:start-sequence"]' "$script" \
-    && rg -Fq '[/system/script get $startScriptByName .id] != [/system/script get $startScriptByOwner .id]' "$script" \
+    && rg -Fq '$startScriptByName != $startScriptByOwner' "$script" \
     && rg -Fq '[/system/script get $startScriptByName source] != $expectedStartSource' "$script" \
     && rg -Fq '[/system/script get $startScriptByName policy] != {"read";"write";"test"}' "$script" \
-    && rg -q '\|start-script=" \. \[/system/script get \$startScriptByName \.id\]' "$script" \
+    && rg -Fq '|start-script=" . [:pick $startScriptByName 0]' "$script" \
     && rg -Fq ":local $scheduler_owner_var [/system/scheduler find where comment=\"foxos:start-sequence\"]" "$script" \
-    && rg -Fq "[/system/scheduler get \$$scheduler_name_var .id] != [/system/scheduler get \$$scheduler_owner_var .id]" "$script" \
+    && rg -Fq "\$$scheduler_name_var != \$$scheduler_owner_var" "$script" \
     && rg -Fq "[/system/scheduler get \$$scheduler_name_var on-event] != \"foxos-start-sequence\"" "$script" \
     && rg -Fq "[/system/scheduler get \$$scheduler_name_var start-time] != \"startup\"" "$script" \
     && rg -Fq "[/system/scheduler get \$$scheduler_name_var interval] != 0s" "$script" \
     && rg -Fq "[/system/scheduler get \$$scheduler_name_var policy] != {\"read\";\"write\";\"test\"}" "$script" \
     && rg -q '(disabled\] != false|Disabled != false)' "$script" \
     && rg -q '(disabled\] != "no"|Disabled != "no")' "$script" \
-    && rg -q '\|(start-scheduler|scheduler)=" \. \[/system/scheduler get \$[A-Za-z][A-Za-z0-9]* \.id\]' "$script"
+    && rg -q '\|(start-scheduler|scheduler)=" \. \[:pick \$[A-Za-z][A-Za-z0-9]* 0\]' "$script"
 }
 
 routeros_parse_safety_contract() {
@@ -1506,6 +1511,13 @@ if rg -n -F -g '*.rsc' '".."' "$rsc_root"; then
 fi
 if rg -n -g '*.rsc' 'architecture[^#]*!=[^#]*"x86"' "$rsc_root"; then
   report "found a stale direct architecture-name=x86 rejection instead of amd64 normalization"
+fi
+if ! routeros_native_handle_contract "$rsc_root"; then
+  report "RouterOS object identity uses unsupported .id readback instead of native find handles"
+fi
+if ! rg -Fq ':set material ($material . "|env:" . $envID . ":" . $envKey . ":" . $valueDigest)' "$rsc_root/foxos-uninstall-inspect.rsc" \
+  || ! rg -Fq ':set material ($material . "|mosdns-env:" . $envID . ":" . $envKey)' "$rsc_root/foxos-uninstall-inspect.rsc"; then
+  report "uninstall digest does not preserve native foreach IDs"
 fi
 if rg -n -g '*.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (\.id|status)\]|value-name=(\.id|status)' "$rsc_root"; then
   report "container identity or state uses unsupported RouterOS .id/status readback instead of native handles and dynamic flags"
@@ -2364,6 +2376,9 @@ if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/insta
 elif install_start_id_readback_forbidden "$site_seal_root/lifecycle/install-start-script-id-readback.rsc"; then
   report "start-script native-handle contract accepted install .id readback"
 fi
+if routeros_native_handle_contract "$site_seal_root/lifecycle/install-start-script-id-readback.rsc"; then
+  report "global native-handle contract accepted spaced get .id readback"
+fi
 sed '/:local schedulerByOwner /a\
   :local forbiddenSchedulerID [/system/scheduler/get [/system/scheduler find where name="foxos-start-sequence"] value-name=.id]' \
   "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/install-scheduler-id-readback.rsc"
@@ -2371,6 +2386,9 @@ if cmp -s "$rsc_root/foxos-install-inspect.rsc" "$site_seal_root/lifecycle/insta
   report "install scheduler handle failure injection did not mutate the inspector"
 elif install_start_id_readback_forbidden "$site_seal_root/lifecycle/install-scheduler-id-readback.rsc"; then
   report "scheduler native-handle contract accepted install value-name=.id readback"
+fi
+if routeros_native_handle_contract "$site_seal_root/lifecycle/install-scheduler-id-readback.rsc"; then
+  report "global native-handle contract accepted slash-get value-name=.id readback"
 fi
 sed '/FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR"/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-confirmation-missing.rsc"

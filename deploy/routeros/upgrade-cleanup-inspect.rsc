@@ -110,14 +110,14 @@
 
 :local installMarkers [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER"]
 :if ([:len $installMarkers] != 1 || [/container/envs get $installMarkers value] != "foxos:complete") do={ :error "foxos-env 必须处于唯一 foxos:complete 状态" }
-:set material ($material . "|marker=" . [/container/envs get $installMarkers .id] . ":" . [/container/envs get $installMarkers value])
+:set material ($material . "|marker=" . [:pick $installMarkers 0] . ":" . [/container/envs get $installMarkers value])
 
 :local foxosVeth [/interface/veth find where name="veth-foxos"]
 :local expectedFoxOSCIDR ($FoxOSSiteFoxOSAddress . "/" . $FoxOSSitePrefixLength)
 :if ([:len $foxosVeth] != 1 || [/interface/veth get $foxosVeth comment] != "foxos:admin" || [/interface/veth get $foxosVeth address] != $expectedFoxOSCIDR || [/interface/veth get $foxosVeth gateway] != $FoxOSSiteRouterAddress) do={
   :error "veth-foxos 身份、地址或网关不匹配"
 }
-:set material ($material . "|veth=" . [/interface/veth get $foxosVeth .id] . ":" . [/interface/veth get $foxosVeth comment] . ":" . [/interface/veth get $foxosVeth address] . ":" . [/interface/veth get $foxosVeth gateway])
+:set material ($material . "|veth=" . [:pick $foxosVeth 0] . ":" . [/interface/veth get $foxosVeth comment] . ":" . [/interface/veth get $foxosVeth address] . ":" . [/interface/veth get $foxosVeth gateway])
 
 :local sharedMountDefinitions {"foxos-mihomo-config|mihomo-config|/data/mihomo";"foxos-data|foxos-data|/data";"foxos-backups|foxos-backups|/backups"}
 :local verifiedSharedMounts 0
@@ -142,17 +142,17 @@
 :local expectedStartSource (":delay 20s; /import file-name=" . $FoxOSSiteStorageRoot . "/load-site-config.rsc; /import file-name=" . $FoxOSSiteStorageRoot . "/foxos-start-all.rsc")
 :local startScriptByName [/system/script find where name="foxos-start-sequence"]
 :local startScriptByOwner [/system/script find where comment="foxos:start-sequence"]
-:if ([:len $startScriptByName] != 1 || [:len $startScriptByOwner] != 1 || [/system/script get $startScriptByName .id] != [/system/script get $startScriptByOwner .id] || [/system/script get $startScriptByName source] != $expectedStartSource || [/system/script get $startScriptByName policy] != {"read";"write";"test"}) do={
+:if ([:len $startScriptByName] != 1 || [:len $startScriptByOwner] != 1 || $startScriptByName != $startScriptByOwner || [/system/script get $startScriptByName source] != $expectedStartSource || [/system/script get $startScriptByName policy] != {"read";"write";"test"}) do={
   :error "冷启动 system script 的唯一性、所有权或内容不匹配"
 }
-:set material ($material . "|start-script=" . [/system/script get $startScriptByName .id] . ":" . [/system/script get $startScriptByName name] . ":" . [/system/script get $startScriptByName comment] . ":" . [/system/script get $startScriptByName source] . ":" . [:tostr [/system/script get $startScriptByName policy]])
+:set material ($material . "|start-script=" . [:pick $startScriptByName 0] . ":" . [/system/script get $startScriptByName name] . ":" . [/system/script get $startScriptByName comment] . ":" . [/system/script get $startScriptByName source] . ":" . [:tostr [/system/script get $startScriptByName policy]])
 
 :local schedulerByName [/system/scheduler find where name="foxos-start-sequence"]
 :local schedulerByOwner [/system/scheduler find where comment="foxos:start-sequence"]
-:if ([:len $schedulerByName] != 1 || [:len $schedulerByOwner] != 1 || [/system/scheduler get $schedulerByName .id] != [/system/scheduler get $schedulerByOwner .id] || [/system/scheduler get $schedulerByName on-event] != "foxos-start-sequence" || [/system/scheduler get $schedulerByName start-time] != "startup" || [/system/scheduler get $schedulerByName interval] != 0s || [/system/scheduler get $schedulerByName policy] != {"read";"write";"test"} || ([/system/scheduler get $schedulerByName disabled] != false && [/system/scheduler get $schedulerByName disabled] != "no")) do={
+:if ([:len $schedulerByName] != 1 || [:len $schedulerByOwner] != 1 || $schedulerByName != $schedulerByOwner || [/system/scheduler get $schedulerByName on-event] != "foxos-start-sequence" || [/system/scheduler get $schedulerByName start-time] != "startup" || [/system/scheduler get $schedulerByName interval] != 0s || [/system/scheduler get $schedulerByName policy] != {"read";"write";"test"} || ([/system/scheduler get $schedulerByName disabled] != false && [/system/scheduler get $schedulerByName disabled] != "no")) do={
   :error "冷启动 scheduler 的唯一性、所有权、内容或 enabled 状态不匹配"
 }
-:set material ($material . "|scheduler=" . [/system/scheduler get $schedulerByName .id] . ":" . [/system/scheduler get $schedulerByName name] . ":" . [/system/scheduler get $schedulerByName comment] . ":" . [/system/scheduler get $schedulerByName on-event] . ":" . [/system/scheduler get $schedulerByName start-time] . ":" . [/system/scheduler get $schedulerByName interval] . ":" . [:tostr [/system/scheduler get $schedulerByName policy]] . ":" . [/system/scheduler get $schedulerByName disabled])
+:set material ($material . "|scheduler=" . [:pick $schedulerByName 0] . ":" . [/system/scheduler get $schedulerByName name] . ":" . [/system/scheduler get $schedulerByName comment] . ":" . [/system/scheduler get $schedulerByName on-event] . ":" . [/system/scheduler get $schedulerByName start-time] . ":" . [/system/scheduler get $schedulerByName interval] . ":" . [:tostr [/system/scheduler get $schedulerByName policy]] . ":" . [/system/scheduler get $schedulerByName disabled])
 
 :local digest [:convert $material transform=sha512 to=hex]
 :if ([:len $digest] != 128) do={ :error "无法生成 rollback 归档摘要" }
@@ -163,6 +163,6 @@
 :if ($FoxOSUpgradeCleanupInspectVerbose) do={
   :put ("KEEP active id=" . [:pick $active 0] . " name=" . $activeName . " status=running root-dir=" . [$FoxOSContainerRoot $active])
   :put ("RETAIN rollback id=" . [:pick $retirement 0] . " name=" . $retirementName . " marker=" . $sourceMarker . " status=stopped root-dir=" . [$FoxOSContainerRoot $retirement])
-  :put ("KEEP enabled scheduler id=" . [/system/scheduler get $schedulerByName .id] . " and system script id=" . [/system/script get $startScriptByName .id])
+  :put ("KEEP enabled scheduler id=" . [:pick $schedulerByName 0] . " and system script id=" . [:pick $startScriptByName 0])
   :put ("PLAN DIGEST SHA-512 " . $digest)
 }

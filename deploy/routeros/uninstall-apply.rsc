@@ -132,7 +132,7 @@
 
 :local scheduler $schedulerSnapshot
 :local currentScheduler [/system/scheduler find where name="foxos-start-sequence"]
-:if ([:len $currentScheduler] != [:len $scheduler] || ([:len $scheduler] = 1 && [/system/scheduler get $currentScheduler .id] != [/system/scheduler get $scheduler .id])) do={ :error "冷启动 scheduler ID 在摘要确认后变化" }
+:if ([:len $currentScheduler] != [:len $scheduler] || ([:len $scheduler] = 1 && $currentScheduler != $scheduler)) do={ :error "冷启动 scheduler ID 在摘要确认后变化" }
 :if ([:len $scheduler] > 0) do={
   :if ([:len $scheduler] != 1 || [/system/scheduler get $scheduler comment] != "foxos:start-sequence" || [/system/scheduler get $scheduler on-event] != "foxos-start-sequence" || [/system/scheduler get $scheduler start-time] != "startup" || [/system/scheduler get $scheduler interval] != 0s || [/system/scheduler get $scheduler policy] != {"read";"write";"test"}) do={ :error "冷启动 scheduler 回读冲突" }
   /system/scheduler set $scheduler disabled=yes
@@ -160,7 +160,7 @@
 
 :local dnsRecord $dnsRecordSnapshot
 :local currentDNSRecord [/ip/dns/static find where comment="foxos:dns:admin"]
-:if ([:len $currentDNSRecord] != [:len $dnsRecord] || ([:len $dnsRecord] = 1 && [/ip/dns/static get $currentDNSRecord .id] != [/ip/dns/static get $dnsRecord .id])) do={ :error "DNS 删除对象 ID 在摘要确认后变化" }
+:if ([:len $currentDNSRecord] != [:len $dnsRecord] || ([:len $dnsRecord] = 1 && $currentDNSRecord != $dnsRecord)) do={ :error "DNS 删除对象 ID 在摘要确认后变化" }
 :if ([:len $dnsRecord] > 0) do={
   :if ([:len $dnsRecord] != 1 || [/ip/dns/static get $dnsRecord name] != $FoxOSSitePublicHostname || [/ip/dns/static get $dnsRecord type] != "A" || [/ip/dns/static get $dnsRecord address] != $FoxOSSiteFoxOSAddress) do={ :error "DNS 所有权内容变化；停止卸载" }
   /ip/dns/static/remove $dnsRecord
@@ -179,13 +179,13 @@
   :if ($vethName = "veth-mosdns") do={ :set portID $mosdnsPortSnapshot; :set vethID $mosdnsVethSnapshot }
   :if ($vethName = "veth-foxos") do={ :set portID $foxosPortSnapshot; :set vethID $foxosVethSnapshot }
   :local currentPortID [/interface/bridge/port find where interface=$vethName]
-  :if ([:len $currentPortID] != [:len $portID] || ([:len $portID] = 1 && [/interface/bridge/port get $currentPortID .id] != [/interface/bridge/port get $portID .id])) do={ :error ("bridge port ID 在摘要确认后变化: " . $vethName) }
+  :if ([:len $currentPortID] != [:len $portID] || ([:len $portID] = 1 && $currentPortID != $portID)) do={ :error ("bridge port ID 在摘要确认后变化: " . $vethName) }
   :if ([:len $portID] > 0) do={
     :if ([:len $portID] != 1 || [/interface/bridge/port get $portID bridge] != $FoxOSSiteManagementBridge || [/interface/bridge/port get $portID comment] != $owner) do={ :error ("bridge port 回读冲突: " . $vethName) }
     /interface/bridge/port/remove $portID
   }
   :local currentVethID [/interface/veth find where name=$vethName]
-  :if ([:len $currentVethID] != [:len $vethID] || ([:len $vethID] = 1 && [/interface/veth get $currentVethID .id] != [/interface/veth get $vethID .id])) do={ :error ("veth ID 在摘要确认后变化: " . $vethName) }
+  :if ([:len $currentVethID] != [:len $vethID] || ([:len $vethID] = 1 && $currentVethID != $vethID)) do={ :error ("veth ID 在摘要确认后变化: " . $vethName) }
   :if ([:len $vethID] > 0) do={
     :if ([:len $vethID] != 1 || [/interface/veth get $vethID comment] != $owner || [/interface/veth get $vethID address] != $expectedAddress || [/interface/veth get $vethID gateway] != $FoxOSSiteRouterAddress) do={ :error ("veth 回读冲突: " . $vethName) }
     /interface/veth/remove $vethID
@@ -194,14 +194,14 @@
 
 :local serviceUser $serviceUserSnapshot
 :local currentServiceUser [/user find where name="foxos-service"]
-:if ([:len $currentServiceUser] != [:len $serviceUser] || ([:len $serviceUser] = 1 && [/user get $currentServiceUser .id] != [/user get $serviceUser .id])) do={ :error "foxos-service ID 在摘要确认后变化" }
+:if ([:len $currentServiceUser] != [:len $serviceUser] || ([:len $serviceUser] = 1 && $currentServiceUser != $serviceUser)) do={ :error "foxos-service ID 在摘要确认后变化" }
 :if ([:len $serviceUser] > 0) do={
   :if ([:len $serviceUser] != 1 || [/user get $serviceUser comment] != "foxos:service" || [/user get $serviceUser group] != "foxos-rest" || [/user get $serviceUser address] != ($FoxOSSiteFoxOSAddress . "/32")) do={ :error "foxos-service 回读冲突" }
   /user/remove $serviceUser
 }
 :local serviceGroup $serviceGroupSnapshot
 :local currentServiceGroup [/user/group find where name="foxos-rest"]
-:if ([:len $currentServiceGroup] != [:len $serviceGroup] || ([:len $serviceGroup] = 1 && [/user/group get $currentServiceGroup .id] != [/user/group get $serviceGroup .id])) do={ :error "foxos-rest ID 在摘要确认后变化" }
+:if ([:len $currentServiceGroup] != [:len $serviceGroup] || ([:len $serviceGroup] = 1 && $currentServiceGroup != $serviceGroup)) do={ :error "foxos-rest ID 在摘要确认后变化" }
 :if ([:len $serviceGroup] > 0) do={
   :if ([:len $serviceGroup] != 1 || [$FoxOSServiceGroupPolicyMatches $serviceGroup] = false) do={ :error "foxos-rest 回读冲突" }
   /user/group/remove $serviceGroup
@@ -301,7 +301,7 @@
 :local expectedStartSource (":delay 20s; /import file-name=" . $FoxOSSiteStorageRoot . "/load-site-config.rsc; /import file-name=" . $FoxOSSiteStorageRoot . "/foxos-start-all.rsc")
 :local startScript $startScriptSnapshot
 :local currentStartScript [/system/script find where name="foxos-start-sequence"]
-:if ([:len $currentStartScript] != [:len $startScript] || ([:len $startScript] = 1 && [/system/script get $currentStartScript .id] != [/system/script get $startScript .id])) do={ :error "冷启动协调脚本 ID 在摘要确认后变化" }
+:if ([:len $currentStartScript] != [:len $startScript] || ([:len $startScript] = 1 && $currentStartScript != $startScript)) do={ :error "冷启动协调脚本 ID 在摘要确认后变化" }
 :if ([:len $startScript] > 0) do={
   :if ([:len $startScript] != 1 || [/system/script get $startScript comment] != "foxos:start-sequence" || [/system/script get $startScript source] != $expectedStartSource || [/system/script get $startScript policy] != {"read";"write";"test"}) do={ :error "冷启动协调脚本回读冲突" }
   /system/script remove $startScript

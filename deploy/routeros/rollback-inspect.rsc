@@ -68,7 +68,7 @@
 
 :local installMarkers [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER"]
 :if ([:len $installMarkers] != 1 || [/container/envs get $installMarkers value] != "foxos:complete") do={ :error "foxos-env 必须处于唯一 foxos:complete 状态" }
-:set material ($material . "|marker=" . [/container/envs get $installMarkers .id] . ":" . [/container/envs get $installMarkers value])
+:set material ($material . "|marker=" . [:pick $installMarkers 0] . ":" . [/container/envs get $installMarkers value])
 :local apiToken [$FoxOSSecretRead "api-token"]
 :if ([:len $apiToken] < 32) do={ :error "api-token secret file does not meet the security baseline" }
 :foreach secretName in=$FoxOSSecretFileNames do={
@@ -78,23 +78,23 @@
 :local foxosVeth [/interface/veth find where name="veth-foxos"]
 :local expectedFoxOSCIDR ($FoxOSSiteFoxOSAddress . "/" . $FoxOSSitePrefixLength)
 :if ([:len $foxosVeth] != 1 || [/interface/veth get $foxosVeth comment] != "foxos:admin" || [/interface/veth get $foxosVeth address] != $expectedFoxOSCIDR || [/interface/veth get $foxosVeth gateway] != $FoxOSSiteRouterAddress) do={ :error "veth-foxos 身份、地址或网关不匹配" }
-:set material ($material . "|veth=" . [/interface/veth get $foxosVeth .id] . ":" . [/interface/veth get $foxosVeth address] . ":" . [/interface/veth get $foxosVeth gateway])
+:set material ($material . "|veth=" . [:pick $foxosVeth 0] . ":" . [/interface/veth get $foxosVeth address] . ":" . [/interface/veth get $foxosVeth gateway])
 
 :local expectedStartSource (":delay 20s; /import file-name=" . $FoxOSSiteStorageRoot . "/load-site-config.rsc; /import file-name=" . $FoxOSSiteStorageRoot . "/foxos-start-all.rsc")
 :local startScriptByName [/system/script find where name="foxos-start-sequence"]
 :local startScriptByOwner [/system/script find where comment="foxos:start-sequence"]
-:if ([:len $startScriptByName] != 1 || [:len $startScriptByOwner] != 1 || [/system/script get $startScriptByName .id] != [/system/script get $startScriptByOwner .id] || [/system/script get $startScriptByName source] != $expectedStartSource || [/system/script get $startScriptByName policy] != {"read";"write";"test"}) do={
+:if ([:len $startScriptByName] != 1 || [:len $startScriptByOwner] != 1 || $startScriptByName != $startScriptByOwner || [/system/script get $startScriptByName source] != $expectedStartSource || [/system/script get $startScriptByName policy] != {"read";"write";"test"}) do={
   :error "冷启动协调脚本的名称、owner、内容或 policy 不匹配"
 }
 :local startSchedulerByName [/system/scheduler find where name="foxos-start-sequence"]
 :local startSchedulerByOwner [/system/scheduler find where comment="foxos:start-sequence"]
 :local startSchedulerDisabled ""
 :if ([:len $startSchedulerByName] = 1) do={ :set startSchedulerDisabled [/system/scheduler get $startSchedulerByName disabled] }
-:if ([:len $startSchedulerByName] != 1 || [:len $startSchedulerByOwner] != 1 || [/system/scheduler get $startSchedulerByName .id] != [/system/scheduler get $startSchedulerByOwner .id] || [/system/scheduler get $startSchedulerByName on-event] != "foxos-start-sequence" || [/system/scheduler get $startSchedulerByName start-time] != "startup" || [/system/scheduler get $startSchedulerByName interval] != 0s || [/system/scheduler get $startSchedulerByName policy] != {"read";"write";"test"} || ($startSchedulerDisabled != false && $startSchedulerDisabled != "no")) do={
+:if ([:len $startSchedulerByName] != 1 || [:len $startSchedulerByOwner] != 1 || $startSchedulerByName != $startSchedulerByOwner || [/system/scheduler get $startSchedulerByName on-event] != "foxos-start-sequence" || [/system/scheduler get $startSchedulerByName start-time] != "startup" || [/system/scheduler get $startSchedulerByName interval] != 0s || [/system/scheduler get $startSchedulerByName policy] != {"read";"write";"test"} || ($startSchedulerDisabled != false && $startSchedulerDisabled != "no")) do={
   :error "冷启动 scheduler 的名称、owner、事件、时序、policy 或启用状态不匹配"
 }
-:set material ($material . "|start-script=" . [/system/script get $startScriptByName .id] . ":" . [/system/script get $startScriptByName comment] . ":" . [/system/script get $startScriptByName source] . ":" . [:tostr [/system/script get $startScriptByName policy]])
-:set material ($material . "|start-scheduler=" . [/system/scheduler get $startSchedulerByName .id] . ":" . [/system/scheduler get $startSchedulerByName comment] . ":" . [/system/scheduler get $startSchedulerByName on-event] . ":" . [/system/scheduler get $startSchedulerByName start-time] . ":" . [/system/scheduler get $startSchedulerByName interval] . ":" . [:tostr [/system/scheduler get $startSchedulerByName policy]] . ":" . $startSchedulerDisabled)
+:set material ($material . "|start-script=" . [:pick $startScriptByName 0] . ":" . [/system/script get $startScriptByName comment] . ":" . [/system/script get $startScriptByName source] . ":" . [:tostr [/system/script get $startScriptByName policy]])
+:set material ($material . "|start-scheduler=" . [:pick $startSchedulerByName 0] . ":" . [/system/scheduler get $startSchedulerByName comment] . ":" . [/system/scheduler get $startSchedulerByName on-event] . ":" . [/system/scheduler get $startSchedulerByName start-time] . ":" . [/system/scheduler get $startSchedulerByName interval] . ":" . [:tostr [/system/scheduler get $startSchedulerByName policy]] . ":" . $startSchedulerDisabled)
 
 :local sharedMountDefinitions {"foxos-mihomo-config|mihomo-config|/data/mihomo";"foxos-data|foxos-data|/data";"foxos-backups|foxos-backups|/backups"}
 :local verifiedSharedMounts 0

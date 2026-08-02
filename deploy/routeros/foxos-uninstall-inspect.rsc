@@ -122,11 +122,11 @@
   :set material ($material . "|start-script:DONE")
   :if ($FoxOSUninstallInspectVerbose) do={ :put "DONE system-script/foxos-start-sequence" }
 } else={
-  :if ([:len $startScriptByName] != 1 || [:len $startScriptByOwner] != 1 || [/system/script get $startScriptByName .id] != [/system/script get $startScriptByOwner .id] || [/system/script get $startScriptByName source] != $expectedStartSource || [/system/script get $startScriptByName policy] != {"read";"write";"test"}) do={
+  :if ([:len $startScriptByName] != 1 || [:len $startScriptByOwner] != 1 || $startScriptByName != $startScriptByOwner || [/system/script get $startScriptByName source] != $expectedStartSource || [/system/script get $startScriptByName policy] != {"read";"write";"test"}) do={
     :set failed true
   } else={
     :set remaining ($remaining + 1)
-    :set material ($material . "|start-script:REMOVE:" . [/system/script get $startScriptByName .id])
+    :set material ($material . "|start-script:REMOVE:" . [:pick $startScriptByName 0])
     :if ($FoxOSUninstallInspectVerbose) do={ :put "REMOVE system-script/foxos-start-sequence" }
   }
 }
@@ -136,11 +136,11 @@
   :set material ($material . "|scheduler:DONE")
   :if ($FoxOSUninstallInspectVerbose) do={ :put "DONE scheduler/foxos-start-sequence" }
 } else={
-  :if ([:len $schedulerByName] != 1 || [:len $schedulerByOwner] != 1 || [/system/scheduler get $schedulerByName .id] != [/system/scheduler get $schedulerByOwner .id] || [/system/scheduler get $schedulerByName on-event] != "foxos-start-sequence" || [/system/scheduler get $schedulerByName start-time] != "startup" || [/system/scheduler get $schedulerByName interval] != 0s || [/system/scheduler get $schedulerByName policy] != {"read";"write";"test"}) do={
+  :if ([:len $schedulerByName] != 1 || [:len $schedulerByOwner] != 1 || $schedulerByName != $schedulerByOwner || [/system/scheduler get $schedulerByName on-event] != "foxos-start-sequence" || [/system/scheduler get $schedulerByName start-time] != "startup" || [/system/scheduler get $schedulerByName interval] != 0s || [/system/scheduler get $schedulerByName policy] != {"read";"write";"test"}) do={
     :set failed true
   } else={
     :set remaining ($remaining + 1)
-    :set material ($material . "|scheduler:REMOVE:" . [/system/scheduler get $schedulerByName .id] . ":" . [/system/scheduler get $schedulerByName disabled] . ":" . [/system/scheduler get $schedulerByName interval] . ":" . [:tostr [/system/scheduler get $schedulerByName policy]])
+    :set material ($material . "|scheduler:REMOVE:" . [:pick $schedulerByName 0] . ":" . [/system/scheduler get $schedulerByName disabled] . ":" . [/system/scheduler get $schedulerByName interval] . ":" . [:tostr [/system/scheduler get $schedulerByName policy]])
     :if ($FoxOSUninstallInspectVerbose) do={ :put "REMOVE scheduler/foxos-start-sequence" }
   }
 }
@@ -162,7 +162,7 @@
     :local envKey [/container/envs get $envID key]
     :if ([:typeof [:find $allowedEnvKeys ("|" . $envKey . "|")]] = "nil") do={ :set failed true }
     :local valueDigest [:convert [/container/envs get $envID value] transform=sha512 to=hex]
-    :set material ($material . "|env:" . [/container/envs get $envID .id] . ":" . $envKey . ":" . $valueDigest)
+    :set material ($material . "|env:" . $envID . ":" . $envKey . ":" . $valueDigest)
     :set remaining ($remaining + 1)
   }
   :if ($FoxOSUninstallInspectVerbose) do={ :put ("REMOVE env/foxos-env entries=" . [:len $envItems]) }
@@ -210,7 +210,7 @@
   :foreach envID in=$mosdnsEnvItems do={
     :local envKey [/container/envs get $envID key]
     :if ($envKey != "FOXOS_INSTALL_MARKER" && $envKey != "MOSDNS_AUTO_INIT") do={ :set failed true }
-    :set material ($material . "|mosdns-env:" . [/container/envs get $envID .id] . ":" . $envKey)
+    :set material ($material . "|mosdns-env:" . $envID . ":" . $envKey)
     :set remaining ($remaining + 1)
   }
   :if ($FoxOSUninstallInspectVerbose) do={ :put ("REMOVE env/foxos-mosdns-env entries=" . [:len $mosdnsEnvItems]) }
@@ -222,7 +222,7 @@
 :if ([:len $userID] = 1) do={
   :if ([/user get $userID comment] != "foxos:service" || [/user get $userID group] != "foxos-rest" || [/user get $userID address] != ($FoxOSSiteFoxOSAddress . "/32")) do={ :set failed true }
   :set remaining ($remaining + 1)
-  :set material ($material . "|user:REMOVE:" . [/user get $userID .id])
+  :set material ($material . "|user:REMOVE:" . [:pick $userID 0])
   :if ($FoxOSUninstallInspectVerbose) do={ :put "REMOVE user/foxos-service" }
 } else={
   :set material ($material . "|user:DONE")
@@ -231,7 +231,7 @@
 :if ([:len $groupID] = 1) do={
   :if ([$FoxOSServiceGroupPolicyMatches $groupID] = false) do={ :set failed true }
   :set remaining ($remaining + 1)
-  :set material ($material . "|group:REMOVE:" . [/user/group get $groupID .id])
+  :set material ($material . "|group:REMOVE:" . [:pick $groupID 0])
   :if ($FoxOSUninstallInspectVerbose) do={ :put "REMOVE user-group/foxos-rest" }
 } else={
   :if ([:len $userID] = 1) do={ :set failed true }
@@ -274,7 +274,7 @@
   } else={
     :if ([:len $portID] != 1 || [/interface/bridge/port get $portID bridge] != $FoxOSSiteManagementBridge || [/interface/bridge/port get $portID comment] != $owner) do={ :set failed true }
     :set remaining ($remaining + 1)
-    :set material ($material . "|port:" . $vethName . ":REMOVE:" . [/interface/bridge/port get $portID .id])
+    :set material ($material . "|port:" . $vethName . ":REMOVE:" . [:pick $portID 0])
     :if ($FoxOSUninstallInspectVerbose) do={ :put ("REMOVE bridge-port/" . $vethName) }
   }
   :local vethID [/interface/veth find where name=$vethName]
@@ -284,7 +284,7 @@
   } else={
     :if ([:len $vethID] != 1 || [/interface/veth get $vethID comment] != $owner || [/interface/veth get $vethID address] != $expectedAddress || [/interface/veth get $vethID gateway] != $FoxOSSiteRouterAddress) do={ :set failed true }
     :set remaining ($remaining + 1)
-    :set material ($material . "|veth:" . $vethName . ":REMOVE:" . [/interface/veth get $vethID .id])
+    :set material ($material . "|veth:" . $vethName . ":REMOVE:" . [:pick $vethID 0])
     :if ($FoxOSUninstallInspectVerbose) do={ :put ("REMOVE veth/" . $vethName) }
   }
 }
@@ -295,7 +295,7 @@
 :if ([:len $dnsRecords] = 1) do={
   :if ([/ip/dns/static get $dnsRecords name] != $FoxOSSitePublicHostname || [/ip/dns/static get $dnsRecords type] != "A" || [/ip/dns/static get $dnsRecords address] != $FoxOSSiteFoxOSAddress) do={ :set failed true }
   :set remaining ($remaining + 1)
-  :set material ($material . "|dns:REMOVE:" . [/ip/dns/static get $dnsRecords .id] . ":" . [/ip/dns/static get $dnsRecords name] . ":" . [/ip/dns/static get $dnsRecords address])
+  :set material ($material . "|dns:REMOVE:" . [:pick $dnsRecords 0] . ":" . [/ip/dns/static get $dnsRecords name] . ":" . [/ip/dns/static get $dnsRecords address])
   :if ($FoxOSUninstallInspectVerbose) do={ :put "REMOVE dns/foxos:dns:admin" }
 } else={
   :set material ($material . "|dns:DONE")
