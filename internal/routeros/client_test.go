@@ -19,7 +19,7 @@ func TestReadOverviewAndDevices(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/rest/system/resource":
-			_ = json.NewEncoder(w).Encode([]Resource{{Version: "7.15.2", Architecture: "x86_64", CPULoad: "12"}})
+			_ = json.NewEncoder(w).Encode(Resource{Version: "7.15.2", Architecture: "x86_64", CPULoad: "12"})
 		case "/rest/interface":
 			_ = json.NewEncoder(w).Encode([]Interface{{ID: "*1", Name: "ether1", Running: "true"}})
 		case "/rest/ip/dhcp-server/lease":
@@ -55,29 +55,30 @@ func TestReadOverviewAndDevices(t *testing.T) {
 	}
 }
 
-func TestResourceRequiresExactlyOneRecord(t *testing.T) {
+func TestResourceRejectsInvalidObject(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		records []Resource
+		name      string
+		body      string
+		wantError string
 	}{
-		{name: "empty response", records: []Resource{}},
-		{name: "multiple records", records: []Resource{{Version: "7.23.2"}, {Version: "7.23.2"}}},
+		{name: "missing version", body: `{}`, wantError: "missing version"},
+		{name: "array response", body: `[{"version":"7.23.2"}]`, wantError: "decode RouterOS response"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(test.records)
+				_, _ = w.Write([]byte(test.body))
 			}))
 			defer server.Close()
 			client, err := NewClient(server.URL, "foxos", "secret")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := client.Resource(t.Context()); err == nil || !strings.Contains(err.Error(), "response count") {
-				t.Fatalf("Resource() error = %v, want response count error", err)
+			if _, err := client.Resource(t.Context()); err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("Resource() error = %v, want error containing %q", err, test.wantError)
 			}
 		})
 	}

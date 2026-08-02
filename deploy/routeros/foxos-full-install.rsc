@@ -23,6 +23,9 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSServiceAccessContractVersion
+:global FoxOSServiceGroupPolicy
+:global FoxOSServiceGroupPolicyMatches
 :global FoxOSSecretContractVersion
 :global FoxOSSecretHostDirectory
 :global FoxOSSecretContainerDirectory
@@ -41,6 +44,7 @@
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSServiceAccessContractVersion != 1 || [:typeof $FoxOSServiceGroupPolicy] != "str" || [:typeof $FoxOSServiceGroupPolicyMatches] != "array") do={ :error "RouterOS service access contract is unavailable" }
 :if ($FoxOSSecretContractVersion != 1 || $FoxOSReadonlyMountMode != "ro" || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets")) do={ :error "secret-file compatibility contract is unavailable" }
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
@@ -366,13 +370,14 @@
 
 :local serviceGroup [/user/group find where name="foxos-rest"]
 :if ([:len $serviceGroup] = 0) do={
-  /user/group add name=foxos-rest policy=read,write,rest-api
+  /user/group add name=foxos-rest policy=$FoxOSServiceGroupPolicy
 } else={
   :if ([:len $serviceGroup] != 1) do={ :error "foxos-rest 用户组不唯一" }
   :if ($existingInstall = false) do={ :error "同名 foxos-rest 用户组已存在且没有 FoxOS 安装标记，拒绝复用" }
-  :if ([/user/group get $serviceGroup policy] != "read,write,rest-api") do={
-    :error "现有 foxos-rest 权限与安全基线不一致，拒绝自动扩大或缩小权限"
-  }
+}
+:set serviceGroup [/user/group find where name="foxos-rest"]
+:if ([:len $serviceGroup] != 1 || [$FoxOSServiceGroupPolicyMatches $serviceGroup] = false) do={
+  :error "foxos-rest 权限创建或复用回读与安全基线不一致"
 }
 :local serviceUser [/user find where name="foxos-service"]
 :if ([:len $serviceUser] = 0) do={

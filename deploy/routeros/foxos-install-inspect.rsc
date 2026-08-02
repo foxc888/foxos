@@ -20,6 +20,9 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSServiceAccessContractVersion
+:global FoxOSServiceGroupPolicy
+:global FoxOSServiceGroupPolicyMatches
 :global FoxOSSecretContractVersion
 :global FoxOSSecretHostDirectory
 :global FoxOSSecretContainerDirectory
@@ -34,6 +37,7 @@
 :global FoxOSInstallCurrentDigest
 :if ($FoxOSSiteManifestVersion != 2 || $FoxOSContainerCompatVersion != 2) do={ :error "site-config.rsc manifest version 2 and container compatibility contract are required" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSServiceAccessContractVersion != 1 || [:typeof $FoxOSServiceGroupPolicy] != "str" || [:typeof $FoxOSServiceGroupPolicyMatches] != "array") do={ :error "RouterOS service access contract is unavailable" }
 :if ($FoxOSSecretContractVersion != 1 || $FoxOSReadonlyMountMode != "ro" || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets")) do={ :error "secret-file compatibility contract is unavailable" }
 
 :local managementBridge $FoxOSSiteManagementBridge
@@ -48,7 +52,7 @@
 :local foxosIP $FoxOSSiteFoxOSAddress
 :local subscriptionPrivateCIDRs $FoxOSSiteSubscriptionPrivateCIDRs
 :local failed false
-:local material ("foxos-install-v4|" . $releaseID . "|" . $managementBridge . "|" . $storageRoot . "|" . $FoxOSSiteNetwork . "|" . $prefixLength . "|" . $routerAddress . "|" . $mihomoIP . "|" . $mosdnsIP . "|" . $foxosIP . "|" . $FoxOSSitePublicHostname . "|" . $subscriptionPrivateCIDRs)
+:local material ("foxos-install-v5|" . $releaseID . "|" . $managementBridge . "|" . $storageRoot . "|" . $FoxOSSiteNetwork . "|" . $prefixLength . "|" . $routerAddress . "|" . $mihomoIP . "|" . $mosdnsIP . "|" . $foxosIP . "|" . $FoxOSSitePublicHostname . "|" . $subscriptionPrivateCIDRs . "|service-policy=" . [:tostr $FoxOSServiceGroupPolicy])
 :set FoxOSInstallCurrentDigest ""
 
 :local envState "CREATE"
@@ -215,7 +219,7 @@
 :local groupState "CREATE"
 :local serviceGroup [/user/group find where name="foxos-rest"]
 :if ([:len $serviceGroup] > 0) do={
-  :if ([:len $serviceGroup] = 1 && $existingInstall && [/user/group get $serviceGroup policy] = "read,write,rest-api") do={
+  :if ([:len $serviceGroup] = 1 && $existingInstall && [$FoxOSServiceGroupPolicyMatches $serviceGroup]) do={
     :set groupState "REUSE"
   } else={
     :set groupState "FAIL"

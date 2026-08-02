@@ -936,6 +936,51 @@ secret_loader_contract() {
   done
 }
 
+service_access_loader_contract() {
+  local script=$1
+  local invariant
+  for invariant in \
+    ':global FoxOSServiceAccessContractVersion 1' \
+    ':global FoxOSServiceGroupPolicy "read,write,api,rest-api"' \
+    ':global FoxOSServiceGroupPolicyMatches do={' \
+    ':global FoxOSServiceGroupPolicy' \
+    ':if ([:typeof $FoxOSServiceGroupPolicy] != "str") do={ :return false }' \
+    ':local expectedPolicy [:toarray $FoxOSServiceGroupPolicy]' \
+    ':local actualPolicy [/user/group get $serviceGroup policy]' \
+    ':if ([:typeof $expectedPolicy] != "array" || [:len $expectedPolicy] != 4 || [:typeof $actualPolicy] != "array") do={ :return false }' \
+    ':foreach item in=$actualPolicy do={' \
+    ':if ([:pick $item 0 1] = "!") do={' \
+    ':if ($deniedItem = $expectedItem) do={ :return false }' \
+    ':if ($allowed = false) do={ :return false }' \
+    ':if ($activeCount != 1) do={ :return false }' \
+    ':return true'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+}
+
+service_access_consumer_contract() {
+  local script=$1
+  rg -Fq ':global FoxOSServiceAccessContractVersion' "$script" \
+    && rg -Fq ':global FoxOSServiceGroupPolicy' "$script" \
+    && rg -Fq ':global FoxOSServiceGroupPolicyMatches' "$script" \
+    && rg -Fq ':if ($FoxOSServiceAccessContractVersion != 1 || [:typeof $FoxOSServiceGroupPolicy] != "str" || [:typeof $FoxOSServiceGroupPolicyMatches] != "array") do={' "$script" \
+    && rg -q '\[\$FoxOSServiceGroupPolicyMatches \$[A-Za-z][A-Za-z0-9]*\]' "$script" \
+    && ! rg -q '/user/group get \$[A-Za-z][A-Za-z0-9]* policy\].*(=|!=).*FoxOSServiceGroupPolicy' "$script"
+}
+
+full_install_service_access_contract() {
+  local script=$1
+  local group_add_line group_readback_line policy_readback_line user_add_line
+  group_add_line=$(rg -n '/user/group add name=foxos-rest policy=\$FoxOSServiceGroupPolicy' "$script" | head -n1 | cut -d: -f1)
+  group_readback_line=$(rg -n ':set serviceGroup \[/user/group find where name="foxos-rest"\]' "$script" | head -n1 | cut -d: -f1)
+  policy_readback_line=$(rg -n '\[\$FoxOSServiceGroupPolicyMatches \$serviceGroup\] = false' "$script" | head -n1 | cut -d: -f1)
+  user_add_line=$(rg -n '/user add name=foxos-service ' "$script" | head -n1 | cut -d: -f1)
+  [[ -n "$group_add_line" && -n "$group_readback_line" && -n "$policy_readback_line" && -n "$user_add_line" ]] \
+    && ((group_add_line < group_readback_line)) \
+    && ((group_readback_line < policy_readback_line)) \
+    && ((policy_readback_line < user_add_line))
+}
+
 secret_mount_readback_contract() {
   local script=$1
   rg -Fq ':global FoxOSSecretMountName' "$script" || return 1
@@ -1542,6 +1587,23 @@ if ! mount_compatibility_contract "$rsc_root/load-site-config.rsc"; then
 fi
 if ! secret_loader_contract "$rsc_root/load-site-config.rsc"; then
   report "the immutable loader does not own the four-file production secret contract"
+fi
+if ! service_access_loader_contract "$rsc_root/load-site-config.rsc"; then
+  report "the immutable loader does not own the RouterOS service access policy contract"
+fi
+for service_access_script in foxos-full-install.rsc foxos-install-inspect.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc; do
+  if ! service_access_consumer_contract "$rsc_root/$service_access_script"; then
+    report "$service_access_script bypasses or does not require the loader-owned RouterOS service access policy contract"
+  fi
+done
+if ! full_install_service_access_contract "$rsc_root/foxos-full-install.rsc"; then
+  report "full install does not re-read the exact service-group policy before creating the service user"
+fi
+if rg -n --glob '*.rsc' --glob '!load-site-config.rsc' '/user/group get .* policy\]' "$rsc_root"; then
+  report "a RouterOS lifecycle script bypasses the loader-owned service-group policy matcher"
+fi
+if rg -Fq 'read,write,rest-api' "$rsc_root"; then
+  report "a RouterOS service group still omits the api policy required by REST command execution"
 fi
 for compatibility_script in foxos-full-install.rsc foxos-install-inspect.rsc foxos-start-all.rsc foxos-verify.rsc foxos-uninstall-inspect.rsc uninstall-apply.rsc upgrade-inspect.rsc upgrade.rsc upgrade-promote-inspect.rsc upgrade-promote.rsc rollback-inspect.rsc rollback.rsc upgrade-cleanup-inspect.rsc upgrade-cleanup-apply.rsc; do
   if ! container_compatibility_consumer_contract "$rsc_root/$compatibility_script"; then
@@ -2245,6 +2307,26 @@ if cmp -s "$rsc_root/load-site-config.rsc" "$site_seal_root/lifecycle/mount-sour
   report "mount source passthrough failure injection did not mutate the loader"
 elif mount_compatibility_contract "$site_seal_root/lifecycle/mount-source-passthrough-missing.rsc"; then
   report "mount compatibility contract accepted source readback without unchanged passthrough"
+fi
+sed 's/:global FoxOSServiceGroupPolicy "read,write,api,rest-api"/:global FoxOSServiceGroupPolicy "read,write,rest-api"/' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/service-policy-api-missing.rsc"
+if service_access_loader_contract "$site_seal_root/lifecycle/service-policy-api-missing.rsc"; then
+  report "service access contract accepted a target policy without api"
+fi
+sed '/:if (\[:typeof \$expectedPolicy\] != "array" || \[:len \$expectedPolicy\] != 4 || \[:typeof \$actualPolicy\] != "array") do={ :return false }/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/service-policy-array-guard-missing.rsc"
+if service_access_loader_contract "$site_seal_root/lifecycle/service-policy-array-guard-missing.rsc"; then
+  report "service access contract accepted policy matching without native-array guards"
+fi
+sed '/:if (\$deniedItem = \$expectedItem) do={ :return false }/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/service-policy-denial-conflict-accepted.rsc"
+if service_access_loader_contract "$site_seal_root/lifecycle/service-policy-denial-conflict-accepted.rsc"; then
+  report "service access contract accepted a matcher that ignores a denied required policy"
+fi
+sed 's/\[\$FoxOSServiceGroupPolicyMatches \$serviceGroup\] = false/false/' \
+  "$rsc_root/foxos-full-install.rsc" > "$site_seal_root/lifecycle/service-policy-readback-bypassed.rsc"
+if service_access_consumer_contract "$site_seal_root/lifecycle/service-policy-readback-bypassed.rsc" && full_install_service_access_contract "$site_seal_root/lifecycle/service-policy-readback-bypassed.rsc"; then
+  report "service access contract accepted full install without exact policy readback"
 fi
 sed 's#\[:pick \$imageID 0\]#[/file get $imageID .id]#' \
   "$rsc_root/foxos-install-inspect.rsc" > "$site_seal_root/lifecycle/install-file-id-readback.rsc"

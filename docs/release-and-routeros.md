@@ -83,7 +83,7 @@ foxos-full-amd64-<release-id>.tar.gz.sha256
 完整命令见 [QUICK-INSTALL](../deploy/routeros/QUICK-INSTALL.md)。不可跳过：
 
 1. RouterOS 7.21 是脚本语法下限，目标完整版本已通过同版本 CHR `envlists`/`mountlists`、命名挂载 `mode=rw` add/get/delete 兼容门禁；同 SHA Artifact 还必须验证唯一 `mode=ro` secret mount、四文件可读、敏感 env/日志值为零和卸载零残留。设备为标准 `architecture-name=x86` 或单独验收的非标准 `x86_64`，使用同版本 container package、`container=yes` 与 `scheduler=yes`。两项 device-mode 更新都可能要求设备操作者按官方流程物理确认。
-2. 清单指定的管理桥、存储、RouterOS 地址和受限 REST 已存在；存储是唯一 `/disk` 槽位或精确内部保留根 `foxos`。
+2. 清单指定的管理桥、存储、RouterOS 地址和受限 REST 已存在；loader-owned 服务组 policy 精确为 `read,write,api,rest-api`，用户来源仍限制为 FoxOS VETH `/32`；存储是唯一 `/disk` 槽位或精确内部保留根 `foxos`。
 3. 工作站验证外层与包内 checksum，从模板生成并独立封存站点清单，但尚不上传。
 4. 在任何上传前保存脱敏 RouterOS export 与带唯一离线密码、`aes-sha256` 的 binary backup，下载两个副本；确认所有顶层上传目标零碰撞后才上传，并通过固定 loader 运行只读 doctor。
 5. import 不可变 `load-site-config.rsc` 后运行 `foxos-plan.rsc`；loader 验证可编辑清单，plan 再自动执行 preflight 和共享 inspector，逐项输出 `CREATE/REUSE/FAIL` 并绑定 SHA-512 前态摘要。
@@ -198,7 +198,7 @@ plan 只读核对所有 FoxOS container comment、env marker、mount、四个 se
 |---|---|
 | 脚本提示未加载站点清单 | 当前会话是否先 import 实际存储根下的不可变 `load-site-config.rsc`；不得直接 import 可编辑清单 |
 | Web/API 不可用 | CA 信任、443、live/ready、浏览器会话是否过期、401/403 |
-| RouterOS unavailable | 清单地址、REST 范围、专用账号、veth/bridge |
+| RouterOS unavailable | 清单地址、REST 范围、专用账号的 `read,write,api,rest-api`、veth/bridge；成功 rest-api 登录后紧跟 `via api` 失败表示缺少 `api` policy |
 | Mihomo unavailable | 清单地址 `:9090`、Secret、共享 base/runtime 配置、Controller log |
 | MosDNS unavailable | 清单地址 TCP 53、listener |
 | 设备出口不可选 | `GET /api/v1/egress/capabilities` 的 `missing`；Mihomo 两种模式当前预期不可用 |

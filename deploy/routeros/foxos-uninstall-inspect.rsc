@@ -19,6 +19,9 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSServiceAccessContractVersion
+:global FoxOSServiceGroupPolicy
+:global FoxOSServiceGroupPolicyMatches
 :global FoxOSSecretContractVersion
 :global FoxOSSecretHostDirectory
 :global FoxOSSecretContainerDirectory
@@ -35,11 +38,12 @@
 :global FoxOSUninstallRemainingCount
 :if ($FoxOSSiteManifestVersion != 2 || $FoxOSContainerCompatVersion != 2) do={ :error "site manifest and container compatibility contract are required" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSServiceAccessContractVersion != 1 || [:typeof $FoxOSServiceGroupPolicy] != "str" || [:typeof $FoxOSServiceGroupPolicyMatches] != "array") do={ :error "RouterOS service access contract is unavailable" }
 :if ($FoxOSSecretContractVersion != 1 || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets") || $FoxOSSecretContainerDirectory != "/run/secrets/foxos" || $FoxOSSecretMountName != "foxos-secrets" || $FoxOSReadonlyMountMode != "ro") do={ :error "secret-file compatibility contract is unavailable" }
 
 :local failed false
 :local remaining 0
-:local material ("foxos-uninstall-v3|" . $FoxOSSiteManagementBridge . "|" . $FoxOSSiteStorageRoot . "|" . $FoxOSSiteFoxOSAddress . "|" . $FoxOSSitePublicHostname)
+:local material ("foxos-uninstall-v4|" . $FoxOSSiteManagementBridge . "|" . $FoxOSSiteStorageRoot . "|" . $FoxOSSiteFoxOSAddress . "|" . $FoxOSSitePublicHostname . "|service-policy=" . [:tostr $FoxOSServiceGroupPolicy])
 :set FoxOSUninstallCurrentDigest ""
 :set FoxOSUninstallRemainingCount 0
 :local pendingMihomoApplyJournal [/file find where name=($FoxOSSiteStorageRoot . "/foxos-backups/mihomo/.foxos-mihomo-apply.json")]
@@ -225,7 +229,7 @@
   :if ($FoxOSUninstallInspectVerbose) do={ :put "DONE user/foxos-service" }
 }
 :if ([:len $groupID] = 1) do={
-  :if ([/user/group get $groupID policy] != "read,write,rest-api") do={ :set failed true }
+  :if ([$FoxOSServiceGroupPolicyMatches $groupID] = false) do={ :set failed true }
   :set remaining ($remaining + 1)
   :set material ($material . "|group:REMOVE:" . [/user/group get $groupID .id])
   :if ($FoxOSUninstallInspectVerbose) do={ :put "REMOVE user-group/foxos-rest" }

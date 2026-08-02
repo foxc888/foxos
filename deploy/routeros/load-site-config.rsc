@@ -304,6 +304,52 @@
   :return "invalid"
 }
 
+# RouterOS 7.23.2 authenticates REST at the rest-api gate, then authorizes the
+# backing command through the api gate. Keep that target-specific access fact
+# loader-owned while the service user remains restricted to the FoxOS VETH /32.
+:global FoxOSServiceAccessContractVersion 1
+:global FoxOSServiceGroupPolicy "read,write,api,rest-api"
+:global FoxOSServiceGroupPolicyMatches do={
+  :global FoxOSServiceGroupPolicy
+  :local serviceGroup $1
+  :if ([:typeof $FoxOSServiceGroupPolicy] != "str") do={ :return false }
+  :local expectedPolicy [:toarray $FoxOSServiceGroupPolicy]
+  :local actualPolicy [/user/group get $serviceGroup policy]
+  :if ([:typeof $expectedPolicy] != "array" || [:len $expectedPolicy] != 4 || [:typeof $actualPolicy] != "array") do={ :return false }
+  :foreach expectedItem in=$expectedPolicy do={
+    :if ([:typeof $expectedItem] != "str" || [:len $expectedItem] = 0 || [:pick $expectedItem 0 1] = "!") do={ :return false }
+    :local expectedCount 0
+    :foreach candidate in=$expectedPolicy do={
+      :if ($candidate = $expectedItem) do={ :set expectedCount ($expectedCount + 1) }
+    }
+    :if ($expectedCount != 1) do={ :return false }
+  }
+  :foreach item in=$actualPolicy do={
+    :if ([:typeof $item] != "str" || [:len $item] = 0) do={ :return false }
+    :if ([:pick $item 0 1] = "!") do={
+      :if ([:len $item] = 1) do={ :return false }
+      :local deniedItem [:pick $item 1 [:len $item]]
+      :foreach expectedItem in=$expectedPolicy do={
+        :if ($deniedItem = $expectedItem) do={ :return false }
+      }
+      :continue
+    }
+    :local allowed false
+    :foreach expectedItem in=$expectedPolicy do={
+      :if ($item = $expectedItem) do={ :set allowed true }
+    }
+    :if ($allowed = false) do={ :return false }
+  }
+  :foreach expectedItem in=$expectedPolicy do={
+    :local activeCount 0
+    :foreach item in=$actualPolicy do={
+      :if ($item = $expectedItem) do={ :set activeCount ($activeCount + 1) }
+    }
+    :if ($activeCount != 1) do={ :return false }
+  }
+  :return true
+}
+
 # Production credentials have one loader-owned contract: four printable ASCII
 # scalar files under a single read-only mount. Lifecycle scripts consume these
 # helpers instead of reading sensitive values from /container/envs.

@@ -7,11 +7,11 @@ FoxOS 使用 RouterOS v7 REST API，不通过 SSH 拼接命令。目标地址来
 不要使用 `admin`。全量安装器创建或验证：
 
 ```routeros
-/user/group/add name=foxos-rest policy=read,write,rest-api
+/user/group/add name=foxos-rest policy=read,write,api,rest-api
 /user/add name=foxos-service group=foxos-rest address=<FoxOS站点地址>/32 password="<随机强密码>" comment="foxos:service"
 ```
 
-同名账号或组不带 FoxOS marker/comment 时安装失败，不接管用户资源。REST 服务必须限制在站点网段或更窄的 FoxOS `/32`，不得暴露 WAN。
+RouterOS 7.23.2 会先通过 `rest-api` 完成 REST 登录，再通过 `api` 执行对应命令；缺少 `api` 时会在成功登录后返回 HTTP 500。两项 policy 都必须保留，但 `foxos-service` 仍只允许从 FoxOS VETH `/32` 登录。同名账号或组不带 FoxOS marker/comment 时安装失败，不接管用户资源。REST 服务必须限制在站点网段或更窄的 FoxOS `/32`，不得暴露 WAN。
 
 全量包按站点 RouterOS 地址使用 HTTP REST。凭据在管理 LAN 内不是加密传输，因此该 LAN 必须可信、隔离且禁止 WAN 访问。改用 `www-ssl` 需要同时调整端点契约并提供 FoxOS 系统信任链可验证的证书；客户端不会跳过 TLS 校验。FoxOS 自身的浏览器/API 入口默认强制本地 CA HTTPS。
 

@@ -79,7 +79,7 @@ FoxOS 只检查 MosDNS TCP 53；MosDNS 9099 API 仅监听容器 loopback，包�
 
 完整准备、证据与失败清理要求见包内 `chr-envlists-smoke.md`。基础 smoke 必须证明目标完整版本的命令元数据与实际回读都接受复数 `envlists`/`mountlists`，mount source 的 raw/normalized 身份一致且命名挂载为 `mode=rw`，残留计数全为零并最终出现 `CHR_ENVLISTS_SMOKE PASS`。随后还必须用同 SHA Artifact 在同版本可丢弃 CHR 验证四个固定 secret files、唯一 RO secret mount、管理容器无敏感 env/日志值、升级保留和卸载零残留。两层门禁都通过后，该候选才能进入后续实体首装、升级、回滚和卸载验收。升级 RouterOS patch/minor 后必须重新执行；不能把实体设备作为第一次拼写或生命周期试验对象。
 
-安装器会创建最小 `foxos-service` 账号。RouterOS REST 在管理 LAN 内仍是 HTTP，因此管理 LAN 必须可信且隔离；不得暴露到 WAN。FoxOS 浏览器/API 访问则强制使用本地 CA 保护的 HTTPS。
+安装器会创建仅含 `read,write,api,rest-api` 的 `foxos-service` 专用组，并把用户登录来源限制为 FoxOS VETH `/32`。RouterOS 7.23.2 的 REST 登录需要 `rest-api`，后续命令执行还需要 `api`；缺少后者会出现先登录成功、再 `via api` 失败并返回 HTTP 500。RouterOS REST 在管理 LAN 内仍是 HTTP，因此管理 LAN 必须可信且隔离；不得暴露到 WAN。FoxOS 浏览器/API 访问则强制使用本地 CA 保护的 HTTPS。
 
 只读人工检查示例；内部 `foxos` 模式允许 `/disk/print` 为空，但 `free-hdd-space` 必须满足空间门禁：
 
@@ -436,6 +436,7 @@ CA 已导入客户端信任库且 DNS 可解析后，访问 `https://foxos.home.
 | preflight 地址/存储失败 | `site-config.rsc` 是否与现有管理桥、地址和存储完全一致；内部模式是否精确写成 `foxos`，外置模式是否存在同名唯一 `/disk slot` |
 | 镜像长期不为 stopped | checksum、文件大小、磁盘、package、container 日志 |
 | FoxOS running 但 verify 失败 | CA 是否唯一且 trusted、HTTPS 443、SQLite/挂载、RouterOS REST、Mihomo 9090、MosDNS TCP 53 |
+| REST 先登录成功、随后 `via api` 失败 | `foxos-rest` 是否精确包含 `read,write,api,rest-api`；不要轮换密码或扩大用户来源地址 |
 | hostname 不解析 | 客户端是否原本使用 RouterOS DNS；DNS plan/apply 是否完成 |
 | API 返回 `https_required` | 是否仍在用普通 LAN HTTP 或直接访问内部 8090 |
 | Mihomo 设备出口不可选 | 当前预期行为；查看 capability `missing`，不要伪造透明数据平面 |

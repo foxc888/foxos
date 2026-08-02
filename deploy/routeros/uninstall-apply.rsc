@@ -19,6 +19,9 @@
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
+:global FoxOSServiceAccessContractVersion
+:global FoxOSServiceGroupPolicy
+:global FoxOSServiceGroupPolicyMatches
 :global FoxOSSecretContractVersion
 :global FoxOSSecretHostDirectory
 :global FoxOSSecretContainerDirectory
@@ -39,6 +42,7 @@
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
 :if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
+:if ($FoxOSServiceAccessContractVersion != 1 || [:typeof $FoxOSServiceGroupPolicy] != "str" || [:typeof $FoxOSServiceGroupPolicyMatches] != "array") do={ :error "RouterOS service access contract is unavailable" }
 :if ($FoxOSSecretContractVersion != 1 || $FoxOSSecretHostDirectory != ($FoxOSSiteStorageRoot . "/foxos-secrets") || $FoxOSSecretContainerDirectory != "/run/secrets/foxos" || $FoxOSSecretMountName != "foxos-secrets" || $FoxOSReadonlyMountMode != "ro") do={ :error "secret-file compatibility contract is unavailable" }
 :local approved $FoxOSUninstallApprovedDigest
 :local confirmation $FoxOSUninstallConfirmation
@@ -199,7 +203,7 @@
 :local currentServiceGroup [/user/group find where name="foxos-rest"]
 :if ([:len $currentServiceGroup] != [:len $serviceGroup] || ([:len $serviceGroup] = 1 && [/user/group get $currentServiceGroup .id] != [/user/group get $serviceGroup .id])) do={ :error "foxos-rest ID 在摘要确认后变化" }
 :if ([:len $serviceGroup] > 0) do={
-  :if ([:len $serviceGroup] != 1 || [/user/group get $serviceGroup policy] != "read,write,rest-api") do={ :error "foxos-rest 回读冲突" }
+  :if ([:len $serviceGroup] != 1 || [$FoxOSServiceGroupPolicyMatches $serviceGroup] = false) do={ :error "foxos-rest 回读冲突" }
   /user/group/remove $serviceGroup
 }
 
