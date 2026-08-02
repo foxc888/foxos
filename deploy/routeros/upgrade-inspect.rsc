@@ -12,6 +12,7 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSContainerMountLists
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
@@ -22,7 +23,7 @@
 :global FoxOSUpgradeImageID
 :local releaseID "__FOXOS_RELEASE_ID__"
 :if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "upgrade-inspect.rsc 未绑定有效 release ID" }
-:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || $FoxOSContainerCompatVersion != 1 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || $FoxOSContainerCompatVersion != 2 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
   :error "必须先使用根目录不可变 loader 验证 manifest v2"
 }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
@@ -66,7 +67,7 @@
 :if ([:len $imageFile] != 1 || [/file get $imageFile size] < 1048576) do={ :error ("版本化 FoxOS 镜像缺失、不唯一或过小: " . $imagePath) }
 
 :local activeName [/container get $active name]
-:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [/container get $active mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $active] != ($storageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no") || [$FoxOSContainerState $active] != "running") do={
+:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $active] != ($storageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no") || [$FoxOSContainerState $active] != "running") do={
   :error "active 容器完整身份契约不匹配或未运行"
 }
 :local installMarkers [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER"]

@@ -18,6 +18,7 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSContainerMountLists
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
@@ -28,7 +29,7 @@
 :global FoxOSInstallConfirmation
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
-:if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
+:if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 :local managementBridge $FoxOSSiteManagementBridge
 :local storageRoot $FoxOSSiteStorageRoot
@@ -403,7 +404,7 @@
 }
 :set mihomoContainer [/container find where comment="foxos:mihomo"]
 :set mihomoByName [/container find where name="foxos-mihomo"]
-:if ([:len $mihomoContainer] != 1 || [:len $mihomoByName] != 1 || $mihomoContainer != $mihomoByName || [/container get $mihomoContainer interface] != "veth-mihomo" || [/container get $mihomoContainer envlists] != "" || [/container get $mihomoContainer mountlists] != "foxos-mihomo-runtime" || [$FoxOSContainerRoot $mihomoContainer] != ($storageRoot . "/containers/mihomo") || ([/container get $mihomoContainer start-on-boot] != false && [/container get $mihomoContainer start-on-boot] != "no") || ([/container get $mihomoContainer logging] != true && [/container get $mihomoContainer logging] != "yes")) do={
+:if ([:len $mihomoContainer] != 1 || [:len $mihomoByName] != 1 || $mihomoContainer != $mihomoByName || [/container get $mihomoContainer interface] != "veth-mihomo" || [/container get $mihomoContainer envlists] != "" || [$FoxOSContainerMountLists $mihomoContainer] != "foxos-mihomo-runtime" || [$FoxOSContainerRoot $mihomoContainer] != ($storageRoot . "/containers/mihomo") || ([/container get $mihomoContainer start-on-boot] != false && [/container get $mihomoContainer start-on-boot] != "no") || ([/container get $mihomoContainer logging] != true && [/container get $mihomoContainer logging] != "yes")) do={
   :error "Mihomo 容器身份契约不匹配"
 }
 
@@ -415,7 +416,7 @@
 }
 :set mosdnsContainer [/container find where comment="foxos:mosdns"]
 :set mosdnsByName [/container find where name="foxos-mosdns"]
-:if ([:len $mosdnsContainer] != 1 || [:len $mosdnsByName] != 1 || $mosdnsContainer != $mosdnsByName || [/container get $mosdnsContainer interface] != "veth-mosdns" || [/container get $mosdnsContainer envlists] != "foxos-mosdns-env" || [/container get $mosdnsContainer mountlists] != "foxos-mosdns-runtime" || [$FoxOSContainerRoot $mosdnsContainer] != ($storageRoot . "/containers/mosdns") || ([/container get $mosdnsContainer start-on-boot] != false && [/container get $mosdnsContainer start-on-boot] != "no") || ([/container get $mosdnsContainer logging] != true && [/container get $mosdnsContainer logging] != "yes")) do={
+:if ([:len $mosdnsContainer] != 1 || [:len $mosdnsByName] != 1 || $mosdnsContainer != $mosdnsByName || [/container get $mosdnsContainer interface] != "veth-mosdns" || [/container get $mosdnsContainer envlists] != "foxos-mosdns-env" || [$FoxOSContainerMountLists $mosdnsContainer] != "foxos-mosdns-runtime" || [$FoxOSContainerRoot $mosdnsContainer] != ($storageRoot . "/containers/mosdns") || ([/container get $mosdnsContainer start-on-boot] != false && [/container get $mosdnsContainer start-on-boot] != "no") || ([/container get $mosdnsContainer logging] != true && [/container get $mosdnsContainer logging] != "yes")) do={
   :error "MosDNS 容器身份契约不匹配"
 }
 
@@ -428,7 +429,7 @@
 :set foxosContainer [/container find where comment="foxos:active"]
 :local activeName ""
 :if ([:len $foxosContainer] = 1) do={ :set activeName [/container get $foxosContainer name] }
-:if ([:len $foxosContainer] != 1 || !($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $foxosContainer interface] != "veth-foxos" || [/container get $foxosContainer envlists] != "foxos-env" || [/container get $foxosContainer mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $foxosContainer] != ($storageRoot . "/containers/" . $activeName) || ([/container get $foxosContainer start-on-boot] != false && [/container get $foxosContainer start-on-boot] != "no") || ([/container get $foxosContainer logging] != false && [/container get $foxosContainer logging] != "no")) do={
+:if ([:len $foxosContainer] != 1 || !($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $foxosContainer interface] != "veth-foxos" || [/container get $foxosContainer envlists] != "foxos-env" || [$FoxOSContainerMountLists $foxosContainer] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $foxosContainer] != ($storageRoot . "/containers/" . $activeName) || ([/container get $foxosContainer start-on-boot] != false && [/container get $foxosContainer start-on-boot] != "no") || ([/container get $foxosContainer logging] != false && [/container get $foxosContainer logging] != "no")) do={
   :error "FoxOS active 容器身份契约不匹配"
 }
 

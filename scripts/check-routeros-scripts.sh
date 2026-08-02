@@ -420,6 +420,7 @@ reserved_internal_storage_contract() {
 chr_envlists_smoke_contract() {
   local script=$1
   local confirmation_line first_write residual_line failure_line pass_line
+  local mount_loop_count mount_name_pick_count mount_destination_pick_count
   local invariant
   for invariant in \
     ':if ($boardName != "CHR") do={' \
@@ -431,7 +432,30 @@ chr_envlists_smoke_contract() {
     '[:find $imagePath $parentPathMarker]' \
     '/container/envs/add list=$envListName key=$envKey value=$runID' \
     '/container/envs get $envItem value] != $runID' \
-    ':local mountListName ("chr-envlists-smoke-mount-" . $runID)' \
+    ':local mountListNameA ("chr-envlists-smoke-mount-a-" . $runID)' \
+    ':local mountListNameB ("chr-envlists-smoke-mount-b-" . $runID)' \
+    ':local mountListNameC ("chr-envlists-smoke-mount-c-" . $runID)' \
+    ':local mountListNames {$mountListNameA;$mountListNameB;$mountListNameC}' \
+    ':local expectedMountLists ($mountListNameA . "," . $mountListNameB . "," . $mountListNameC)' \
+    ':local mountDestinationA ("/chr-envlists-smoke-a-" . $runID)' \
+    ':local mountDestinationB ("/chr-envlists-smoke-b-" . $runID)' \
+    ':local mountDestinationC ("/chr-envlists-smoke-c-" . $runID)' \
+    ':local mountDestinations {$mountDestinationA;$mountDestinationB;$mountDestinationC}' \
+    '[:len $mountListNames] != 3' \
+    '[:len $mountDestinations] != 3' \
+    ':local mountListsCanonical do={' \
+    ':local propertyValue $1' \
+    ':if ([:typeof $propertyValue] = "nil") do={ :return "" }' \
+    ':if ([:typeof $propertyValue] = "str") do={ :return $propertyValue }' \
+    ':if ([:typeof $propertyValue] != "array") do={ :error "container mountlists readback type is invalid" }' \
+    ':foreach item in=$propertyValue do={' \
+    '[:typeof $item] != "str"' \
+    '[:len $item] = 0' \
+    '[:typeof [:find $item ","]] != "nil"' \
+    ':error "container mountlists readback item is invalid"' \
+    ':set normalized ($normalized . ",")' \
+    ':set normalized ($normalized . $item)' \
+    ':return $normalized' \
     ':local writableMountMode "rw"' \
     ':local mountSourcePath do={' \
     ':local sourceMount $1' \
@@ -443,36 +467,51 @@ chr_envlists_smoke_contract() {
     ':local mountMode do={' \
     ':local currentMode [/container/mounts get $mount mode]' \
     '/container/mounts/add list=$mountListName src=$mountSource dst=$mountDestination mode=$writableMountMode comment=$owner' \
+    '$createdMounts != 3' \
+    '[:len [/container/mounts find where comment=$owner]] != 3' \
     '[$mountSourcePath $mountByList] != $mountSource' \
     '[$mountMode $mountByList] != $writableMountMode' \
     '" src-raw=" . [/container/mounts get $mountByList src]' \
     '" src-normalized=" . [$mountSourcePath $mountByList]' \
-    '/container/add name=$containerName file=$imagePath interface=$vethName root-dir=$rootDirectory envlists=$envListName mountlists=$mountListName logging=no start-on-boot=no comment=$owner' \
+    '/container/add name=$containerName file=$imagePath interface=$vethName root-dir=$rootDirectory envlists=$envListName mountlists=$mountListNames logging=no start-on-boot=no comment=$owner' \
     ':local containerState do={' \
     ':local running [/container get $container running]' \
     ':local stopped [/container get $container stopped]' \
     ':local containerRoot do={' \
     ':local containerEnvLists [/container get $container envlists]' \
     ':local containerMountLists [/container get $container mountlists]' \
+    ':local containerMountListsType [:typeof $containerMountLists]' \
+    ':local containerMountListsCount [:len $containerMountLists]' \
+    ':local containerMountListsCanonical [$mountListsCanonical $containerMountLists]' \
     '$containerEnvLists != $envListName' \
-    '$containerMountLists != $mountListName' \
+    '$containerMountListsType != "array"' \
+    '$containerMountListsCount != 3' \
+    '$containerMountListsCanonical != $expectedMountLists' \
     '$cleanupByName != $cleanupByOwner' \
+    ':local cleanupMountLists [/container get $cleanupByName mountlists]' \
+    '[:typeof $cleanupMountLists] != "array"' \
+    '[:len $cleanupMountLists] != 3' \
+    '[$mountListsCanonical $cleanupMountLists] != $expectedMountLists' \
     '[/container get $cleanupByName interface] != $vethName' \
     '[$containerRoot $cleanupByName] != $rootDirectory' \
     '[$containerState $cleanupContainer] != "stopped"' \
     '[/interface/veth get $cleanupVeth comment] != $owner' \
     '[/container/envs get $cleanupEnvItems value] != $runID' \
-    '$cleanupMountByList != $cleanupMountByOwner' \
     '[$mountSourcePath $cleanupMountByList] != $mountSource' \
     '[$mountMode $cleanupMountByList] != $writableMountMode' \
+    '[/container/mounts get $cleanupMountByList comment] != $owner' \
     '/container/remove $cleanupContainer' \
     '/container/mounts/remove $cleanupMountByList' \
     '/interface/veth/remove $cleanupVeth' \
     '/container/envs/remove $cleanupEnvItems' \
-    ':local residualMounts ([:len [/container/mounts find where list=$mountListName]] + [:len [/container/mounts find where comment=$owner]])' \
+    ':local residualMountsByOwner [:len [/container/mounts find where comment=$owner]]' \
+    ':local residualMountListBindings 0' \
+    ':set residualMountListBindings ($residualMountListBindings + [:len [/container/mounts find where list=$mountListName]])' \
     'CLEANUP residual-containers=' \
-    'residual-mounts=' \
+    'residual-mounts-by-owner=' \
+    'residual-mount-list-bindings=' \
     'mount-source-readback=normalized' \
+    'mountlists-readback=exact mountlists-type=array mountlists-count=3' \
     'CHR_ENVLISTS_SMOKE PASS'; do
     rg -Fq -- "$invariant" "$script" || return 1
   done
@@ -480,10 +519,14 @@ chr_envlists_smoke_contract() {
   confirmation_line=$(rg -n -F ':if ($FoxOSCHREnvlistsSmokeConfirm != "RUN-ON-DISPOSABLE-CHR") do={' "$script" | head -n1 | cut -d: -f1)
   first_write=$(rg -n '^[[:space:]]*/(container/envs/add|container/mounts/add|interface/veth/add|container/add)[[:space:]]' "$script" | head -n1 | cut -d: -f1)
   residual_line=$(rg -n -F ':local residualContainers ' "$script" | head -n1 | cut -d: -f1)
-  failure_line=$(rg -n -F ':if ($operationComplete = false || [:len $primaryFailure] > 0 || $cleanupFailed || $residualContainers > 0 || $residualMounts > 0 || $residualVeths > 0 || $residualEnvs > 0 || $residualRoots > 0) do={' "$script" | head -n1 | cut -d: -f1)
+  failure_line=$(rg -n -F ':if ($operationComplete = false || [:len $primaryFailure] > 0 || $cleanupFailed || $residualContainers > 0 || $residualMountsByOwner > 0 || $residualMountListBindings > 0 || $residualVeths > 0 || $residualEnvs > 0 || $residualRoots > 0) do={' "$script" | head -n1 | cut -d: -f1)
   pass_line=$(rg -n -F ':put ("CHR_ENVLISTS_SMOKE PASS ' "$script" | head -n1 | cut -d: -f1)
+  mount_loop_count=$(rg -c -F ':for mountIndex from=0 to=2 do={' "$script" || true)
+  mount_name_pick_count=$(rg -c -F ':local mountListName [:pick $mountListNames $mountIndex]' "$script" || true)
+  mount_destination_pick_count=$(rg -c -F ':local mountDestination [:pick $mountDestinations $mountIndex]' "$script" || true)
   [[ -n "$confirmation_line" && -n "$first_write" && -n "$residual_line" && -n "$failure_line" && -n "$pass_line" ]] \
     && ((confirmation_line < first_write && first_write < residual_line && residual_line < failure_line && failure_line < pass_line)) \
+    && ((mount_loop_count == 4 && mount_name_pick_count == 4 && mount_destination_pick_count == 2)) \
     && ! rg -Fq 'FoxOSSiteManifestVersion' "$script" \
     && ! rg -n '^[[:space:]]*/container/start([[:space:]]|$)|^[[:space:]]*/interface/bridge(/port)?/(add|set|remove)([[:space:]]|$)|^[[:space:]]*/system/device-mode/update([[:space:]]|$)|start-on-boot=yes' "$script" >/dev/null
 }
@@ -865,7 +908,7 @@ container_identity_fields_contract() {
   local script=$1
   rg -q '/container get \$[A-Za-z][A-Za-z0-9]* interface\]' "$script" \
     && rg -q '/container get \$[A-Za-z][A-Za-z0-9]* envlists\]' "$script" \
-    && rg -q '/container get \$[A-Za-z][A-Za-z0-9]* mountlists\]' "$script" \
+    && rg -q '\[\$FoxOSContainerMountLists \$[A-Za-z][A-Za-z0-9]*\]' "$script" \
     && rg -q '\[\$FoxOSContainerRoot \$[A-Za-z][A-Za-z0-9]*\]' "$script" \
     && rg -q '/container get \$[A-Za-z][A-Za-z0-9]* start-on-boot\]' "$script" \
     && rg -q '/container get \$[A-Za-z][A-Za-z0-9]* logging\]' "$script"
@@ -875,7 +918,7 @@ container_compatibility_contract() {
   local script=$1
   local invariant
   for invariant in \
-    ':global FoxOSContainerCompatVersion 1' \
+    ':global FoxOSContainerCompatVersion 2' \
     ':global FoxOSContainerState do={' \
     ':local running [/container get $container running]' \
     ':local stopped [/container get $container stopped]' \
@@ -886,7 +929,20 @@ container_compatibility_contract() {
     ':global FoxOSContainerRoot do={' \
     ':local rootDirectory [/container get $container root-dir]' \
     '[:pick $rootDirectory 0 1] = "/"' \
-    ':return [:pick $rootDirectory 1 [:len $rootDirectory]]'; do
+    ':return [:pick $rootDirectory 1 [:len $rootDirectory]]' \
+    ':global FoxOSContainerMountLists do={' \
+    ':local propertyValue [/container get $container mountlists]' \
+    ':if ([:typeof $propertyValue] = "nil") do={ :return "" }' \
+    ':if ([:typeof $propertyValue] = "str") do={ :return $propertyValue }' \
+    ':if ([:typeof $propertyValue] != "array") do={ :error "container mountlists readback type is invalid" }' \
+    ':foreach item in=$propertyValue do={' \
+    '[:typeof $item] != "str"' \
+    '[:len $item] = 0' \
+    '[:typeof [:find $item ","]] != "nil"' \
+    ':error "container mountlists readback item is invalid"' \
+    ':set normalized ($normalized . ",")' \
+    ':set normalized ($normalized . $item)' \
+    ':return $normalized'; do
     rg -Fq -- "$invariant" "$script" || return 1
   done
 }
@@ -954,8 +1010,9 @@ container_compatibility_consumer_contract() {
   rg -Fq ':global FoxOSContainerCompatVersion' "$script" \
     && rg -Fq ':global FoxOSContainerState' "$script" \
     && rg -Fq ':global FoxOSContainerRoot' "$script" \
-    && rg -Fq '$FoxOSContainerCompatVersion != 1' "$script" \
-    && rg -q '\[\$FoxOSContainer(State|Root) \$[A-Za-z][A-Za-z0-9]*\]' "$script"
+    && rg -Fq '$FoxOSContainerCompatVersion != 2' "$script" \
+    && rg -q '\[\$FoxOSContainer(State|Root) \$[A-Za-z][A-Za-z0-9]*' "$script" \
+    && { ! rg -Fq '$FoxOSContainerMountLists ' "$script" || rg -Fq ':global FoxOSContainerMountLists' "$script"; }
 }
 
 mount_compatibility_consumer_contract() {
@@ -1362,8 +1419,8 @@ fi
 if ! install_start_native_value_contract "$rsc_root/foxos-install-inspect.rsc"; then
   report "first-install start script or scheduler does not use exact native success comparisons"
 fi
-if rg -n -g '*.rsc' -g '!load-site-config.rsc' -g '!chr-envlists-smoke.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (root-dir|running|stopped)\]' "$rsc_root"; then
-  report "container path or state bypasses the loader-owned compatibility contract"
+if rg -n -g '*.rsc' -g '!load-site-config.rsc' -g '!chr-envlists-smoke.rsc' '/container get \$[A-Za-z][A-Za-z0-9]* (root-dir|running|stopped|mountlists)\]' "$rsc_root"; then
+  report "container path, state, or mountlists property bypasses the loader-owned compatibility contract"
 fi
 if rg -n -g '*.rsc' '/container/add[^#]*(foxos-mihomo|foxos-mosdns)[^#]*envlists=foxos-env' "$rsc_root"; then
   report "Mihomo or MosDNS would inherit FoxOS credentials"
@@ -1630,7 +1687,7 @@ fi
 for identity_material in \
   '[/container get $containerID interface]' \
   '[/container get $containerID envlists]' \
-  '[/container get $containerID mountlists]' \
+  '[$FoxOSContainerMountLists $containerID]' \
   '[/container get $containerID logging]'; do
   if ! rg -Fq "$identity_material" "$rsc_root/foxos-uninstall-inspect.rsc"; then
     report "the uninstall digest material omits container identity field: $identity_material"
@@ -2069,6 +2126,31 @@ sed '/:return \[:pick \$rootDirectory 1 \[:len \$rootDirectory\]\]/d' \
 if container_compatibility_contract "$site_seal_root/lifecycle/container-root-normalization-missing.rsc"; then
   report "container compatibility contract accepted root-dir readback without leading-slash normalization"
 fi
+sed '/:local propertyValue \[\/container get \$container mountlists\]/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/container-mountlists-readback-missing.rsc"
+if container_compatibility_contract "$site_seal_root/lifecycle/container-mountlists-readback-missing.rsc"; then
+  report "container compatibility contract accepted mountlists normalization without native readback"
+fi
+sed '/:if (\[:typeof \$propertyValue\] != "array") do={ :error "container mountlists readback type is invalid" }/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/container-mountlists-array-guard-missing.rsc"
+if container_compatibility_contract "$site_seal_root/lifecycle/container-mountlists-array-guard-missing.rsc"; then
+  report "container compatibility contract accepted mountlists normalization without an array type guard"
+fi
+sed '/:set normalized (\$normalized \. \$item)/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/container-mountlists-join-missing.rsc"
+if container_compatibility_contract "$site_seal_root/lifecycle/container-mountlists-join-missing.rsc"; then
+  report "container compatibility contract accepted mountlists normalization without ordered item joining"
+fi
+sed '/:if (\[:typeof \$propertyValue\] = "nil") do={ :return "" }/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/container-mountlists-nil-guard-missing.rsc"
+if container_compatibility_contract "$site_seal_root/lifecycle/container-mountlists-nil-guard-missing.rsc"; then
+  report "container compatibility contract accepted mountlists normalization without nil handling"
+fi
+sed '/:error "container mountlists readback item is invalid"/d' \
+  "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/container-mountlists-item-rejection-missing.rsc"
+if container_compatibility_contract "$site_seal_root/lifecycle/container-mountlists-item-rejection-missing.rsc"; then
+  report "container compatibility contract accepted invalid array items without fail-closed rejection"
+fi
 sed 's#/container/mounts get \$mount mode#/container/mounts get $mount read-only#' \
   "$rsc_root/load-site-config.rsc" > "$site_seal_root/lifecycle/mount-mode-legacy-readback.rsc"
 if cmp -s "$rsc_root/load-site-config.rsc" "$site_seal_root/lifecycle/mount-mode-legacy-readback.rsc"; then
@@ -2210,10 +2292,65 @@ sed '/:local containerMountLists \[\/container get \$container mountlists\]/d' \
 if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-mountlists-readback-missing.rsc"; then
   report "CHR smoke contract accepted a script without mountlists readback"
 fi
+sed 's/;\$mountListNameC//' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-third-mount-name-missing.rsc"
+if cmp -s "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-third-mount-name-missing.rsc"; then
+  report "CHR smoke third mount-name failure injection did not mutate the smoke"
+elif chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-third-mount-name-missing.rsc"; then
+  report "CHR smoke contract accepted fewer than three ordered mount names"
+fi
+sed 's/;\$mountDestinationC//' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-third-mount-destination-missing.rsc"
+if cmp -s "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-third-mount-destination-missing.rsc"; then
+  report "CHR smoke third mount-destination failure injection did not mutate the smoke"
+elif chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-third-mount-destination-missing.rsc"; then
+  report "CHR smoke contract accepted fewer than three ordered mount destinations"
+fi
+sed 's/\$containerMountListsType != "array" || //' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-mountlists-array-type-guard-missing.rsc"
+if cmp -s "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-mountlists-array-type-guard-missing.rsc"; then
+  report "CHR smoke mountlists array-type failure injection did not mutate the smoke"
+elif chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-mountlists-array-type-guard-missing.rsc"; then
+  report "CHR smoke contract accepted mountlists without native array type enforcement"
+fi
+sed 's/\$containerMountListsCount != 3/\$containerMountListsCount != 1/' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-mountlists-count-one.rsc"
+if cmp -s "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-mountlists-count-one.rsc"; then
+  report "CHR smoke mountlists count failure injection did not mutate the smoke"
+elif chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-mountlists-count-one.rsc"; then
+  report "CHR smoke contract accepted a one-element mountlists readback"
+fi
+sed 's/\$containerMountListsCanonical != \$expectedMountLists || //' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-mountlists-order-check-missing.rsc"
+if cmp -s "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-mountlists-order-check-missing.rsc"; then
+  report "CHR smoke mountlists order failure injection did not mutate the smoke"
+elif chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-mountlists-order-check-missing.rsc"; then
+  report "CHR smoke contract accepted mountlists without exact ordered comparison"
+fi
 sed '/\$cleanupByName != \$cleanupByOwner/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-cleanup-binding-missing.rsc"
 if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-cleanup-binding-missing.rsc"; then
   report "CHR envlists smoke contract accepted identity-unbound cleanup"
+fi
+awk '
+  index($0, ":local mountDestination [:pick $mountDestinations $mountIndex]") {
+    seen++
+    if (seen == 2) next
+  }
+  { print }
+' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-mount-cleanup-destination-binding-missing.rsc"
+if cmp -s "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-mount-cleanup-destination-binding-missing.rsc"; then
+  report "CHR smoke mount cleanup failure injection did not mutate the smoke"
+elif chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-mount-cleanup-destination-binding-missing.rsc"; then
+  report "CHR smoke contract accepted mount cleanup without all destination bindings"
+fi
+sed 's# || \[/container/mounts get \$cleanupMountByList comment\] != \$owner##' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-mount-cleanup-owner-binding-missing.rsc"
+if cmp -s "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-mount-cleanup-owner-binding-missing.rsc"; then
+  report "CHR smoke mount owner failure injection did not mutate the smoke"
+elif chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-mount-cleanup-owner-binding-missing.rsc"; then
+  report "CHR smoke contract accepted mount cleanup without owner identity binding"
 fi
 sed '/:local stopped \[\/container get \$container stopped\]/d' \
   "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-state-flag-missing.rsc"
@@ -2225,10 +2362,15 @@ sed 's/ || \$residualRoots > 0//' \
 if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-residual-root-guard-missing.rsc"; then
   report "CHR envlists smoke contract accepted PASS with an incomplete residual guard"
 fi
-sed 's/ || \$residualMounts > 0//' \
-  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-residual-mount-guard-missing.rsc"
-if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-residual-mount-guard-missing.rsc"; then
-  report "CHR smoke contract accepted PASS with an incomplete mount residual guard"
+sed 's/ || \$residualMountsByOwner > 0//' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-residual-mount-owner-guard-missing.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-residual-mount-owner-guard-missing.rsc"; then
+  report "CHR smoke contract accepted PASS without the mount owner residual guard"
+fi
+sed 's/ || \$residualMountListBindings > 0//' \
+  "$rsc_root/chr-envlists-smoke.rsc" > "$site_seal_root/lifecycle/smoke-residual-mount-list-guard-missing.rsc"
+if chr_envlists_smoke_contract "$site_seal_root/lifecycle/smoke-residual-mount-list-guard-missing.rsc"; then
+  report "CHR smoke contract accepted PASS without the mount list residual guard"
 fi
 cp -- "$rsc_root/chr-envlists-smoke.rsc" "$site_seal_root/lifecycle/smoke-container-start-added.rsc"
 printf '%s\n' '/container/start [find where name="unexpected"]' >> "$site_seal_root/lifecycle/smoke-container-start-added.rsc"

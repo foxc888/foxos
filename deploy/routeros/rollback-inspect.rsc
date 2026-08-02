@@ -9,6 +9,7 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSContainerMountLists
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
@@ -19,7 +20,7 @@
 :global FoxOSRollbackSlotID
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
-:if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
+:if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 
 :local releaseID "__FOXOS_RELEASE_ID__"
@@ -50,10 +51,10 @@
 :local rollbackBoot [/container get $rollback start-on-boot]
 :local activeLogging [/container get $active logging]
 :local rollbackLogging [/container get $rollback logging]
-:if ($activeName != $activeNameExpected || [$FoxOSContainerRoot $active] != $activeRootExpected || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [/container get $active mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($activeBoot != false && $activeBoot != "no") || ($activeLogging != false && $activeLogging != "no") || ($activeStatus != "running" && $activeStatus != "stopped")) do={ :error "active 槽位不是此版本化 payload 对应的完整 release 身份" }
-:if (!($rollbackName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $rollback] != ($FoxOSSiteStorageRoot . "/containers/" . $rollbackName) || [/container get $rollback interface] != "veth-foxos" || [/container get $rollback envlists] != "foxos-env" || [/container get $rollback mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($rollbackBoot != false && $rollbackBoot != "no") || ($rollbackLogging != false && $rollbackLogging != "no") || [$FoxOSContainerState $rollback] != "stopped") do={ :error "rollback 槽位完整身份或停止状态不匹配" }
-:set material ($material . "|active=" . [:pick $active 0] . ":" . $activeName . ":" . [$FoxOSContainerRoot $active] . ":" . $activeStatus . ":" . [/container get $active interface] . ":" . [/container get $active envlists] . ":" . [/container get $active mountlists] . ":" . $activeBoot . ":" . $activeLogging)
-:set material ($material . "|rollback=" . [:pick $rollback 0] . ":" . $rollbackName . ":" . [$FoxOSContainerRoot $rollback] . ":" . [$FoxOSContainerState $rollback] . ":" . [/container get $rollback interface] . ":" . [/container get $rollback envlists] . ":" . [/container get $rollback mountlists] . ":" . $rollbackBoot . ":" . $rollbackLogging)
+:if ($activeName != $activeNameExpected || [$FoxOSContainerRoot $active] != $activeRootExpected || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($activeBoot != false && $activeBoot != "no") || ($activeLogging != false && $activeLogging != "no") || ($activeStatus != "running" && $activeStatus != "stopped")) do={ :error "active 槽位不是此版本化 payload 对应的完整 release 身份" }
+:if (!($rollbackName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $rollback] != ($FoxOSSiteStorageRoot . "/containers/" . $rollbackName) || [/container get $rollback interface] != "veth-foxos" || [/container get $rollback envlists] != "foxos-env" || [$FoxOSContainerMountLists $rollback] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($rollbackBoot != false && $rollbackBoot != "no") || ($rollbackLogging != false && $rollbackLogging != "no") || [$FoxOSContainerState $rollback] != "stopped") do={ :error "rollback 槽位完整身份或停止状态不匹配" }
+:set material ($material . "|active=" . [:pick $active 0] . ":" . $activeName . ":" . [$FoxOSContainerRoot $active] . ":" . $activeStatus . ":" . [/container get $active interface] . ":" . [/container get $active envlists] . ":" . [$FoxOSContainerMountLists $active] . ":" . $activeBoot . ":" . $activeLogging)
+:set material ($material . "|rollback=" . [:pick $rollback 0] . ":" . $rollbackName . ":" . [$FoxOSContainerRoot $rollback] . ":" . [$FoxOSContainerState $rollback] . ":" . [/container get $rollback interface] . ":" . [/container get $rollback envlists] . ":" . [$FoxOSContainerMountLists $rollback] . ":" . $rollbackBoot . ":" . $rollbackLogging)
 
 :local installMarkers [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER"]
 :if ([:len $installMarkers] != 1 || [/container/envs get $installMarkers value] != "foxos:complete") do={ :error "foxos-env 必须处于唯一 foxos:complete 状态" }

@@ -13,6 +13,7 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSContainerMountLists
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
@@ -24,7 +25,7 @@
 :global FoxOSUpgradeCleanupRollbackMarker
 :local releaseID "__FOXOS_RELEASE_ID__"
 :if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "upgrade-cleanup-inspect.rsc 未绑定有效 release ID" }
-:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || $FoxOSContainerCompatVersion != 1 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || $FoxOSContainerCompatVersion != 2 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
   :error "必须先使用根目录不可变 loader 验证 manifest v2"
 }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
@@ -58,10 +59,10 @@
 :local retirementBoot [/container get $retirement start-on-boot]
 :local activeLogging [/container get $active logging]
 :local retirementLogging [/container get $retirement logging]
-:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [/container get $active mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($activeBoot != false && $activeBoot != "no") || ($activeLogging != false && $activeLogging != "no") || [$FoxOSContainerState $active] != "running") do={
+:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($activeBoot != false && $activeBoot != "no") || ($activeLogging != false && $activeLogging != "no") || [$FoxOSContainerState $active] != "running") do={
   :error "cleanup active 槽位完整身份契约不匹配或未运行"
 }
-:if (!($retirementName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $retirement] != ($FoxOSSiteStorageRoot . "/containers/" . $retirementName) || [/container get $retirement interface] != "veth-foxos" || [/container get $retirement envlists] != "foxos-env" || [/container get $retirement mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($retirementBoot != false && $retirementBoot != "no") || ($retirementLogging != false && $retirementLogging != "no") || [$FoxOSContainerState $retirement] != "stopped") do={
+:if (!($retirementName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $retirement] != ($FoxOSSiteStorageRoot . "/containers/" . $retirementName) || [/container get $retirement interface] != "veth-foxos" || [/container get $retirement envlists] != "foxos-env" || [$FoxOSContainerMountLists $retirement] != "foxos-mihomo-config,foxos-data,foxos-backups" || ($retirementBoot != false && $retirementBoot != "no") || ($retirementLogging != false && $retirementLogging != "no") || [$FoxOSContainerState $retirement] != "stopped") do={
   :error "待归档 rollback 槽位完整身份契约或 stopped 状态不匹配"
 }
 :local releaseName ("foxos-" . $releaseID)
@@ -79,20 +80,20 @@
   :local adminStatus [$FoxOSContainerState $adminSlot]
   :local adminBoot [/container get $adminSlot start-on-boot]
   :local adminLogging [/container get $adminSlot logging]
-  :if (!($adminName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $adminSlot interface] != "veth-foxos" || [/container get $adminSlot envlists] != "foxos-env" || [/container get $adminSlot mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $adminSlot] != ($FoxOSSiteStorageRoot . "/containers/" . $adminName) || ($adminStatus != "running" && $adminStatus != "stopped") || ($adminBoot != false && $adminBoot != "no") || ($adminLogging != false && $adminLogging != "no")) do={
+  :if (!($adminName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $adminSlot interface] != "veth-foxos" || [/container get $adminSlot envlists] != "foxos-env" || [$FoxOSContainerMountLists $adminSlot] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $adminSlot] != ($FoxOSSiteStorageRoot . "/containers/" . $adminName) || ($adminStatus != "running" && $adminStatus != "stopped") || ($adminBoot != false && $adminBoot != "no") || ($adminLogging != false && $adminLogging != "no")) do={
     :error ("cleanup 管理槽位完整身份契约不匹配: " . $adminName)
   }
   :if ($adminStatus = "running") do={
     :set runningAdminCount ($runningAdminCount + 1)
     :set runningAdminID $adminSlot
   }
-  :set adminSlotMaterial ($adminSlotMaterial . "|admin-slot=" . $adminSlot . ":" . $adminName . ":" . [/container get $adminSlot comment] . ":" . $adminStatus . ":" . [$FoxOSContainerRoot $adminSlot] . ":" . [/container get $adminSlot interface] . ":" . [/container get $adminSlot envlists] . ":" . [/container get $adminSlot mountlists] . ":" . $adminBoot . ":" . $adminLogging)
+  :set adminSlotMaterial ($adminSlotMaterial . "|admin-slot=" . $adminSlot . ":" . $adminName . ":" . [/container get $adminSlot comment] . ":" . $adminStatus . ":" . [$FoxOSContainerRoot $adminSlot] . ":" . [/container get $adminSlot interface] . ":" . [/container get $adminSlot envlists] . ":" . [$FoxOSContainerMountLists $adminSlot] . ":" . $adminBoot . ":" . $adminLogging)
 }
 :if ($runningAdminCount != 1 || $runningAdminID != $active) do={ :error "cleanup 要求 committed active 是唯一 running 管理槽位" }
 
 :local material ("foxos-upgrade-cleanup-v3|release=" . $releaseID . "|site=" . $FoxOSSiteLoadedDigest)
-:set material ($material . "|active=" . [:pick $active 0] . ":" . $activeName . ":" . [$FoxOSContainerRoot $active] . ":" . [$FoxOSContainerState $active] . ":" . [/container get $active comment] . ":" . [/container get $active interface] . ":" . [/container get $active envlists] . ":" . [/container get $active mountlists] . ":" . $activeBoot . ":" . $activeLogging)
-:set material ($material . "|rollback=" . [:pick $retirement 0] . ":" . $retirementName . ":" . [$FoxOSContainerRoot $retirement] . ":" . [$FoxOSContainerState $retirement] . ":" . $sourceMarker . ":" . [/container get $retirement interface] . ":" . [/container get $retirement envlists] . ":" . [/container get $retirement mountlists] . ":" . $retirementBoot . ":" . $retirementLogging)
+:set material ($material . "|active=" . [:pick $active 0] . ":" . $activeName . ":" . [$FoxOSContainerRoot $active] . ":" . [$FoxOSContainerState $active] . ":" . [/container get $active comment] . ":" . [/container get $active interface] . ":" . [/container get $active envlists] . ":" . [$FoxOSContainerMountLists $active] . ":" . $activeBoot . ":" . $activeLogging)
+:set material ($material . "|rollback=" . [:pick $retirement 0] . ":" . $retirementName . ":" . [$FoxOSContainerRoot $retirement] . ":" . [$FoxOSContainerState $retirement] . ":" . $sourceMarker . ":" . [/container get $retirement interface] . ":" . [/container get $retirement envlists] . ":" . [$FoxOSContainerMountLists $retirement] . ":" . $retirementBoot . ":" . $retirementLogging)
 :set material ($material . $adminSlotMaterial)
 
 :local installMarkers [/container/envs find where list="foxos-env" key="FOXOS_INSTALL_MARKER"]

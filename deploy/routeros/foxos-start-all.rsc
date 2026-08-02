@@ -8,13 +8,14 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSContainerMountLists
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
 :global FoxOSMountMode
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
-:if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
+:if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 :local storageRoot $FoxOSSiteStorageRoot
 :local promoteTransition [/container find where comment="foxos:transition:promote"]
@@ -30,7 +31,7 @@
 :foreach adminSlot in=$knownAdminSlots do={
   :local adminName [/container get $adminSlot name]
   :local adminStatus [$FoxOSContainerState $adminSlot]
-  :if (!($adminName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $adminSlot interface] != "veth-foxos" || [/container get $adminSlot envlists] != "foxos-env" || [/container get $adminSlot mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $adminSlot] != ($storageRoot . "/containers/" . $adminName) || ($adminStatus != "running" && $adminStatus != "stopped") || ([/container get $adminSlot start-on-boot] != false && [/container get $adminSlot start-on-boot] != "no") || ([/container get $adminSlot logging] != false && [/container get $adminSlot logging] != "no")) do={
+  :if (!($adminName ~ "^foxos-[A-Za-z0-9._-]+\$") || [/container get $adminSlot interface] != "veth-foxos" || [/container get $adminSlot envlists] != "foxos-env" || [$FoxOSContainerMountLists $adminSlot] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $adminSlot] != ($storageRoot . "/containers/" . $adminName) || ($adminStatus != "running" && $adminStatus != "stopped") || ([/container get $adminSlot start-on-boot] != false && [/container get $adminSlot start-on-boot] != "no") || ([/container get $adminSlot logging] != false && [/container get $adminSlot logging] != "no")) do={
     :error ("管理容器完整身份契约不匹配: " . $adminName)
   }
 }
@@ -39,10 +40,10 @@
 :local mihomoByName [/container find where name="foxos-mihomo"]
 :local mosdnsByName [/container find where name="foxos-mosdns"]
 :if ([:len $mihomo] != 1 || [:len $mosdns] != 1) do={ :error "Mihomo 与 MosDNS 容器必须各自唯一" }
-:if ([:len $mihomoByName] != 1 || $mihomoByName != $mihomo || [/container get $mihomo interface] != "veth-mihomo" || [/container get $mihomo envlists] != "" || [/container get $mihomo mountlists] != "foxos-mihomo-runtime" || [$FoxOSContainerRoot $mihomo] != ($storageRoot . "/containers/mihomo") || ([/container get $mihomo start-on-boot] != false && [/container get $mihomo start-on-boot] != "no") || ([/container get $mihomo logging] != true && [/container get $mihomo logging] != "yes")) do={
+:if ([:len $mihomoByName] != 1 || $mihomoByName != $mihomo || [/container get $mihomo interface] != "veth-mihomo" || [/container get $mihomo envlists] != "" || [$FoxOSContainerMountLists $mihomo] != "foxos-mihomo-runtime" || [$FoxOSContainerRoot $mihomo] != ($storageRoot . "/containers/mihomo") || ([/container get $mihomo start-on-boot] != false && [/container get $mihomo start-on-boot] != "no") || ([/container get $mihomo logging] != true && [/container get $mihomo logging] != "yes")) do={
   :error "Mihomo 容器完整身份契约不匹配，拒绝启动"
 }
-:if ([:len $mosdnsByName] != 1 || $mosdnsByName != $mosdns || [/container get $mosdns interface] != "veth-mosdns" || [/container get $mosdns envlists] != "foxos-mosdns-env" || [/container get $mosdns mountlists] != "foxos-mosdns-runtime" || [$FoxOSContainerRoot $mosdns] != ($storageRoot . "/containers/mosdns") || ([/container get $mosdns start-on-boot] != false && [/container get $mosdns start-on-boot] != "no") || ([/container get $mosdns logging] != true && [/container get $mosdns logging] != "yes")) do={
+:if ([:len $mosdnsByName] != 1 || $mosdnsByName != $mosdns || [/container get $mosdns interface] != "veth-mosdns" || [/container get $mosdns envlists] != "foxos-mosdns-env" || [$FoxOSContainerMountLists $mosdns] != "foxos-mosdns-runtime" || [$FoxOSContainerRoot $mosdns] != ($storageRoot . "/containers/mosdns") || ([/container get $mosdns start-on-boot] != false && [/container get $mosdns start-on-boot] != "no") || ([/container get $mosdns logging] != true && [/container get $mosdns logging] != "yes")) do={
   :error "MosDNS 容器完整身份契约不匹配，拒绝启动"
 }
 :local runningAdminSlots 0
@@ -101,7 +102,7 @@
 :local active [/container find where comment="foxos:active"]
 :if ([:len $mihomo] != 1 || [:len $mosdns] != 1 || [:len $active] != 1) do={ :error "三个 FoxOS 容器必须各自唯一" }
 :local activeName [/container get $active name]
-:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [:len [/container find where name=$activeName]] != 1 || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [/container get $active mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $active] != ($storageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={
+:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [:len [/container find where name=$activeName]] != 1 || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $active] != ($storageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={
   :error "FoxOS active 容器完整身份契约不匹配，拒绝启动"
 }
 

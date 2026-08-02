@@ -14,6 +14,7 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSContainerMountLists
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
@@ -23,7 +24,7 @@
 :global FoxOSUninstallContainerCount
 :global FoxOSUninstallDNSCount
 :global FoxOSUninstallRemainingCount
-:if ($FoxOSSiteManifestVersion != 2 || $FoxOSContainerCompatVersion != 1) do={ :error "site manifest and container compatibility contract are required" }
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSContainerCompatVersion != 2) do={ :error "site manifest and container compatibility contract are required" }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
 
 :local failed false
@@ -56,11 +57,11 @@
   :local accepted false
   :if ($owner = "foxos:mihomo") do={
     :set mihomoCount ($mihomoCount + 1)
-    :if ([/container get $containerID name] = "foxos-mihomo" && [/container get $containerID interface] = "veth-mihomo" && [/container get $containerID envlists] = "" && [/container get $containerID mountlists] = "foxos-mihomo-runtime" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/mihomo")) do={ :set accepted true }
+    :if ([/container get $containerID name] = "foxos-mihomo" && [/container get $containerID interface] = "veth-mihomo" && [/container get $containerID envlists] = "" && [$FoxOSContainerMountLists $containerID] = "foxos-mihomo-runtime" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/mihomo")) do={ :set accepted true }
   }
   :if ($owner = "foxos:mosdns") do={
     :set mosdnsCount ($mosdnsCount + 1)
-    :if ([/container get $containerID name] = "foxos-mosdns" && [/container get $containerID interface] = "veth-mosdns" && [/container get $containerID envlists] = "foxos-mosdns-env" && [/container get $containerID mountlists] = "foxos-mosdns-runtime" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/mosdns")) do={ :set accepted true }
+    :if ([/container get $containerID name] = "foxos-mosdns" && [/container get $containerID interface] = "veth-mosdns" && [/container get $containerID envlists] = "foxos-mosdns-env" && [$FoxOSContainerMountLists $containerID] = "foxos-mosdns-runtime" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/mosdns")) do={ :set accepted true }
   }
   :if ($owner = "foxos:active" || $owner = "foxos:pending" || $owner = "foxos:rollback" || $owner = "foxos:rollback-complete" || $owner = "foxos:transition:promote" || $owner = "foxos:transition:rollback" || $owner = "foxos:transition:rollback:previous" || $owner = "foxos:retained" || $owner = "foxos:failed") do={
     :if ($owner = "foxos:active") do={ :set activeCount ($activeCount + 1) }
@@ -71,7 +72,7 @@
     :if ($owner = "foxos:transition:rollback") do={ :set rollbackTransitionCount ($rollbackTransitionCount + 1) }
     :if ($owner = "foxos:transition:rollback:previous") do={ :set rollbackPreviousCount ($rollbackPreviousCount + 1) }
     :local adminName [/container get $containerID name]
-    :if ($adminName ~ "^foxos-[A-Za-z0-9._-]+\$" && [/container get $containerID interface] = "veth-foxos" && [/container get $containerID envlists] = "foxos-env" && [/container get $containerID mountlists] = "foxos-mihomo-config,foxos-data,foxos-backups" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/" . $adminName)) do={ :set accepted true }
+    :if ($adminName ~ "^foxos-[A-Za-z0-9._-]+\$" && [/container get $containerID interface] = "veth-foxos" && [/container get $containerID envlists] = "foxos-env" && [$FoxOSContainerMountLists $containerID] = "foxos-mihomo-config,foxos-data,foxos-backups" && [$FoxOSContainerRoot $containerID] = ($FoxOSSiteStorageRoot . "/containers/" . $adminName)) do={ :set accepted true }
   }
   :local status [$FoxOSContainerState $containerID]
   :if ($status != "running" && $status != "stopped") do={ :set accepted false }
@@ -89,7 +90,7 @@
   } else={
     :set remaining ($remaining + 1)
     :if ($FoxOSUninstallInspectVerbose) do={ :put ("REMOVE container " . [/container get $containerID name] . " owner=" . $owner . " status=" . $status) }
-    :set material ($material . "|container:" . $containerID . ":" . [/container get $containerID name] . ":" . $owner . ":" . [$FoxOSContainerRoot $containerID] . ":" . [/container get $containerID interface] . ":" . [/container get $containerID envlists] . ":" . [/container get $containerID mountlists] . ":" . $status . ":" . [/container get $containerID start-on-boot] . ":" . [/container get $containerID logging])
+    :set material ($material . "|container:" . $containerID . ":" . [/container get $containerID name] . ":" . $owner . ":" . [$FoxOSContainerRoot $containerID] . ":" . [/container get $containerID interface] . ":" . [/container get $containerID envlists] . ":" . [$FoxOSContainerMountLists $containerID] . ":" . $status . ":" . [/container get $containerID start-on-boot] . ":" . [/container get $containerID logging])
   }
 }
 :if ($activeCount > 1 || $mihomoCount > 1 || $mosdnsCount > 1 || $pendingCount > 1 || $rollbackCount > 1 || $rollbackCompleteCount > 1 || $promoteTransitionCount > 1 || $rollbackTransitionCount > 1 || $rollbackPreviousCount > 1) do={ :set failed true }

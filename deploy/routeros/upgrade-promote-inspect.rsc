@@ -12,6 +12,7 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSContainerMountLists
 :global FoxOSMountCompatVersion
 :global FoxOSWritableMountMode
 :global FoxOSMountSource
@@ -24,7 +25,7 @@
 :global FoxOSUpgradePromoteRollbackID
 :local releaseID "__FOXOS_RELEASE_ID__"
 :if ($releaseID ~ "^__.*__\$" || [:len $releaseID] < 1 || [:len $releaseID] > 40 || !($releaseID ~ "^[A-Za-z0-9._-]+\$")) do={ :error "upgrade-promote-inspect.rsc 未绑定有效 release ID" }
-:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || $FoxOSContainerCompatVersion != 1 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
+:if ($FoxOSSiteManifestVersion != 2 || $FoxOSSiteLoaderVersion != 1 || $FoxOSContainerCompatVersion != 2 || [:len $FoxOSSiteLoadedDigest] != 128 || $FoxOSSiteLoadedConfigPath != ($FoxOSSiteStorageRoot . "/site-config.rsc")) do={
   :error "必须先使用本升级包的不可变 loader 验证根目录 manifest v2"
 }
 :if ($FoxOSMountCompatVersion != 2 || $FoxOSWritableMountMode != "rw") do={ :error "mount compatibility contract is unavailable" }
@@ -57,10 +58,10 @@
 :if ($state = "") do={ :error "需要唯一 active+pending，或已切换的唯一 active+rollback 状态" }
 :if ($oldSlot = $newSlot) do={ :error "旧槽位与新槽位 ID 冲突" }
 :local oldName [/container get $oldSlot name]
-:if (!($oldName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $oldSlot] != ($FoxOSSiteStorageRoot . "/containers/" . $oldName) || [/container get $oldSlot interface] != "veth-foxos" || [/container get $oldSlot envlists] != "foxos-env" || [/container get $oldSlot mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $oldSlot start-on-boot] != false && [/container get $oldSlot start-on-boot] != "no") || ([/container get $oldSlot logging] != false && [/container get $oldSlot logging] != "no")) do={
+:if (!($oldName ~ "^foxos-[A-Za-z0-9._-]+\$") || [$FoxOSContainerRoot $oldSlot] != ($FoxOSSiteStorageRoot . "/containers/" . $oldName) || [/container get $oldSlot interface] != "veth-foxos" || [/container get $oldSlot envlists] != "foxos-env" || [$FoxOSContainerMountLists $oldSlot] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $oldSlot start-on-boot] != false && [/container get $oldSlot start-on-boot] != "no") || ([/container get $oldSlot logging] != false && [/container get $oldSlot logging] != "no")) do={
   :error "旧槽位完整身份契约不匹配"
 }
-:if ([/container get $newSlot name] != $pendingName || [$FoxOSContainerRoot $newSlot] != $pendingRoot || [/container get $newSlot interface] != "veth-foxos" || [/container get $newSlot envlists] != "foxos-env" || [/container get $newSlot mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $newSlot start-on-boot] != false && [/container get $newSlot start-on-boot] != "no") || ([/container get $newSlot logging] != false && [/container get $newSlot logging] != "no")) do={
+:if ([/container get $newSlot name] != $pendingName || [$FoxOSContainerRoot $newSlot] != $pendingRoot || [/container get $newSlot interface] != "veth-foxos" || [/container get $newSlot envlists] != "foxos-env" || [$FoxOSContainerMountLists $newSlot] != "foxos-mihomo-config,foxos-data,foxos-backups" || ([/container get $newSlot start-on-boot] != false && [/container get $newSlot start-on-boot] != "no") || ([/container get $newSlot logging] != false && [/container get $newSlot logging] != "no")) do={
   :error "新槽位与当前升级包 release ID 或完整身份契约不匹配"
 }
 :if ($state = "pending" && ([$FoxOSContainerState $oldSlot] != "running" || [$FoxOSContainerState $newSlot] != "stopped")) do={ :error "promote 前必须是旧 active running、新 pending stopped" }

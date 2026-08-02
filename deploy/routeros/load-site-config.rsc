@@ -242,9 +242,10 @@
 :set FoxOSSiteLoadedConfigPath $configPath
 
 # RouterOS 7.23.2 exposes container identity as the native find handle, state
-# as dynamic boolean flags, and may prefix root-dir readback with one slash.
-# Keep that compatibility contract in one loader-owned runtime primitive.
-:global FoxOSContainerCompatVersion 1
+# as dynamic boolean flags, mountlists with multiple entries as an array, and
+# may prefix root-dir readback with one slash. Keep that compatibility contract
+# in loader-owned runtime primitives.
+:global FoxOSContainerCompatVersion 2
 :global FoxOSContainerState do={
   :local container $1
   :local running [/container get $container running]
@@ -264,6 +265,22 @@
     :return [:pick $rootDirectory 1 [:len $rootDirectory]]
   }
   :return $rootDirectory
+}
+:global FoxOSContainerMountLists do={
+  :local container $1
+  :local propertyValue [/container get $container mountlists]
+  :if ([:typeof $propertyValue] = "nil") do={ :return "" }
+  :if ([:typeof $propertyValue] = "str") do={ :return $propertyValue }
+  :if ([:typeof $propertyValue] != "array") do={ :error "container mountlists readback type is invalid" }
+  :local normalized ""
+  :foreach item in=$propertyValue do={
+    :if ([:typeof $item] != "str" || [:len $item] = 0 || [:typeof [:find $item ","]] != "nil") do={
+      :error "container mountlists readback item is invalid"
+    }
+    :if ([:len $normalized] > 0) do={ :set normalized ($normalized . ",") }
+    :set normalized ($normalized . $item)
+  }
+  :return $normalized
 }
 # RouterOS 7.23.2 exposes named mount access through mode instead of the
 # legacy read-only property and prefixes source readback with one slash.

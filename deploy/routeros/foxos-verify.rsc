@@ -8,9 +8,10 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSContainerMountLists
 :if ($FoxOSSiteManifestVersion != 2) do={ :error "先导入不可变的 load-site-config.rsc" }
 /import file-name=($FoxOSSiteStorageRoot . "/load-site-config.rsc")
-:if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
+:if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 :local foxosURL ("https://" . $FoxOSSiteFoxOSAddress)
 :local containerDeviceMode [/system/device-mode get container]
 :local schedulerDeviceMode [/system/device-mode get scheduler]
@@ -24,9 +25,9 @@
 :local mihomoByName [/container find where name="foxos-mihomo"]
 :local mosdnsByName [/container find where name="foxos-mosdns"]
 :local activeName [/container get $active name]
-:if ([:len $mihomoByName] != 1 || $mihomoByName != $mihomo || [/container get $mihomo interface] != "veth-mihomo" || [/container get $mihomo envlists] != "" || [/container get $mihomo mountlists] != "foxos-mihomo-runtime" || [$FoxOSContainerRoot $mihomo] != ($FoxOSSiteStorageRoot . "/containers/mihomo") || ([/container get $mihomo start-on-boot] != false && [/container get $mihomo start-on-boot] != "no") || ([/container get $mihomo logging] != true && [/container get $mihomo logging] != "yes")) do={ :error "Mihomo 容器完整身份契约不匹配" }
-:if ([:len $mosdnsByName] != 1 || $mosdnsByName != $mosdns || [/container get $mosdns interface] != "veth-mosdns" || [/container get $mosdns envlists] != "foxos-mosdns-env" || [/container get $mosdns mountlists] != "foxos-mosdns-runtime" || [$FoxOSContainerRoot $mosdns] != ($FoxOSSiteStorageRoot . "/containers/mosdns") || ([/container get $mosdns start-on-boot] != false && [/container get $mosdns start-on-boot] != "no") || ([/container get $mosdns logging] != true && [/container get $mosdns logging] != "yes")) do={ :error "MosDNS 容器完整身份契约不匹配" }
-:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [:len [/container find where name=$activeName]] != 1 || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [/container get $active mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={ :error "FoxOS active 容器完整身份契约不匹配" }
+:if ([:len $mihomoByName] != 1 || $mihomoByName != $mihomo || [/container get $mihomo interface] != "veth-mihomo" || [/container get $mihomo envlists] != "" || [$FoxOSContainerMountLists $mihomo] != "foxos-mihomo-runtime" || [$FoxOSContainerRoot $mihomo] != ($FoxOSSiteStorageRoot . "/containers/mihomo") || ([/container get $mihomo start-on-boot] != false && [/container get $mihomo start-on-boot] != "no") || ([/container get $mihomo logging] != true && [/container get $mihomo logging] != "yes")) do={ :error "Mihomo 容器完整身份契约不匹配" }
+:if ([:len $mosdnsByName] != 1 || $mosdnsByName != $mosdns || [/container get $mosdns interface] != "veth-mosdns" || [/container get $mosdns envlists] != "foxos-mosdns-env" || [$FoxOSContainerMountLists $mosdns] != "foxos-mosdns-runtime" || [$FoxOSContainerRoot $mosdns] != ($FoxOSSiteStorageRoot . "/containers/mosdns") || ([/container get $mosdns start-on-boot] != false && [/container get $mosdns start-on-boot] != "no") || ([/container get $mosdns logging] != true && [/container get $mosdns logging] != "yes")) do={ :error "MosDNS 容器完整身份契约不匹配" }
+:if (!($activeName ~ "^foxos-[A-Za-z0-9._-]+\$") || [:len [/container find where name=$activeName]] != 1 || [/container get $active interface] != "veth-foxos" || [/container get $active envlists] != "foxos-env" || [$FoxOSContainerMountLists $active] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $active] != ($FoxOSSiteStorageRoot . "/containers/" . $activeName) || ([/container get $active start-on-boot] != false && [/container get $active start-on-boot] != "no") || ([/container get $active logging] != false && [/container get $active logging] != "no")) do={ :error "FoxOS active 容器完整身份契约不匹配" }
 :foreach containerID in={$mihomo;$mosdns;$active} do={
   :if ([$FoxOSContainerState $containerID] != "running") do={ :error ("容器未处于 running: " . [/container get $containerID name]) }
 }

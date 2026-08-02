@@ -6,6 +6,7 @@
 :global FoxOSContainerCompatVersion
 :global FoxOSContainerState
 :global FoxOSContainerRoot
+:global FoxOSContainerMountLists
 :global FoxOSUpgradeInspectVerbose false
 :global FoxOSUpgradeCurrentDigest
 :global FoxOSUpgradeApprovedDigest
@@ -20,7 +21,7 @@
 :local approved $FoxOSUpgradeApprovedDigest
 :local confirmation $FoxOSUpgradeConfirmation
 /import file-name=($storageRoot . "/load-site-config.rsc")
-:if ($FoxOSContainerCompatVersion != 1) do={ :error "container compatibility contract is unavailable" }
+:if ($FoxOSContainerCompatVersion != 2) do={ :error "container compatibility contract is unavailable" }
 /import file-name=($payloadRoot . "/upgrade-inspect.rsc")
 :if ([:len $approved] != 128 || $approved != $FoxOSUpgradeCurrentDigest || $confirmation != $approved) do={
   :error "升级阶段 1 前态在计划后变化或摘要未确认；重新运行 upgrade-plan.rsc"
@@ -47,7 +48,7 @@
 /container/add name=$pendingName file=$imagePath interface=veth-foxos root-dir=$pendingRoot envlists=foxos-env mountlists=foxos-mihomo-config,foxos-data,foxos-backups logging=no start-on-boot=no comment="foxos:pending"
 :local pending [/container find where comment="foxos:pending"]
 :local pendingByName [/container find where name=$pendingName]
-:if ([:len $pending] != 1 || [:len $pendingByName] != 1 || $pending != $pendingByName || [/container get $pending interface] != "veth-foxos" || [/container get $pending envlists] != "foxos-env" || [/container get $pending mountlists] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $pending] != $pendingRoot || ([/container get $pending start-on-boot] != false && [/container get $pending start-on-boot] != "no") || ([/container get $pending logging] != false && [/container get $pending logging] != "no") || [$FoxOSContainerState $pending] = "running") do={
+:if ([:len $pending] != 1 || [:len $pendingByName] != 1 || $pending != $pendingByName || [/container get $pending interface] != "veth-foxos" || [/container get $pending envlists] != "foxos-env" || [$FoxOSContainerMountLists $pending] != "foxos-mihomo-config,foxos-data,foxos-backups" || [$FoxOSContainerRoot $pending] != $pendingRoot || ([/container get $pending start-on-boot] != false && [/container get $pending start-on-boot] != "no") || ([/container get $pending logging] != false && [/container get $pending logging] != "no") || [$FoxOSContainerState $pending] = "running") do={
   :error "pending 容器创建后的完整身份回读失败"
 }
 :put ("镜像导入已排队。等待 " . $pendingName . " status=stopped 后执行 " . $payloadRoot . "/upgrade-promote-plan.rsc。")
