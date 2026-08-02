@@ -84,6 +84,7 @@ func TestBuildRouterOSBundleWithVersionedUpgradePayload(t *testing.T) {
 		"disk1/QUICK-INSTALL.md",
 		"disk1/chr-envlists-smoke.rsc",
 		"disk1/foxos-doctor.rsc",
+		"disk1/foxos-trust-ca.rsc",
 		"disk1/mihomo-config/config.yaml",
 		"disk1/mihomo-config/base.yaml",
 		"disk1/mosdns-config/config_custom.yaml",
@@ -98,6 +99,7 @@ func TestBuildRouterOSBundleWithVersionedUpgradePayload(t *testing.T) {
 		"APPROVED CLEANUP SHA-512",
 		"upgrade-cleanup-apply.rsc",
 		"foxos-secrets/api-token",
+		"FoxOSCATrustConfirmation",
 		"23/24",
 	} {
 		if !strings.Contains(string(quickInstall), required) {
@@ -124,6 +126,7 @@ func TestBuildRouterOSBundleWithVersionedUpgradePayload(t *testing.T) {
 		"mounted read-only at /run/secrets/foxos",
 		"production-secret-env: forbidden",
 		"device-generated secret mount",
+		"imports only a verified disposable copy",
 	} {
 		if !strings.Contains(string(releaseManifest), required) {
 			t.Errorf("release manifest is missing secret contract %q", required)
@@ -143,6 +146,7 @@ func TestBuildRouterOSBundleWithVersionedUpgradePayload(t *testing.T) {
 		"foxos-install-inspect.rsc",
 		"foxos-plan.rsc",
 		"foxos-start-all.rsc",
+		"foxos-trust-ca.rsc",
 		"foxos-uninstall-inspect.rsc",
 		"foxos-verify.rsc",
 		"load-site-config.rsc",

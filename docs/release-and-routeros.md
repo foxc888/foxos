@@ -89,7 +89,7 @@ foxos-full-amd64-<release-id>.tar.gz.sha256
 5. import 不可变 `load-site-config.rsc` 后运行 `foxos-plan.rsc`；loader 验证可编辑清单，plan 再自动执行 preflight 和共享 inspector，逐项输出 `CREATE/REUSE/FAIL` 并绑定 SHA-512 前态摘要。
 6. 操作者把该摘要原样设为确认值后才运行 `foxos-full-install.rsc`；执行器在第一次资源写入前重跑全部检查，前态变化即拒绝。
 7. 等异步镜像导入完成，再运行可重入 start 脚本；后序启动失败会停止本次已启动的前序容器，`running` 仍不是 ready，autostart 保持关闭。
-8. 导入并核对 `foxos-local-ca.pem`，设为 trusted；`foxos-verify.rsc` 自动验证 live、ready、站点、页面和带认证只读 API，全部通过后才启用 owned 顺序启动 scheduler。三个容器始终保持 `start-on-boot=no`。
+8. 工作站核对持久 `foxos-local-ca.pem` 的 SHA-256 指纹，再运行 `foxos-trust-ca.rsc`；该脚本只导入一次性副本、匹配精确指纹后设为 trusted，并回读持久原件未变。`foxos-verify.rsc` 自动验证四个 TLS 文件、live、ready、站点、页面和带认证只读 API，全部通过后才启用 owned 顺序启动 scheduler，且不重写运行容器的 `start-on-boot=no`。
 9. 通过 WinBox Files 或工作站 SCP 下载精确的 `<storage>/foxos-secrets/api-token` 到权限 `0600` 的临时文件，从文件导入离线密码库后销毁副本，再登录 HTTPS 管理页；禁止 `/file get ... contents`、env value 和终端打印。
 10. 需要 hostname 时单独执行 DNS plan/精确确认/apply；脚本不启用或接管 DNS/DHCP。
 
@@ -109,7 +109,7 @@ FoxOS 容器保持 UID 10001，仅 `/app/foxos` 有 `cap_net_bind_service`。外
 - TCP 80：只返回到 public hostname 的 308 跳转。
 - TCP 8090：仅容器 loopback，作为带随机进程内凭据的反向代理后端。
 
-启用 HTTPS 后，Bearer API 只接受真实 TLS，或来自 loopback 且带正确内部凭据的反向代理请求；伪造 `X-Forwarded-Proto` 不生效。CA 文件持久保存在 `foxos-data/tls`。浏览器和 RouterOS 必须先核对指纹并显式信任，服务不会跳过证书验证。
+启用 HTTPS 后，Bearer API 只接受真实 TLS，或来自 loopback 且带正确内部凭据的反向代理请求；伪造 `X-Forwarded-Proto` 不生效。CA 文件持久保存在 `foxos-data/tls`。浏览器和 RouterOS 必须先核对指纹并显式信任；RouterOS 只能通过 `foxos-trust-ca.rsc` 从一次性副本导入，禁止把持久 CA 文件直接交给会消耗源文件的 `/certificate/import`。服务不会跳过证书验证。
 
 ## 实体上线验收
 

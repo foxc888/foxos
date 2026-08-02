@@ -358,6 +358,6 @@
 }
 
 /container/print
-:put ("三个容器均为 running，但 start-on-boot 仍为 no。导入 " . $storageRoot . "/foxos-data/tls/foxos-local-ca.pem，标记 trusted=yes，然后运行 foxos-verify.rsc。")
+:put ("三个容器均为 running，但 start-on-boot 仍为 no。按 QUICK-INSTALL 核对指纹并运行 " . $storageRoot . "/foxos-trust-ca.rsc，然后运行 foxos-verify.rsc。")
 :put ("验证成功后访问 https://" . $FoxOSSitePublicHostname . "；IP 备用入口为 https://" . $FoxOSSiteFoxOSAddress . "。")
 :put "若验证失败，修复后可安全重复运行本脚本；已在运行的容器不会被重复启动。"

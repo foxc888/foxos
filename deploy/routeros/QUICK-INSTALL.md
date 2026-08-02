@@ -2,13 +2,13 @@
 
 本包用于备用 RouterOS 或 CHR 验收。仓库已完成自动化、浏览器、静态脚本和 Linux 网络命名空间验证，但尚未执行 CHR 或实体 RouterOS 验收；容器 `running`、CI 绿色或模拟连通都不能记为 RouterOS 部署成功。
 
-当前 RC1 的 `7.21+` 表示脚本语法下限，不表示所有后续版本已经兼容。目标设备的精确版本必须先通过第 1 节的同版本 CHR container 契约门禁，实际证明复数 `envlists`/`mountlists`、命名挂载 source 规范化、五个 `mode=rw` mount、唯一 `mode=ro` secret mount、四文件可读、敏感 env/日志值为零和卸载零残留，才可进入备用设备安装。最短安全路径固定为：下载同一 SHA 制品 -> 工作站两层校验 -> 同版本 CHR 兼容门禁 -> 同 SHA Artifact 生命周期门禁 -> 封存唯一站点清单 -> 加密备份并下载 -> 零碰撞检查 -> 上传 -> 只读 doctor/plan -> 摘要确认 install -> start -> verify。
+当前 RC1 的 `7.21+` 表示脚本语法下限，不表示所有后续版本已经兼容。目标设备的精确版本必须先通过第 1 节的同版本 CHR container 契约门禁，实际证明复数 `envlists`/`mountlists`、命名挂载 source 规范化、五个 `mode=rw` mount、唯一 `mode=ro` secret mount、四文件可读、敏感 env/日志值为零和卸载零残留，才可进入备用设备安装。最短安全路径固定为：下载同一 SHA 制品 -> 工作站两层校验 -> 同版本 CHR 兼容门禁 -> 同 SHA Artifact 生命周期门禁 -> 封存唯一站点清单 -> 加密备份并下载 -> 零碰撞检查 -> 上传 -> 只读 doctor/plan -> 摘要确认 install -> start -> trust-ca -> verify。
 
 ## 0. 先审核站点清单
 
 发布包中的 `site-config.example.rsc` 是不可变模板。先在工作站复制出唯一可编辑清单并独立封存：
 
-工作站需要 Bash、Python 3、`tar`、`unzip`，以及 OpenSSL 或 `shasum`；命令行上传还需要 OpenSSH `scp`。缺少任一依赖时先补齐，不要在 RouterOS 上尝试运行这些工作站命令。
+工作站需要 Bash、Python 3、`tar`、`unzip`、OpenSSL，以及 `sha256sum` 或 `shasum`；命令行上传还需要 OpenSSH `scp`。缺少任一依赖时先补齐，不要在 RouterOS 上尝试运行这些工作站命令。
 
 ```bash
 cp site-config.example.rsc site-config.rsc
@@ -194,6 +194,7 @@ disk1/foxos-install-inspect.rsc
 disk1/foxos-plan.rsc
 disk1/foxos-full-install.rsc
 disk1/foxos-start-all.rsc
+disk1/foxos-trust-ca.rsc
 disk1/foxos-verify.rsc
 disk1/foxos-dns-plan.rsc
 disk1/foxos-dns-apply.rsc
@@ -209,7 +210,7 @@ disk1/QUICK-INSTALL.md
 
 ```routeros
 :local storageRoot "disk1"
-:local uploadTargets {"QUICK-INSTALL.md";"RELEASE-MANIFEST.txt";"SHA256SUMS";"chr-envlists-smoke.md";"chr-envlists-smoke.rsc";"foxos-dns-apply.rsc";"foxos-dns-plan.rsc";"foxos-doctor.rsc";"foxos-full-install.rsc";"foxos-install-inspect.rsc";"foxos-plan.rsc";"foxos-start-all.rsc";"foxos-uninstall-inspect.rsc";"foxos-verify.rsc";"load-site-config.rsc";"mihomo-config";"mihomo_amd64.tar";"mosdns-amd64.tar";"mosdns-config";"preflight.rsc";"provenance";"seal-site-config.sh";"site-config.example.rsc";"site-config.rsc";"site-config.rsc.sha512";"foxos-upgrade-<release-id>";"uninstall-apply.rsc";"uninstall-plan.rsc"}
+:local uploadTargets {"QUICK-INSTALL.md";"RELEASE-MANIFEST.txt";"SHA256SUMS";"chr-envlists-smoke.md";"chr-envlists-smoke.rsc";"foxos-dns-apply.rsc";"foxos-dns-plan.rsc";"foxos-doctor.rsc";"foxos-full-install.rsc";"foxos-install-inspect.rsc";"foxos-plan.rsc";"foxos-start-all.rsc";"foxos-trust-ca.rsc";"foxos-uninstall-inspect.rsc";"foxos-verify.rsc";"load-site-config.rsc";"mihomo-config";"mihomo_amd64.tar";"mosdns-amd64.tar";"mosdns-config";"preflight.rsc";"provenance";"seal-site-config.sh";"site-config.example.rsc";"site-config.rsc";"site-config.rsc.sha512";"foxos-upgrade-<release-id>";"uninstall-apply.rsc";"uninstall-plan.rsc"}
 :local uploadCollisions 0
 :foreach target in=$uploadTargets do={
   :local path ($storageRoot . "/" . $target)
@@ -234,7 +235,7 @@ scp -r ./* "admin@${router_address}:${storage_root}/"
 上传完成后在 RouterOS 终端运行以下只读计数；每项必须为 `1`，随后第 4 节的 preflight 会检查完整清单和文件下限：
 
 ```routeros
-:foreach required in={"disk1/SHA256SUMS";"disk1/load-site-config.rsc";"disk1/foxos-doctor.rsc";"disk1/foxos-plan.rsc";"disk1/foxos-full-install.rsc"} do={ :put ($required . " count=" . [:len [/file find where name=$required]]) }
+:foreach required in={"disk1/SHA256SUMS";"disk1/load-site-config.rsc";"disk1/foxos-doctor.rsc";"disk1/foxos-plan.rsc";"disk1/foxos-full-install.rsc";"disk1/foxos-trust-ca.rsc"} do={ :put ($required . " count=" . [:len [/file find where name=$required]]) }
 ```
 
 先加载封存清单并运行严格只读的首装 doctor；它只读取版本、架构、package、device-mode、桥、地址、磁盘、REST 和保留的 FoxOS 对象名/数量，不读取 env value、密码、脚本 source、文件内容或日志：
@@ -277,7 +278,7 @@ scp -r ./* "admin@${router_address}:${storage_root}/"
 
 导入期间不要重启。
 
-## 6. 启动、导入 CA、自动验证
+## 6. 启动、受控信任 CA、自动验证
 
 ```routeros
 /import file-name=disk1/load-site-config.rsc
@@ -286,22 +287,38 @@ scp -r ./* "admin@${router_address}:${storage_root}/"
 
 启动脚本按 Mihomo、MosDNS、FoxOS 顺序启动，只验证容器进入 `running`。它接受 stopped/running 混合前态，不重复启动已运行容器；后序失败时停止本次启动的前序容器。此时三个 `start-on-boot` 都保持 `no`。
 
-FoxOS 首次启动在 `foxos-data/tls` 生成持久 ECDSA 本地 CA 和 397 天叶证书。先验证包来源和存储路径，再导入 CA：
+FoxOS 首次启动在 `foxos-data/tls` 生成持久 ECDSA 本地 CA 和 397 天叶证书。RouterOS 的 `/certificate/import` 会消耗源 PEM，因此绝对不能直接导入持久的 `foxos-local-ca.pem`。先把公开 CA 下载到工作站临时文件并计算证书 DER 的 SHA-256 指纹；该文件不含私钥：
 
-```routeros
-/certificate/import file-name=disk1/foxos-data/tls/foxos-local-ca.pem passphrase=""
-/certificate/print detail where common-name="FoxOS Local CA"
+```bash
+router_address="REPLACE_WITH_ROUTEROS_MANAGEMENT_ADDRESS"
+storage_root=disk1
+umask 077
+ca_tmp="$(mktemp)"
+scp "admin@${router_address}:${storage_root}/foxos-data/tls/foxos-local-ca.pem" "$ca_tmp"
+ca_fingerprint="$(openssl x509 -in "$ca_tmp" -outform DER | openssl dgst -sha256 -r | awk '{print $1}')"
+[[ "$ca_fingerprint" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid FoxOS CA fingerprint" >&2; exit 1; }
+printf 'RouterOS confirmation: TRUST %s\n' "$ca_fingerprint"
 ```
 
-确认只有一张预期 CA，核对 SHA-256 指纹后设为 trusted：
+把工作站输出的完整确认字符串原样粘贴到 RouterOS，不要输入尖括号文本：
 
 ```routeros
-/certificate/set [find where common-name="FoxOS Local CA"] trusted=yes
+:global FoxOSCATrustConfirmation "TRUST <paste 64-character lowercase SHA-256 fingerprint>"
 /import file-name=disk1/load-site-config.rsc
+/import file-name=disk1/foxos-trust-ca.rsc
 /import file-name=disk1/foxos-verify.rsc
 ```
 
-`foxos-verify.rsc` 必须同时通过容器 running、live、ready、站点清单、页面和带认证只读 API。它使用 HTTPS 且不会跳过证书验证。该结果只证明 RouterOS 到 FoxOS 管理面，不证明设备流量经过 Mihomo。
+`foxos-trust-ca.rsc` 会清空一次性确认值，只从根目录临时副本导入为 untrusted，匹配证书指纹后才设为 trusted，并要求持久 CA 的 handle、大小、SHA-512 内容摘要保持不变、临时文件残留为零。最终必须输出 `FOXOS CA TRUST PASS`。任何直接从 `foxos-data/tls/foxos-local-ca.pem` 导入的做法都会破坏持久 TLS 材料，禁止使用。
+
+`foxos-verify.rsc` 必须同时通过四个持久 TLS 文件、容器 running、live、ready、站点清单、页面和带认证只读 API。它使用 HTTPS、不跳过证书验证，也不会重写运行容器的 `start-on-boot`。验证后再次确认三个容器仍持续 running；该结果只证明 RouterOS 到 FoxOS 管理面，不证明设备流量经过 Mihomo。
+
+将已核对的公开 CA 导入所需客户端信任库后，销毁工作站临时副本：
+
+```bash
+rm -f -- "$ca_tmp"
+unset ca_tmp ca_fingerprint
+```
 
 验证通过后，只通过 WinBox Files 或工作站 SCP 下载一次精确的 `<storage-root>/foxos-secrets/api-token`。WinBox 下载目标必须是受控工作站上的专用临时文件；命令行可按下例强制本地权限 `0600`：
 

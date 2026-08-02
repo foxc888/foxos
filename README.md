@@ -173,7 +173,7 @@ foxos-full-amd64-<commit>.tar.gz.sha256
 5. 运行 `foxos-plan.rsc`；loader 验证封存清单，plan 再自动执行只读 preflight 和逐资源 `CREATE/REUSE/FAIL` inspector。
 6. 把计划输出的 SHA-512 原样设置为确认值，再运行唯一正式安装入口 `foxos-full-install.rsc`；执行器会在首次写入前重跑全部检查并拒绝过期计划。
 7. 等三个容器均为 `status=stopped`，运行可重入的 `foxos-start-all.rsc`；失败时只停止本次启动的前序容器，开机自启仍保持关闭。
-8. 从站点存储导入生成的 `foxos-local-ca.pem`，核对指纹并设为 trusted；`foxos-verify.rsc` 只有在 live、ready、页面、站点和只读 API 全通过后才启用 FoxOS 所有的顺序启动 scheduler。三个容器的 `start-on-boot` 始终保持 `no`，冷启动由 scheduler 按 Mihomo、MosDNS、FoxOS 顺序协调。
+8. 工作站从站点存储下载公开的 `foxos-local-ca.pem` 并核对 SHA-256 指纹，再由 `foxos-trust-ca.rsc` 只从一次性副本导入和信任；脚本证明持久 CA 原件未变且临时副本无残留。`foxos-verify.rsc` 只有在四个 TLS 文件、live、ready、页面、站点和只读 API 全通过后才启用 FoxOS 所有的顺序启动 scheduler，且不会重写运行容器的 `start-on-boot`。三个容器始终保持 `no`，冷启动由 scheduler 按 Mihomo、MosDNS、FoxOS 顺序协调。
 9. 只有客户端原本使用 RouterOS DNS 时，才可单独运行只读 DNS plan、精确确认和 apply，为 public hostname 添加一条 FoxOS 所有的 A 记录。
 
 安装器幂等复用匹配所有权的资源，遇到同名用户资源会失败关闭。服务容器名称是 `foxos-mihomo`、`foxos-mosdns`；首次 FoxOS 管理槽为 `foxos-initial`，后续升级槽为构建时绑定的 `foxos-<release-id>`。活动所有权始终由唯一 `foxos:active` comment 表示，不能从容器名称推断。

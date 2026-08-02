@@ -215,6 +215,7 @@ quick_install_upload_manifest_contract() {
     'disk1/foxos-plan.rsc'
     'disk1/foxos-full-install.rsc'
     'disk1/foxos-start-all.rsc'
+    'disk1/foxos-trust-ca.rsc'
     'disk1/foxos-verify.rsc'
     'disk1/foxos-dns-plan.rsc'
     'disk1/foxos-dns-apply.rsc'
@@ -251,6 +252,7 @@ quick_install_collision_manifest_contract() {
     'foxos-install-inspect.rsc'
     'foxos-plan.rsc'
     'foxos-start-all.rsc'
+    'foxos-trust-ca.rsc'
     'foxos-uninstall-inspect.rsc'
     'foxos-verify.rsc'
     'load-site-config.rsc'
@@ -1072,6 +1074,63 @@ routeros_native_handle_contract() {
   ! rg -q -g '*.rsc' '/[A-Za-z0-9/-]+(?:/get|[[:space:]]+get)[^#]*(?:[[:space:]]+\.id|[[:space:]]+value-name[[:space:]]*=[[:space:]]*\.id)[[:space:]]*\]' "$target"
 }
 
+foxos_ca_trust_contract() {
+  local script=$1
+  local invariant copy_line import_line confirmation_line trust_line
+  for invariant in \
+    ':global FoxOSCATrustConfirmation' \
+    ':set FoxOSCATrustConfirmation ""' \
+    ':local sourcePath ($FoxOSSiteStorageRoot . "/foxos-data/tls/foxos-local-ca.pem")' \
+    ':local temporaryName "foxos-local-ca-import.pem"' \
+    '[:find $sourceContents $beginMarker ($firstBegin + [:len $beginMarker])]' \
+    ':local certificateBefore [/certificate find]' \
+    ':local sourceDigest [:convert $sourceContents transform=sha512 to=hex]' \
+    '/file copy number=$source name=$temporaryName' \
+    '[:convert [/file get $temporary contents] transform=sha512 to=hex] != $sourceDigest' \
+    '/certificate/import file-name=$temporaryName passphrase="" trusted=no' \
+    '$sourceAfter != $source' \
+    '[:convert [/file get $sourceAfter contents] transform=sha512 to=hex] != $sourceDigest' \
+    ':local certificateAfter [/certificate find]' \
+    ':local expectedNewCertificateCount 1' \
+    ':if ([:len $caBefore] = 1) do={ :set expectedNewCertificateCount 0 }' \
+    '$newCertificateCount != $expectedNewCertificateCount' \
+    '$expectedNewCertificateCount = 1 && $newCertificate != $trustedCA' \
+    ':local fingerprint [/certificate get $trustedCA fingerprint]' \
+    '$confirmation != ("TRUST " . $fingerprint)' \
+    '/certificate set $trustedCA trusted=yes' \
+    'FOXOS CA TRUST PASS'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+  if rg -q '/certificate/import[^#]*(file-name=\$sourcePath|foxos-data/tls/foxos-local-ca\.pem)' "$script" \
+    || rg -q '/certificate/import[^#]*trusted=yes' "$script"; then
+    return 1
+  fi
+  copy_line=$(rg -n -F '/file copy number=$source name=$temporaryName' "$script" | cut -d: -f1)
+  import_line=$(rg -n -F '/certificate/import file-name=$temporaryName passphrase="" trusted=no' "$script" | cut -d: -f1)
+  confirmation_line=$(rg -n -F '$confirmation != ("TRUST " . $fingerprint)' "$script" | cut -d: -f1)
+  trust_line=$(rg -n -F '/certificate set $trustedCA trusted=yes' "$script" | cut -d: -f1)
+  [[ -n "$copy_line" && -n "$import_line" && -n "$confirmation_line" && -n "$trust_line" ]] \
+    && ((copy_line < import_line && import_line < confirmation_line && confirmation_line < trust_line))
+}
+
+foxos_verify_tls_restart_contract() {
+  local script=$1
+  local invariant
+  if rg -q '/container(?:/set|[[:space:]]+set)[^#]*start-on-boot' "$script"; then
+    return 1
+  fi
+  for invariant in \
+    '"foxos-local-ca.pem";"foxos-local-ca-key.pem";"foxos.pem";"foxos-key.pem"' \
+    'persistent TLS material is missing, ambiguous, or empty' \
+    ':local trustedCA [/certificate find where common-name="FoxOS Local CA"]' \
+    '[:len [/certificate get $trustedCA fingerprint]] != 64' \
+    'container autostart changed before scheduler enable' \
+    '/system/scheduler set $startScheduler disabled=no' \
+    'container autostart changed after scheduler enable'; do
+    rg -Fq -- "$invariant" "$script" || return 1
+  done
+}
+
 install_env_native_handle_contract() {
   local script=$1
   ! rg -q '/container/envs get[[:space:]]+\$[A-Za-z][A-Za-z0-9]*[[:space:]]+(?:\.id|value-name[[:space:]]*=[[:space:]]*\.id)[[:space:]]*\]' "$script"
@@ -1528,6 +1587,19 @@ if rg -n -g '*.rsc' 'architecture[^#]*!=[^#]*"x86"' "$rsc_root"; then
 fi
 if ! routeros_native_handle_contract "$rsc_root"; then
   report "RouterOS object identity uses unsupported .id readback instead of native find handles"
+fi
+if [[ ! -s "$rsc_root/foxos-trust-ca.rsc" ]] || ! foxos_ca_trust_contract "$rsc_root/foxos-trust-ca.rsc"; then
+  report "FoxOS CA trust entry does not preserve the persistent PEM, bind the fingerprint confirmation, and trust only the imported copy"
+fi
+if ! foxos_verify_tls_restart_contract "$rsc_root/foxos-verify.rsc"; then
+  report "FoxOS verify does not bind complete persistent TLS material or can restart running containers while enabling the scheduler"
+fi
+if rg -n -g '*.rsc' '/certificate/import[^#]*(file-name=\$sourcePath|foxos-data/tls/foxos-local-ca\.pem)' "$rsc_root"; then
+  report "a RouterOS script imports the persistent FoxOS CA directly instead of using the disposable-copy trust entry"
+fi
+if rg -n '/certificate/import[[:space:]]+file-name=[^[:space:]]*foxos-data/tls/foxos-local-ca\.pem' \
+  "$repo_root/README.md" "$repo_root/deploy/routeros/QUICK-INSTALL.md" "$repo_root/docs"; then
+  report "deployment documentation instructs operators to import the persistent FoxOS CA directly"
 fi
 if ! rg -Fq ':set material ($material . "|env:" . $envID . ":" . $envKey . ":" . $valueDigest)' "$rsc_root/foxos-uninstall-inspect.rsc" \
   || ! rg -Fq ':set material ($material . "|mosdns-env:" . $envID . ":" . $envKey)' "$rsc_root/foxos-uninstall-inspect.rsc"; then
@@ -2578,6 +2650,46 @@ cp -- "$rsc_root/foxos-doctor.rsc" "$site_seal_root/lifecycle/doctor-secret-read
 printf '%s\n' ':put [/container/envs get [find where key="SECRET"] value]' >> "$site_seal_root/lifecycle/doctor-secret-read-added.rsc"
 if foxos_doctor_contract "$site_seal_root/lifecycle/doctor-secret-read-added.rsc"; then
   report "FoxOS doctor contract accepted a sensitive env value read"
+fi
+
+sed 's#/certificate/import file-name=\$temporaryName passphrase="" trusted=no#/certificate/import file-name=$sourcePath passphrase="" trusted=no#' \
+  "$rsc_root/foxos-trust-ca.rsc" > "$site_seal_root/lifecycle/ca-direct-persistent-import.rsc"
+if cmp -s "$rsc_root/foxos-trust-ca.rsc" "$site_seal_root/lifecycle/ca-direct-persistent-import.rsc"; then
+  report "CA direct-import failure injection did not mutate foxos-trust-ca.rsc"
+elif foxos_ca_trust_contract "$site_seal_root/lifecycle/ca-direct-persistent-import.rsc"; then
+  report "CA trust contract accepted a direct import from the persistent PEM"
+fi
+sed '/\/file get \$temporary contents.*sourceDigest/d' \
+  "$rsc_root/foxos-trust-ca.rsc" > "$site_seal_root/lifecycle/ca-copy-digest-missing.rsc"
+if foxos_ca_trust_contract "$site_seal_root/lifecycle/ca-copy-digest-missing.rsc"; then
+  report "CA trust contract accepted a temporary copy without digest readback"
+fi
+sed '/\/file get \$sourceAfter contents.*sourceDigest/d' \
+  "$rsc_root/foxos-trust-ca.rsc" > "$site_seal_root/lifecycle/ca-persistent-readback-missing.rsc"
+if foxos_ca_trust_contract "$site_seal_root/lifecycle/ca-persistent-readback-missing.rsc"; then
+  report "CA trust contract accepted import without persistent-source digest readback"
+fi
+sed 's#/certificate/import file-name=\$temporaryName passphrase="" trusted=no#/certificate/import file-name=$temporaryName passphrase="" trusted=yes#' \
+  "$rsc_root/foxos-trust-ca.rsc" > "$site_seal_root/lifecycle/ca-import-trusted-early.rsc"
+if foxos_ca_trust_contract "$site_seal_root/lifecycle/ca-import-trusted-early.rsc"; then
+  report "CA trust contract accepted trust before fingerprint confirmation"
+fi
+sed '/\$confirmation != ("TRUST " \. \$fingerprint)/d' \
+  "$rsc_root/foxos-trust-ca.rsc" > "$site_seal_root/lifecycle/ca-fingerprint-confirmation-missing.rsc"
+if foxos_ca_trust_contract "$site_seal_root/lifecycle/ca-fingerprint-confirmation-missing.rsc"; then
+  report "CA trust contract accepted a missing fingerprint confirmation"
+fi
+sed 's/\$newCertificateCount != \$expectedNewCertificateCount/\$newCertificateCount > \$expectedNewCertificateCount/' \
+  "$rsc_root/foxos-trust-ca.rsc" > "$site_seal_root/lifecycle/ca-certificate-delta-weakened.rsc"
+if cmp -s "$rsc_root/foxos-trust-ca.rsc" "$site_seal_root/lifecycle/ca-certificate-delta-weakened.rsc"; then
+  report "CA certificate-delta failure injection did not mutate foxos-trust-ca.rsc"
+elif foxos_ca_trust_contract "$site_seal_root/lifecycle/ca-certificate-delta-weakened.rsc"; then
+  report "CA trust contract accepted an imported certificate outside the frozen expected delta"
+fi
+cp -- "$rsc_root/foxos-verify.rsc" "$site_seal_root/lifecycle/verify-container-restart-added.rsc"
+printf '%s\n' '/container/set [find where comment="foxos:active"] start-on-boot=no' >> "$site_seal_root/lifecycle/verify-container-restart-added.rsc"
+if foxos_verify_tls_restart_contract "$site_seal_root/lifecycle/verify-container-restart-added.rsc"; then
+  report "FoxOS verify contract accepted a start-on-boot write that can restart a running container"
 fi
 
 sed '/:if (\$architecture = "x86" || \$architecture = "x86_64") do={ :set imageArchitecture "amd64" }/d' \

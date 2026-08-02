@@ -86,6 +86,7 @@ sed "s/__FOXOS_RELEASE_ID__/$release_id/g" "$repo_root/deploy/routeros/foxos-ins
 cp -- "$repo_root/deploy/routeros/foxos-plan.rsc" "$stage_root/foxos-plan.rsc"
 sed "s/__FOXOS_RELEASE_ID__/$release_id/g" "$repo_root/deploy/routeros/foxos-full-install.rsc" > "$stage_root/foxos-full-install.rsc"
 cp -- "$repo_root/deploy/routeros/foxos-start-all.rsc" "$stage_root/foxos-start-all.rsc"
+cp -- "$repo_root/deploy/routeros/foxos-trust-ca.rsc" "$stage_root/foxos-trust-ca.rsc"
 cp -- "$repo_root/deploy/routeros/foxos-verify.rsc" "$stage_root/foxos-verify.rsc"
 cp -- "$repo_root/deploy/routeros/foxos-dns-plan.rsc" "$stage_root/foxos-dns-plan.rsc"
 cp -- "$repo_root/deploy/routeros/foxos-dns-apply.rsc" "$stage_root/foxos-dns-apply.rsc"
@@ -188,6 +189,7 @@ printf '%s\n' \
   "release-gate: Core CI and Release workflows scan all three input images with Trivy" \
   "chr-compatibility-gate: envlists, mountlists, and mode=rw via chr-envlists-smoke.rsc on a disposable exact-version CHR" \
   "host-doctor: load-site-config.rsc then foxos-doctor.rsc (strictly read-only)" \
+  "ca-trust: foxos-trust-ca.rsc imports only a verified disposable copy and preserves foxos-data/tls/foxos-local-ca.pem" \
   "routeros-script-encoding: ASCII-only with non-ASCII message bytes encoded as RouterOS hex escapes" \
   "integrity: verify SHA256SUMS before upload" \
   "routeros-validation: static checks only; physical-device acceptance is pending" \
@@ -204,6 +206,7 @@ expected_roots=(
   foxos-full-install.rsc
   foxos-install-inspect.rsc
   foxos-start-all.rsc
+  foxos-trust-ca.rsc
   foxos-uninstall-inspect.rsc
   foxos-verify.rsc
   load-site-config.rsc

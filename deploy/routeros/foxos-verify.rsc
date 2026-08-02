@@ -51,8 +51,16 @@
 :foreach containerID in={$mihomo;$mosdns;$active} do={
   :if ([$FoxOSContainerState $containerID] != "running") do={ :error ("容器未处于 running: " . [/container get $containerID name]) }
 }
-:if ([:len [/certificate find where common-name="FoxOS Local CA" trusted=yes]] != 1) do={
-  :error "RouterOS 中缺少唯一且 trusted=yes 的 FoxOS Local CA；禁止跳过证书校验"
+:foreach tlsFileName in={"foxos-local-ca.pem";"foxos-local-ca-key.pem";"foxos.pem";"foxos-key.pem"} do={
+  :local tlsFilePath ($FoxOSSiteStorageRoot . "/foxos-data/tls/" . $tlsFileName)
+  :local tlsFile [/file find where name=$tlsFilePath]
+  :if ([:len $tlsFile] != 1 || [/file get $tlsFile type] != "file" || [/file get $tlsFile size] = 0) do={
+    :error ("persistent TLS material is missing, ambiguous, or empty: " . $tlsFilePath)
+  }
+}
+:local trustedCA [/certificate find where common-name="FoxOS Local CA"]
+:if ([:len $trustedCA] != 1 || ([/certificate get $trustedCA trusted] != true && [/certificate get $trustedCA trusted] != "yes") || [:len [/certificate get $trustedCA fingerprint]] != 64) do={
+  :error "RouterOS 中缺少唯一、指纹有效且 trusted=yes 的 FoxOS Local CA；禁止跳过证书校验"
 }
 :local apiToken [$FoxOSSecretRead "api-token"]
 :if ([:len $apiToken] < 32) do={ :error "api-token secret file does not meet the security baseline" }
@@ -78,15 +86,16 @@
 :local bootEnabled false
 :onerror bootError in={
   :foreach containerID in={$mihomo;$mosdns;$active} do={
-    /container/set $containerID start-on-boot=no
-    :if ([/container get $containerID start-on-boot] != false && [/container get $containerID start-on-boot] != "no") do={ :error ("container autostart disable readback failed: " . [/container get $containerID name]) }
+    :if ([/container get $containerID start-on-boot] != false && [/container get $containerID start-on-boot] != "no") do={ :error ("container autostart changed before scheduler enable: " . [/container get $containerID name]) }
   }
   /system/scheduler set $startScheduler disabled=no
   :if ([/system/scheduler get $startScheduler disabled] != false && [/system/scheduler get $startScheduler disabled] != "no") do={ :error "sequential scheduler enable readback failed" }
+  :foreach containerID in={$mihomo;$mosdns;$active} do={
+    :if ([/container get $containerID start-on-boot] != false && [/container get $containerID start-on-boot] != "no") do={ :error ("container autostart changed after scheduler enable: " . [/container get $containerID name]) }
+  }
   :set bootEnabled true
 } do={
   /system/scheduler set $startScheduler disabled=yes
-  :foreach containerID in={$mihomo;$mosdns;$active} do={ /container/set $containerID start-on-boot=no }
   :error ("健康验证已通过，但顺序启动协调器设置失败并已禁用: " . $bootError)
 }
 :if ($bootEnabled = false) do={ :error "顺序启动协调器未启用" }

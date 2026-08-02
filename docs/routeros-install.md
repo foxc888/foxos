@@ -31,7 +31,7 @@ FoxOS、Mihomo、MosDNS 三张 amd64 输入镜像在 workflow 内从固定源码
 6. 操作者核对影响、备份和回滚路径，把计划摘要原样设置为确认值。
 7. 从清单存储根 import 唯一正式入口 `<storage>/foxos-full-install.rsc`；它在首次写入前重新回读并拒绝过期计划。
 8. 等三个容器均为 stopped，再运行可重入 `foxos-start-all.rsc`；此时 autostart 仍关闭。
-9. 导入并信任生成的本地 CA，运行 `foxos-verify.rsc`；全部健康门禁通过后才启用 owned 顺序启动 scheduler。三个容器始终保持 `start-on-boot=no`。
+9. 工作站核对生成的本地 CA 指纹，运行 `foxos-trust-ca.rsc` 从一次性副本导入并信任，再运行 `foxos-verify.rsc`；全部 TLS 和健康门禁通过后才启用 owned 顺序启动 scheduler。verify 不重写运行容器，三个容器始终保持 `start-on-boot=no`。
 10. 通过 WinBox Files 或工作站 SCP 安全下载 `<storage>/foxos-secrets/api-token` 到权限 `0600` 的临时文件，从文件导入离线密码库后销毁临时副本，再登录 HTTPS 管理页；禁止从 env 或终端输出秘密值。
 11. 需要 hostname 时单独执行 DNS plan、精确确认和 apply；不启用或接管 DNS/DHCP。
 12. 完成 live/ready、页面、依赖和测试设备实体验收。
