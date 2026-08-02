@@ -281,6 +281,9 @@
 :if ([:len $secretDirectorySnapshot] > 0) do={
   :local currentSecretDirectory [/file find where name=$FoxOSSecretHostDirectory]
   :if ([:len $secretDirectorySnapshot] != 1 || $currentSecretDirectory != $secretDirectorySnapshot || [/file get $secretDirectorySnapshot type] != "directory") do={ :error "secret directory identity changed after uninstall confirmation" }
+
+  # FoxOSSecretEvidence validates the complete four-file set. Validate every
+  # snapshot before removing any member so later checks do not see a partial set.
   :foreach secretName in=$FoxOSSecretFileNames do={
     :local secretFileSnapshot ""
     :local secretEvidenceSnapshot ""
@@ -290,6 +293,14 @@
     :if ($secretName = "mihomo-secret") do={ :set secretFileSnapshot $mihomoSecretFileSnapshot; :set secretEvidenceSnapshot $mihomoSecretEvidenceSnapshot }
     :local currentSecretFile [/file find where name=($FoxOSSecretHostDirectory . "/" . $secretName)]
     :if ([:len $secretFileSnapshot] != 1 || $currentSecretFile != $secretFileSnapshot || [$FoxOSSecretEvidence $secretName] != $secretEvidenceSnapshot) do={ :error ("secret file identity or digest changed after uninstall confirmation: " . $secretName) }
+  }
+
+  :foreach secretName in=$FoxOSSecretFileNames do={
+    :local secretFileSnapshot ""
+    :if ($secretName = "api-token") do={ :set secretFileSnapshot $apiTokenFileSnapshot }
+    :if ($secretName = "confirmation-key") do={ :set secretFileSnapshot $confirmationKeyFileSnapshot }
+    :if ($secretName = "routeros-password") do={ :set secretFileSnapshot $routerPasswordFileSnapshot }
+    :if ($secretName = "mihomo-secret") do={ :set secretFileSnapshot $mihomoSecretFileSnapshot }
     /file/remove $secretFileSnapshot
     :if ([:len [/file find where name=($FoxOSSecretHostDirectory . "/" . $secretName)]] != 0) do={ :error ("secret file removal readback failed: " . $secretName) }
   }

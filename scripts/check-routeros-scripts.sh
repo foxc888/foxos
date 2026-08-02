@@ -1245,6 +1245,19 @@ uninstall_snapshot_contract() {
     && rg -Fq '容器完整身份在删除前变化' "$script"
 }
 
+uninstall_secret_delete_contract() {
+  local script=$1
+  local secret_loops loop_count first_loop second_loop evidence_guard first_remove
+  secret_loops=$( (rg -n -F ':foreach secretName in=$FoxOSSecretFileNames do={' "$script" || true) | cut -d: -f1 )
+  loop_count=$(printf '%s\n' "$secret_loops" | sed '/^$/d' | wc -l | tr -d ' ')
+  first_loop=$(printf '%s\n' "$secret_loops" | sed -n '1p')
+  second_loop=$(printf '%s\n' "$secret_loops" | sed -n '2p')
+  evidence_guard=$( (rg -n -F '[$FoxOSSecretEvidence $secretName] != $secretEvidenceSnapshot' "$script" || true) | head -n1 | cut -d: -f1 )
+  first_remove=$( (rg -n -F '/file/remove $secretFileSnapshot' "$script" || true) | head -n1 | cut -d: -f1 )
+  [[ "$loop_count" == 2 && -n "$first_loop" && -n "$second_loop" && -n "$evidence_guard" && -n "$first_remove" \
+    && "$first_loop" -lt "$evidence_guard" && "$evidence_guard" -lt "$second_loop" && "$second_loop" -lt "$first_remove" ]]
+}
+
 retained_state_install_contract() {
   local script=$1
   local env_line data_line backups_line secrets_line guard_line material_line
@@ -1279,6 +1292,7 @@ uninstall_predelete_contract() {
   local script=$1
   local last_snapshot inspector_lines inspector_count second_inspector digest_guard first_resource_write binding
   uninstall_snapshot_contract "$script" || return 1
+  uninstall_secret_delete_contract "$script" || return 1
   last_snapshot=$( (rg -n -F ':local mihomoSecretFileSnapshot [/file find where name=($FoxOSSecretHostDirectory . "/mihomo-secret")]' "$script" || true) | head -n1 | cut -d: -f1 )
   inspector_lines=$( (rg -n -F '/import file-name=($FoxOSSiteStorageRoot . "/foxos-uninstall-inspect.rsc")' "$script" || true) | cut -d: -f1 )
   inspector_count=$(printf '%s\n' "$inspector_lines" | sed '/^$/d' | wc -l | tr -d ' ')
@@ -2978,6 +2992,21 @@ sed '/:local pendingMihomoApplyJournalAfterStop /d' \
   "$rsc_root/uninstall-apply.rsc" > "$site_seal_root/lifecycle/uninstall-journal-post-stop-check-missing.rsc"
 if pending_journal_uninstall_contract "$rsc_root/foxos-uninstall-inspect.rsc" "$site_seal_root/lifecycle/uninstall-journal-post-stop-check-missing.rsc"; then
   report "missing post-stop pending-journal guard was not rejected"
+fi
+awk '
+  /:foreach secretName in=\$FoxOSSecretFileNames do=/ {
+    secret_loop_count++
+    if (secret_loop_count == 2 && !injected) {
+      print "    /file/remove $secretFileSnapshot"
+      injected = 1
+    }
+  }
+  { print }
+' "$rsc_root/uninstall-apply.rsc" > "$site_seal_root/lifecycle/uninstall-secret-remove-before-full-validation.rsc"
+if cmp -s "$rsc_root/uninstall-apply.rsc" "$site_seal_root/lifecycle/uninstall-secret-remove-before-full-validation.rsc"; then
+  report "secret delete-order failure injection did not mutate uninstall apply"
+elif uninstall_secret_delete_contract "$site_seal_root/lifecycle/uninstall-secret-remove-before-full-validation.rsc"; then
+  report "secret removal before complete four-file validation was not rejected"
 fi
 for snapshot_case in \
   'mihomo-runtime-mount|:local mihomoRuntimeMountSnapshot [/container/mounts find where list="foxos-mihomo-runtime"]|:set mountID $mihomoRuntimeMountSnapshot' \
