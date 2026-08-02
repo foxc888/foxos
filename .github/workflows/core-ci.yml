@@ -1,0 +1,426 @@
+name: FoxOS Core CI
+
+on:
+  push:
+    branches: [main, agent/foxos-core]
+  pull_request:
+    branches: [main, agent/foxos-core]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: foxos-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go format, vet, test and race
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - name: Install Go test tools
+        run: sudo apt-get update -qq && sudo apt-get install --yes ripgrep
+      - name: Verify module metadata
+        run: |
+          go mod tidy
+          go mod verify
+          git diff --exit-code -- go.mod go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Go vet
+        run: go vet ./...
+      - name: Test with coverage
+        run: go test -shuffle=on -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Race test
+        run: go test -race -shuffle=on -count=1 ./...
+      - name: Upload Go coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: foxos-go-coverage-${{ github.sha }}
+          path: coverage.out
+          if-no-files-found: ignore
+          retention-days: 7
+
+  go-lint:
+    name: Go lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          # The v2.12 linter binary and its analyzers require Go 1.25 to run.
+          # Application builds and tests remain pinned to Go 1.24.
+          go-version: "1.25.x"
+          cache: true
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+  go-security:
+    name: Go vulnerability and SAST scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          # Scanner toolchains require Go >=1.25; they still analyze the
+          # Go 1.24 module built and tested by the application job.
+          go-version: "1.25.x"
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+      - name: govulncheck
+        run: '"$(go env GOPATH)/bin/govulncheck" ./...'
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
+      - name: gosec
+        run: '"$(go env GOPATH)/bin/gosec" -fmt sarif -out gosec.sarif ./...'
+      - name: Upload gosec report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: foxos-gosec-${{ github.sha }}
+          path: gosec.sarif
+          if-no-files-found: ignore
+          retention-days: 7
+
+  web:
+    name: Web typecheck, Vitest and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Vitest
+        run: npm run test:unit
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+      - name: Build
+        run: npm run build
+
+  playwright:
+    name: Playwright desktop and mobile E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck Playwright suite
+        run: npm run typecheck:e2e
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run E2E suite
+        run: npm run test:e2e
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: foxos-playwright-${{ github.sha }}
+          path: |
+            web/playwright-report
+            web/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  repository-safety:
+    name: Workflows, RouterOS scripts and repository safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.x"
+          cache: false
+      - name: Install repository tools
+        run: sudo apt-get update -qq && sudo apt-get install --yes ripgrep
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - name: Shell syntax
+        run: |
+          bash -n scripts/*.sh deploy/routeros/seal-site-config.sh
+          test ! -e mihomo/config/start.sh
+      - name: RouterOS static checks
+        run: scripts/check-routeros-scripts.sh
+      - name: Sensitive material checks
+        run: scripts/check-sensitive-material.sh
+      - name: Whitespace and generated-file check
+        run: |
+          git diff --check
+          test -z "$(git ls-files 'mihomo/install/*.tar')"
+          test ! -d node_modules
+          test ! -d web/node_modules
+          test ! -d web/playwright-report
+          test ! -d web/test-results
+
+  network-namespace:
+    name: Linux namespace deployment integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build production frontend for integration
+        working-directory: web
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+      - name: Install namespace tools
+        run: sudo apt-get update -qq && sudo apt-get install --yes curl iproute2 iputils-ping libcap2-bin util-linux
+      - name: Verify isolated management data plane
+        run: sudo env PATH="$PATH" scripts/test-network-namespace.sh
+
+  container:
+    name: Build and validate amd64 RouterOS bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [go, go-lint, go-security, web, playwright, repository-safety, network-namespace]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - name: Install bundle tools
+        run: sudo apt-get update -qq && sudo apt-get install --yes ripgrep
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Build amd64 release images
+        run: |
+          docker buildx build --platform linux/amd64 --target foxos-runtime --tag "foxos-ci:${GITHUB_SHA}" --build-arg FOXOS_VERSION="${GITHUB_SHA}" --output type=docker,dest=foxos-amd64.tar .
+          docker buildx build --platform linux/amd64 --target mihomo-runtime --tag "foxos-mihomo-ci:${GITHUB_SHA}" --output type=docker,dest=mihomo-amd64.tar .
+          docker buildx build --platform linux/amd64 --target mosdns-runtime --tag "foxos-mosdns-ci:${GITHUB_SHA}" --output type=docker,dest=mosdns-amd64.tar .
+      - name: Verify runtime image contracts
+        run: |
+          set -Eeuo pipefail
+          docker load --input foxos-amd64.tar
+          docker load --input mihomo-amd64.tar
+          docker load --input mosdns-amd64.tar
+
+          for image in "foxos-ci:${GITHUB_SHA}" "foxos-mihomo-ci:${GITHUB_SHA}" "foxos-mosdns-ci:${GITHUB_SHA}"; do
+            if docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | grep -Eq '^FOXOS_(API_TOKEN|CONFIRMATION_KEY|ROUTEROS_PASSWORD|MIHOMO_SECRET)='; then
+              printf 'runtime image %s contains a forbidden production secret environment key\n' "$image" >&2
+              exit 1
+            fi
+          done
+
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}/mihomo/config:/config:ro" \
+            --entrypoint /usr/local/bin/mihomo \
+            "foxos-ci:${GITHUB_SHA}" -t -d /tmp/mihomo -f /config/config.yaml
+          printf '%s\n' 'proxies: [' > "${RUNNER_TEMP}/invalid-mihomo.yaml"
+          if docker run --rm \
+            --volume "${RUNNER_TEMP}/invalid-mihomo.yaml:/tmp/invalid.yaml:ro" \
+            --entrypoint /usr/local/bin/mihomo \
+            "foxos-ci:${GITHUB_SHA}" -t -d /tmp/mihomo -f /tmp/invalid.yaml; then
+            printf 'invalid Mihomo configuration unexpectedly passed semantic validation\n' >&2
+            exit 1
+          fi
+
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}/mihomo/config:/config:ro" \
+            "foxos-mihomo-ci:${GITHUB_SHA}" -t -d /tmp/mihomo -f /config/config.yaml
+          docker run --rm "foxos-mihomo-ci:${GITHUB_SHA}" -v | grep -F 'v1.19.29-foxos2'
+          docker image inspect --format '{{json .Config.Cmd}}' "foxos-mihomo-ci:${GITHUB_SHA}" | grep -Fx '["-d","/root/.config/mihomo","-f","/root/.config/mihomo/config.yaml"]'
+
+          docker run --rm --entrypoint /usr/bin/mosdns "foxos-mosdns-ci:${GITHUB_SHA}" version | grep -Fx 'v0.6.4-foxos2'
+          docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "foxos-mosdns-ci:${GITHUB_SHA}" | grep -Fx 'MOSDNS_AUTO_INIT=0'
+          if docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "foxos-mosdns-ci:${GITHUB_SHA}" | grep -q '^MOSDNS_CONFIG_INIT_URL='; then
+            printf 'MosDNS runtime still contains an external auto-initialization URL\n' >&2
+            exit 1
+          fi
+          cp -a mosdns-config "${RUNNER_TEMP}/mosdns-config"
+          mosdns_id=$(docker run --detach --rm \
+            --volume "${RUNNER_TEMP}/mosdns-config:/cus/mosdns" \
+            "foxos-mosdns-ci:${GITHUB_SHA}")
+          sleep 2
+          docker container inspect --format '{{.State.Running}}' "$mosdns_id" | grep -Fx true
+          docker stop --time 5 "$mosdns_id"
+      - name: Smoke test final FoxOS runtime image
+        run: |
+          set -Eeuo pipefail
+          api_token=$(openssl rand -hex 32)
+          confirmation_key=$(openssl rand -hex 32)
+          docker rm --force foxos-runtime-smoke >/dev/null 2>&1 || true
+          trap 'docker rm --force foxos-runtime-smoke >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name foxos-runtime-smoke \
+            --publish 127.0.0.1:18090:8090 \
+            --env FOXOS_ENV=development \
+            --env FOXOS_BACKUP_DIR=/backups/foxos \
+            --env "FOXOS_API_TOKEN=$api_token" \
+            --env "FOXOS_CONFIRMATION_KEY=$confirmation_key" \
+            "foxos-ci:${GITHUB_SHA}" \
+            -listen 0.0.0.0:8090 -static /app/web -database /data/foxos.db
+          for _ in $(seq 1 60); do
+            curl --fail --silent --show-error --connect-timeout 1 http://127.0.0.1:18090/api/v1/health/live >/dev/null 2>&1 && break
+            sleep 0.25
+          done
+          live=$(curl --fail --silent --show-error http://127.0.0.1:18090/api/v1/health/live)
+          ready=$(curl --fail --silent --show-error http://127.0.0.1:18090/api/v1/health/ready)
+          page=$(curl --fail --silent --show-error http://127.0.0.1:18090/)
+          grep -Fq '"status":"ok"' <<<"$live"
+          grep -Fq '"status":"ready"' <<<"$ready"
+          grep -Fq 'id="root"' <<<"$page"
+          asset_path=$(grep -oE '/assets/[^" ]+\.js' <<<"$page" | head -1)
+          test -n "$asset_path"
+          test "$(curl --fail --silent --show-error "http://127.0.0.1:18090${asset_path}" | wc -c)" -gt 1000
+          docker image inspect --format '{{.Config.User}}' "foxos-ci:${GITHUB_SHA}" | grep -Fx '10001:10001'
+          docker image inspect --format '{{json .Config.Cmd}}' "foxos-ci:${GITHUB_SHA}" | grep -Fx '["-static","/app/web","-database","/data/foxos.db"]'
+      - name: Smoke test production secret-file contract
+        run: |
+          set -Eeuo pipefail
+          secret_root="${RUNNER_TEMP}/foxos-production-secrets"
+          rm -rf -- "$secret_root"
+          mkdir -m 0700 -- "$secret_root"
+          api_token=$(openssl rand -hex 32)
+          confirmation_key=$(openssl rand -hex 32)
+          routeros_password=$(openssl rand -hex 32)
+          mihomo_secret=$(openssl rand -hex 32)
+          printf '%s' "$api_token" > "$secret_root/api-token"
+          printf '%s' "$confirmation_key" > "$secret_root/confirmation-key"
+          printf '%s' "$routeros_password" > "$secret_root/routeros-password"
+          printf '%s' "$mihomo_secret" > "$secret_root/mihomo-secret"
+          chmod 0444 "$secret_root"/*
+          chmod 0705 "$secret_root"
+          docker rm --force foxos-production-smoke >/dev/null 2>&1 || true
+          trap 'docker rm --force foxos-production-smoke >/dev/null 2>&1 || true; rm -rf -- "$secret_root"' EXIT
+          docker run --detach --name foxos-production-smoke \
+            --publish 127.0.0.1:18443:443 \
+            --mount "type=bind,src=${secret_root},dst=/run/secrets/foxos,readonly" \
+            --env FOXOS_ENV=production \
+            --env FOXOS_BACKUP_DIR=/backups/foxos \
+            --env FOXOS_UPGRADE_STATE_PATH=/data/upgrade-checkpoint.json \
+            --env FOXOS_SITE_MANAGEMENT_BRIDGE=lab-lan \
+            --env FOXOS_SITE_STORAGE_ROOT=lab-storage \
+            --env FOXOS_SITE_NETWORK=10.77.0.0/24 \
+            --env FOXOS_SITE_ROUTER_ADDRESS=10.77.0.1 \
+            --env FOXOS_SITE_MIHOMO_ADDRESS=10.77.0.2 \
+            --env FOXOS_SITE_MOSDNS_ADDRESS=10.77.0.3 \
+            --env FOXOS_SITE_FOXOS_ADDRESS=10.77.0.4 \
+            --env FOXOS_SITE_PUBLIC_HOSTNAME=foxos.home.arpa \
+            --env FOXOS_HTTPS_ENABLED=true \
+            --env FOXOS_TLS_DIR=/data/tls \
+            --env FOXOS_INTERNAL_LISTEN=127.0.0.1:8090 \
+            --env FOXOS_HTTPS_LISTEN=0.0.0.0:443 \
+            --env FOXOS_HTTP_REDIRECT_LISTEN=0.0.0.0:80 \
+            "foxos-ci:${GITHUB_SHA}"
+          for _ in $(seq 1 60); do
+            docker cp foxos-production-smoke:/data/tls/foxos-local-ca.pem "${RUNNER_TEMP}/foxos-production-ca.pem" >/dev/null 2>&1 || true
+            if test -s "${RUNNER_TEMP}/foxos-production-ca.pem" && curl --noproxy '*' --fail --silent --show-error --connect-timeout 1 \
+              --resolve foxos.home.arpa:18443:127.0.0.1 \
+              --cacert "${RUNNER_TEMP}/foxos-production-ca.pem" \
+              --header 'Host: foxos.home.arpa' \
+              https://foxos.home.arpa:18443/api/v1/health/live >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.25
+          done
+          curl --noproxy '*' --fail --silent --show-error \
+            --resolve foxos.home.arpa:18443:127.0.0.1 \
+            --cacert "${RUNNER_TEMP}/foxos-production-ca.pem" \
+            --header 'Host: foxos.home.arpa' \
+            https://foxos.home.arpa:18443/api/v1/health/live | grep -Fq '"status":"ok"'
+          curl --noproxy '*' --fail --silent --show-error \
+            --resolve foxos.home.arpa:18443:127.0.0.1 \
+            --cacert "${RUNNER_TEMP}/foxos-production-ca.pem" \
+            --header 'Host: foxos.home.arpa' \
+            --header "Authorization: Bearer ${api_token}" \
+            'https://foxos.home.arpa:18443/api/v1/audit-events?limit=1' >/dev/null
+          docker container inspect --format '{{range .Mounts}}{{if eq .Destination "/run/secrets/foxos"}}{{.RW}}{{end}}{{end}}' foxos-production-smoke | grep -Fx false
+          if docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' foxos-production-smoke | grep -Eq '^FOXOS_(API_TOKEN|CONFIRMATION_KEY|ROUTEROS_PASSWORD|MIHOMO_SECRET)='; then
+            printf 'production container environment contains a forbidden secret key\n' >&2
+            exit 1
+          fi
+          for secret_value in "$api_token" "$confirmation_key" "$routeros_password" "$mihomo_secret"; do
+            if docker logs foxos-production-smoke 2>&1 | grep -Fq "$secret_value"; then
+              printf 'production container log contains a secret value\n' >&2
+              exit 1
+            fi
+          done
+          if docker logs foxos-production-smoke 2>&1 | grep -Eq 'FOXOS_(API_TOKEN|CONFIRMATION_KEY|ROUTEROS_PASSWORD|MIHOMO_SECRET)'; then
+            printf 'production container log contains a secret key name\n' >&2
+            exit 1
+          fi
+      - name: Scan FoxOS image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          input: foxos-amd64.tar
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Scan Mihomo runtime image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          input: mihomo-amd64.tar
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Scan MosDNS runtime image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          input: mosdns-amd64.tar
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Assemble and validate full bundle
+        env:
+          FOXOS_IMAGE: ${{ github.workspace }}/foxos-amd64.tar
+          MIHOMO_IMAGE: ${{ github.workspace }}/mihomo-amd64.tar
+          MOSDNS_IMAGE: ${{ github.workspace }}/mosdns-amd64.tar
+        run: |
+          scripts/build-routeros-bundle.sh dist "${GITHUB_SHA}"
+          test -s "dist/foxos-full-amd64-${GITHUB_SHA}.tar.gz"
+          test -s "dist/foxos-full-amd64-${GITHUB_SHA}.tar.gz.sha256"
+          tar -tzf "dist/foxos-full-amd64-${GITHUB_SHA}.tar.gz" | grep -Fx "foxos-full-amd64-${GITHUB_SHA}/SHA256SUMS"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: foxos-full-amd64-${{ github.sha }}
+          path: |
+            dist/foxos-full-amd64-${{ github.sha }}.tar.gz
+            dist/foxos-full-amd64-${{ github.sha }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14

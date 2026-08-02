@@ -1,49 +1,30 @@
-========================================
-Mihomo Docker 镜像安装包信息
-========================================
+FoxOS RouterOS runtime image provenance
+=======================================
 
-镜像名称: metacubex/mihomo
-镜像标签: v1.19.23
-下载时间: 2026-04-19 13:09:43 CST
-镜像摘要: sha256:b50b191e9cf64ec642d24cf46102ea6c22e9fffe8bd19d6a5cffe617daee7157
+Prebuilt Mihomo and MosDNS archives are not stored in this repository and are
+not accepted as implicit bundle inputs. Core CI and the release workflow build
+all three amd64 images from the pinned sources in Dockerfile, scan each image,
+and pass the exact scanned archives to scripts/build-routeros-bundle.sh.
 
-========================================
-安装包列表及适用系统
-========================================
+Mihomo
+------
+version: v1.19.29-foxos2
+source: https://github.com/MetaCubeX/mihomo/tree/v1.19.29
+source archive sha256: 1db1cd49c233b67701b596fbd8a963f418ebeca4cb497f38a0e7cd706ea4c630
+builder: Go 1.26.5
+runtime target: mihomo-runtime
+runtime base: scratch (static binary, CA bundle, timezone data, and empty /tmp)
 
-📦 mihomo_amd64.tar ( 79M)
-   架构: x86_64 / amd64
-   适用系统: 
-   - RouterOS x86/x64 版本
-   - 标准 PC 服务器
-   - Intel/AMD 处理器的设备
+MosDNS
+------
+version: v0.6.4-foxos2
+source: https://github.com/jasonxtt/mosdns/tree/2ac30e867a7b40ee0ef70ef85b7dcf7ce56d48d0
+source archive sha256: a2f63da93ae917e7c5d319cb99cc88a68b437c8eb2e40447a61b935767e3e37c
+builder: Go 1.26.5
+runtime target: mosdns-runtime
+runtime base: scratch (static binary, CA bundle, timezone data, and empty /tmp)
+external auto-initialization: disabled
 
-📦 mihomo_arm64.tar ( 82M)
-   架构: ARM64 / aarch64
-   适用系统:
-   - RouterOS ARM64 版本
-   - 树莓派 4/5 (64位系统)
-   - Apple Silicon Mac (M1/M2/M3)
-   - 现代 ARM 服务器
-
-📦 mihomo_arm_v7.tar ( 72M)
-   架构: ARMv7
-   适用系统:
-   - RouterOS ARMv7 版本
-   - 树莓派 2/3 (32位系统)
-   - 较旧的 ARM 设备
-
-========================================
-使用说明
-========================================
-
-1. 根据您的设备架构选择对应的 tar 文件
-2. 如不确定架构，可在 RouterOS 中运行: /system resource print
-3. 查看 "architecture-name" 字段确定架构类型
-
-========================================
-更新建议
-========================================
-
-建议每月检查更新一次，以获取最新的安全补丁和功能改进。
-
+The full RouterOS bundle is currently produced only for linux/amd64. The
+RouterOS-compatible files inside the bundle retain the installer-facing names
+mihomo_amd64.tar and mosdns-amd64.tar.

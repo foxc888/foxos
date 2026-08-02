@@ -1,0 +1,9 @@
+.git
+.github
+**/node_modules
+**/dist
+**/*.tar
+mosdns-config
+mihomo/install
+data
+backups

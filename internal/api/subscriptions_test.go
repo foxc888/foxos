@@ -1,0 +1,270 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/foxc888/foxos/internal/confirmation"
+	"github.com/foxc888/foxos/internal/domain"
+	storepkg "github.com/foxc888/foxos/internal/store/sqlite"
+	"github.com/foxc888/foxos/internal/subscription"
+)
+
+type subscriptionAPIFetcher struct {
+	result subscription.Result
+}
+
+func (f *subscriptionAPIFetcher) Fetch(context.Context, string) (subscription.Result, error) {
+	return f.result, nil
+}
+
+func TestSubscriptionCreateUsesConfiguredPrivateCIDRAllowlist(t *testing.T) {
+	t.Parallel()
+	const apiToken = "01234567890123456789012345678901"
+	store, err := storepkg.Open(filepath.Join(t.TempDir(), "foxos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	app, err := New(&memoryNodes{nodes: map[string]domain.Node{}}, apiToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	fetcher := subscription.Fetcher{AllowedPrivate: []netip.Prefix{netip.MustParsePrefix("10.20.0.0/16")}}
+	app.RegisterSubscriptions(mux, store, store, fetcher, nil, nil, nil, nil, &fakeAudit{})
+
+	for _, test := range []struct {
+		name   string
+		url    string
+		status int
+	}{
+		{name: "allowlisted private target", url: "https://10.20.4.8/subscription", status: http.StatusCreated},
+		{name: "unlisted private target", url: "https://10.21.4.8/subscription", status: http.StatusUnprocessableEntity},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{"name": test.name, "url": test.url, "enabled": true, "interval": 3600})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/subscriptions", strings.NewReader(string(body)))
+			request.Header.Set("Authorization", "Bearer "+apiToken)
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, request)
+			if response.Code != test.status {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestSubscriptionPreviewSignsPlanAndUpdateQueuesJob(t *testing.T) {
+	const apiToken = "01234567890123456789012345678901"
+	store, err := storepkg.Open(filepath.Join(t.TempDir(), "foxos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	item := domain.Subscription{ID: "source-a", Name: "Primary", URL: "https://example.com/source?access=fixture", Enabled: true, Interval: 3600}
+	if err := store.SaveSubscription(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	link := (&url.URL{Scheme: "vless", User: url.User("fixture-uuid"), Host: "example.com:443", Fragment: "East"}).String()
+	fetcher := &subscriptionAPIFetcher{result: subscription.Result{Digest: strings.Repeat("a", 64), Body: []byte(link)}}
+	app, err := New(&memoryNodes{nodes: map[string]domain.Node{}}, apiToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := confirmation.New([]byte("abcdefghijklmnopqrstuvwxyz012345"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityHasher, err := subscription.NewIdentityHasher([]byte("abcdefghijklmnopqrstuvwxyz012345"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := &fakeEgressJobs{}
+	audit := &fakeAudit{}
+	mux := http.NewServeMux()
+	app.RegisterSubscriptions(mux, store, store, fetcher, signer, identityHasher, store, jobs, audit)
+
+	previewRequest := httptest.NewRequest(http.MethodPost, "/api/v1/subscriptions/source-a/preview", nil)
+	previewRequest.Header.Set("Authorization", "Bearer "+apiToken)
+	previewResponse := httptest.NewRecorder()
+	mux.ServeHTTP(previewResponse, previewRequest)
+	if previewResponse.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", previewResponse.Code, previewResponse.Body.String())
+	}
+	var preview struct {
+		Plan              subscription.UpdatePlan `json:"plan"`
+		ConfirmationToken string                  `json:"confirmationToken"`
+	}
+	if err := json.Unmarshal(previewResponse.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if preview.Plan.NodeCount != 1 || preview.ConfirmationToken == "" {
+		t.Fatalf("preview=%+v", preview)
+	}
+	body, _ := json.Marshal(map[string]any{"plan": preview.Plan, "confirmationToken": preview.ConfirmationToken})
+	updateRequest := httptest.NewRequest(http.MethodPost, "/api/v1/subscriptions/source-a/update", strings.NewReader(string(body)))
+	updateRequest.Header.Set("Authorization", "Bearer "+apiToken)
+	updateResponse := httptest.NewRecorder()
+	mux.ServeHTTP(updateResponse, updateRequest)
+	if updateResponse.Code != http.StatusAccepted || jobs.calls != 1 || jobs.request["subscriptionId"] != "source-a" {
+		t.Fatalf("status=%d body=%s jobs=%+v", updateResponse.Code, updateResponse.Body.String(), jobs)
+	}
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/v1/subscriptions", nil)
+	listRequest.Header.Set("Authorization", "Bearer "+apiToken)
+	listResponse := httptest.NewRecorder()
+	mux.ServeHTTP(listResponse, listRequest)
+	if strings.Contains(listResponse.Body.String(), "access=fixture") || !strings.Contains(listResponse.Body.String(), "redacted") {
+		t.Fatalf("subscription URL was not redacted: %s", listResponse.Body.String())
+	}
+}
+
+func TestSubscriptionEnabledPatchPreservesSecretURLAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	const apiToken = "01234567890123456789012345678901"
+	store, err := storepkg.Open(filepath.Join(t.TempDir(), "foxos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	item := domain.Subscription{ID: "source-toggle", Name: "Private", URL: "https://user:secret@example.com/source?token=fixture", Enabled: true, Interval: 3600}
+	if err := store.SaveSubscription(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := New(&memoryNodes{nodes: map[string]domain.Node{}}, apiToken)
+	audit := &fakeAudit{}
+	mux := http.NewServeMux()
+	app.RegisterSubscriptions(mux, store, store, nil, nil, nil, nil, nil, audit)
+	for attempt := 0; attempt < 2; attempt++ {
+		request := httptest.NewRequest(http.MethodPatch, "/api/v1/subscriptions/source-toggle/enabled", strings.NewReader(`{"enabled":false}`))
+		request.Header.Set("Authorization", "Bearer "+apiToken)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"enabled":false`) || strings.Contains(response.Body.String(), "secret") || strings.Contains(response.Body.String(), "fixture") {
+			t.Fatalf("attempt=%d status=%d body=%s", attempt, response.Code, response.Body.String())
+		}
+	}
+	stored, err := store.Subscription(context.Background(), item.ID)
+	if err != nil || stored.Enabled || stored.URL != item.URL {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+	if len(audit.events) != 2 || audit.events[0].Outcome != domain.AuditStarted || audit.events[1].Outcome != domain.AuditSucceeded {
+		t.Fatalf("audit=%+v", audit.events)
+	}
+}
+
+func TestSubscriptionDeleteRequiresSignedCurrentImpact(t *testing.T) {
+	const apiToken = "01234567890123456789012345678901"
+	store, err := storepkg.Open(filepath.Join(t.TempDir(), "foxos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	item := domain.Subscription{ID: "source-a", Name: "Primary", URL: "https://example.com/source", Enabled: false, Interval: 3600}
+	if err := store.SaveSubscription(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	node := domain.Node{ID: "sub-fixture", Name: "Primary / Node", Type: "vless", Server: "example.com", Port: 443, UUID: "fixture-uuid", SubscriptionID: item.ID}
+	if err := store.ReplaceSubscriptionNodes(context.Background(), item.ID, []domain.Node{node}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := New(&memoryNodes{nodes: map[string]domain.Node{}}, apiToken)
+	signer, _ := confirmation.New([]byte("abcdefghijklmnopqrstuvwxyz012345"))
+	mux := http.NewServeMux()
+	app.RegisterSubscriptions(mux, store, store, nil, signer, nil, store, nil, &fakeAudit{})
+
+	direct := httptest.NewRequest(http.MethodDelete, "/api/v1/subscriptions/source-a", nil)
+	direct.Header.Set("Authorization", "Bearer "+apiToken)
+	directResponse := httptest.NewRecorder()
+	mux.ServeHTTP(directResponse, direct)
+	if directResponse.Code != http.StatusConflict {
+		t.Fatalf("direct delete status=%d", directResponse.Code)
+	}
+	planRequest := httptest.NewRequest(http.MethodPost, "/api/v1/subscriptions/source-a/delete/plan", strings.NewReader(`{"strategy":"cascade"}`))
+	planRequest.Header.Set("Authorization", "Bearer "+apiToken)
+	planResponse := httptest.NewRecorder()
+	mux.ServeHTTP(planResponse, planRequest)
+	var plan struct {
+		ConfirmationToken string `json:"confirmationToken"`
+	}
+	if planResponse.Code != http.StatusOK || json.Unmarshal(planResponse.Body.Bytes(), &plan) != nil {
+		t.Fatalf("status=%d body=%s", planResponse.Code, planResponse.Body.String())
+	}
+	deleteBody, _ := json.Marshal(map[string]string{"confirmationToken": plan.ConfirmationToken, "strategy": "cascade"})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/subscriptions/source-a/delete", strings.NewReader(string(deleteBody)))
+	request.Header.Set("Authorization", "Bearer "+apiToken)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if _, err := store.Subscription(context.Background(), item.ID); !errors.Is(err, storepkg.ErrNotFound) {
+		t.Fatalf("subscription err=%v", err)
+	}
+}
+
+func TestSubscriptionDeleteDetachPreservesNodesAndRejectsStrategySwap(t *testing.T) {
+	t.Parallel()
+	const apiToken = "01234567890123456789012345678901"
+	store, err := storepkg.Open(filepath.Join(t.TempDir(), "foxos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	item := domain.Subscription{ID: "source-detach", Name: "Primary", URL: "https://example.com/source", Enabled: false, Interval: 3600}
+	node := domain.Node{ID: "sub-detach", Name: "Primary / Node", Type: "vless", Server: "example.com", Port: 443, UUID: "fixture-uuid", SubscriptionID: item.ID}
+	if err := store.SaveSubscription(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSubscriptionNodes(context.Background(), item.ID, []domain.Node{node}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveGroup(context.Background(), domain.Group{ID: "group-a", Name: "Referenced", Type: "select", NodeIDs: []string{node.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := New(&memoryNodes{nodes: map[string]domain.Node{}}, apiToken)
+	signer, _ := confirmation.New([]byte("abcdefghijklmnopqrstuvwxyz012345"))
+	mux := http.NewServeMux()
+	app.RegisterSubscriptions(mux, store, store, nil, signer, nil, store, nil, &fakeAudit{})
+	planRequest := httptest.NewRequest(http.MethodPost, "/api/v1/subscriptions/source-detach/delete/plan", strings.NewReader(`{"strategy":"detach"}`))
+	planRequest.Header.Set("Authorization", "Bearer "+apiToken)
+	planResponse := httptest.NewRecorder()
+	mux.ServeHTTP(planResponse, planRequest)
+	var plan struct {
+		ConfirmationToken string `json:"confirmationToken"`
+	}
+	if planResponse.Code != http.StatusOK || json.Unmarshal(planResponse.Body.Bytes(), &plan) != nil {
+		t.Fatalf("plan status=%d body=%s", planResponse.Code, planResponse.Body.String())
+	}
+	swapBody, _ := json.Marshal(map[string]string{"confirmationToken": plan.ConfirmationToken, "strategy": "cascade"})
+	swapRequest := httptest.NewRequest(http.MethodPost, "/api/v1/subscriptions/source-detach/delete", strings.NewReader(string(swapBody)))
+	swapRequest.Header.Set("Authorization", "Bearer "+apiToken)
+	swapResponse := httptest.NewRecorder()
+	mux.ServeHTTP(swapResponse, swapRequest)
+	if swapResponse.Code != http.StatusConflict {
+		t.Fatalf("strategy swap status=%d body=%s", swapResponse.Code, swapResponse.Body.String())
+	}
+	detachBody, _ := json.Marshal(map[string]string{"confirmationToken": plan.ConfirmationToken, "strategy": "detach"})
+	detachRequest := httptest.NewRequest(http.MethodPost, "/api/v1/subscriptions/source-detach/delete", strings.NewReader(string(detachBody)))
+	detachRequest.Header.Set("Authorization", "Bearer "+apiToken)
+	detachResponse := httptest.NewRecorder()
+	mux.ServeHTTP(detachResponse, detachRequest)
+	if detachResponse.Code != http.StatusOK {
+		t.Fatalf("detach status=%d body=%s", detachResponse.Code, detachResponse.Body.String())
+	}
+	stored, err := store.Node(context.Background(), node.ID)
+	if err != nil || stored.SubscriptionID != "" {
+		t.Fatalf("node=%+v err=%v", stored, err)
+	}
+}

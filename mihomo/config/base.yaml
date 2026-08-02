@@ -1,0 +1,27 @@
+# Trusted FoxOS Mihomo baseline. FoxOS structurally merges only its managed
+# draft, node, group and device-rule fields into this document.
+mixed-port: 7890
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: warning
+ipv6: false
+unified-delay: true
+external-controller: 0.0.0.0:9090
+external-ui: ui
+secret: ""
+
+# Transparent interception remains disabled until a separately verified data
+# plane is present. A marked route to this container is not sufficient proof.
+tun:
+  enable: false
+
+proxies: []
+proxy-groups:
+  - name: FoxOS-Default
+    type: select
+    proxies:
+      - DIRECT
+
+rules:
+  - MATCH,DIRECT

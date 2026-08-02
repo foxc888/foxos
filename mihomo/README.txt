@@ -107,7 +107,7 @@ GeoSite 更新时间: 2026-06-08 21:45:35
   用法：将脚本上传至目标 VPS 并赋予执行权限，然后运行 `bash install_hy2.sh` 即按提示完成安装。
 
 具体每种协议的完整图文教程，请前往我们的教学网站查看：
-http://ros.wallentv.com:8888
+   请使用 FoxOS 仓库文档中的本地部署说明。
 
 ========================================
 如何确定设备架构
@@ -145,8 +145,7 @@ Docker 环境:
 技术支持与教程
 ========================================
 
-配套的完整图文教程，请访问：
-http://ros.wallentv.com:8888
+配套说明请以 FoxOS 仓库文档为准。
 
 项目地址: https://github.com/MetaCubeX/mihomo
 UI 项目: https://github.com/MetaCubeX/metacubexd
