@@ -350,6 +350,7 @@ jobs:
             if test -s "${RUNNER_TEMP}/foxos-production-ca.pem" && curl --noproxy '*' --fail --silent --show-error --connect-timeout 1 \
               --resolve foxos.home.arpa:18443:127.0.0.1 \
               --cacert "${RUNNER_TEMP}/foxos-production-ca.pem" \
+              --header 'Host: foxos.home.arpa' \
               https://foxos.home.arpa:18443/api/v1/health/live >/dev/null 2>&1; then
               break
             fi
@@ -358,10 +359,12 @@ jobs:
           curl --noproxy '*' --fail --silent --show-error \
             --resolve foxos.home.arpa:18443:127.0.0.1 \
             --cacert "${RUNNER_TEMP}/foxos-production-ca.pem" \
+            --header 'Host: foxos.home.arpa' \
             https://foxos.home.arpa:18443/api/v1/health/live | grep -Fq '"status":"ok"'
           curl --noproxy '*' --fail --silent --show-error \
             --resolve foxos.home.arpa:18443:127.0.0.1 \
             --cacert "${RUNNER_TEMP}/foxos-production-ca.pem" \
+            --header 'Host: foxos.home.arpa' \
             --header "Authorization: Bearer ${api_token}" \
             'https://foxos.home.arpa:18443/api/v1/audit-events?limit=1' >/dev/null
           docker container inspect --format '{{range .Mounts}}{{if eq .Destination "/run/secrets/foxos"}}{{.RW}}{{end}}{{end}}' foxos-production-smoke | grep -Fx false
